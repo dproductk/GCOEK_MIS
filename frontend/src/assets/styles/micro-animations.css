@@ -1,0 +1,450 @@
+/**
+ * GCOEK MIS — Micro-animations system.
+ * Lightweight, dependency-free motion layer on top of EDVANA tokens.
+ *
+ * Principles:
+ * - Subtle & fast (120–320ms), ease-out, no bouncy overshoot.
+ * - Additive only: never overrides layout, only transform/opacity/shadow.
+ * - Respects prefers-reduced-motion.
+ *
+ * Usage:
+ *   <div class="animate-fade-up" style={{ '--reveal-delay': '80ms' }}>…</div>
+ *   <div class="stagger"> <div/> <div/> … </div>
+ *   Or use <Reveal delay={80}>…</Reveal> for scroll-triggered reveals.
+ */
+
+:root {
+  --motion-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --motion-ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+  --motion-fast: 140ms;
+  --motion-base: 220ms;
+  --motion-slow: 340ms;
+}
+
+/* ============================================================
+   Entrance utilities (run once on mount)
+   ============================================================ */
+@keyframes motion-fade-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes motion-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes motion-scale-in {
+  from { opacity: 0; transform: scale(0.97) translateY(6px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes motion-slide-in-right {
+  from { opacity: 0; transform: translateX(14px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.animate-fade-up {
+  animation: motion-fade-up var(--motion-base) var(--motion-ease-out) both;
+  animation-delay: var(--reveal-delay, 0ms);
+}
+
+.animate-fade-in {
+  animation: motion-fade-in var(--motion-base) ease-out both;
+  animation-delay: var(--reveal-delay, 0ms);
+}
+
+.animate-scale-in {
+  animation: motion-scale-in var(--motion-slow) var(--motion-ease-spring) both;
+  animation-delay: var(--reveal-delay, 0ms);
+}
+
+.animate-slide-in {
+  animation: motion-slide-in-right var(--motion-base) var(--motion-ease-out) both;
+  animation-delay: var(--reveal-delay, 0ms);
+}
+
+/* Stagger children: set style={{ '--reveal-delay': `${i * 45}ms` }} or use .stagger */
+.stagger > * {
+  animation: motion-fade-up var(--motion-base) var(--motion-ease-out) both;
+}
+
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 45ms; }
+.stagger > *:nth-child(3) { animation-delay: 90ms; }
+.stagger > *:nth-child(4) { animation-delay: 135ms; }
+.stagger > *:nth-child(5) { animation-delay: 180ms; }
+.stagger > *:nth-child(6) { animation-delay: 225ms; }
+.stagger > *:nth-child(7) { animation-delay: 270ms; }
+.stagger > *:nth-child(8) { animation-delay: 315ms; }
+.stagger > *:nth-child(n+9) { animation-delay: 340ms; }
+
+/* Scroll-triggered reveal (paired with Reveal.jsx) */
+.reveal {
+  opacity: 0;
+  transform: translateY(12px);
+  transition:
+    opacity var(--motion-slow) var(--motion-ease-out),
+    transform var(--motion-slow) var(--motion-ease-out);
+  transition-delay: var(--reveal-delay, 0ms);
+  will-change: opacity, transform;
+}
+
+.reveal.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ============================================================
+   Page transition — applied to routed content.
+   NOTE: fill mode must stay `backwards` (never `both`): retaining the
+   `to` keyframe's `transform: translateY(0)` would make this wrapper
+   the containing block for `position: fixed` descendants, breaking
+   Modal centering (modal rendered tall/off-screen, footer unreachable).
+   ============================================================ */
+.page-transition {
+  animation: motion-fade-up var(--motion-slow) var(--motion-ease-out) backwards;
+}
+
+.page-transition-fast {
+  animation: motion-fade-in var(--motion-base) ease-out both;
+}
+
+/* ============================================================
+   Pressable + lift — buttons, cards, pills
+   ============================================================ */
+.pressable {
+  transition: transform var(--motion-fast) var(--motion-ease-out),
+    box-shadow var(--motion-base) var(--motion-ease-out),
+    background-color var(--motion-fast) ease,
+    border-color var(--motion-fast) ease;
+}
+
+.pressable:active {
+  transform: scale(0.97);
+}
+
+.edvana-btn,
+.edvana-button,
+.login-submit-action-btn,
+.login-role-pill-btn,
+.app-sidebar-logout-btn,
+.edvana-pagination-btn {
+  transition: transform var(--motion-fast) var(--motion-ease-out),
+    box-shadow var(--motion-base) var(--motion-ease-out),
+    background-color var(--motion-fast) ease,
+    border-color var(--motion-fast) ease;
+}
+
+.edvana-btn:active:not(:disabled),
+.edvana-button:active:not(:disabled),
+.login-submit-action-btn:active:not(:disabled),
+.app-sidebar-logout-btn:active,
+.edvana-pagination-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* Primary buttons: subtle shine sweep on hover */
+.edvana-btn-primary,
+.edvana-button-primary,
+.login-submit-action-btn {
+  position: relative;
+  overflow: hidden;
+}
+
+.edvana-btn-primary::after,
+.edvana-button-primary::after,
+.login-submit-action-btn::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -60%;
+  width: 45%;
+  background: linear-gradient(105deg, transparent, rgba(255, 255, 255, 0.28), transparent);
+  transform: skewX(-18deg);
+  transition: left 0.5s var(--motion-ease-out);
+  pointer-events: none;
+}
+
+.edvana-btn-primary:hover:not(:disabled)::after,
+.edvana-button-primary:hover:not(:disabled)::after,
+.login-submit-action-btn:hover:not(:disabled)::after {
+  left: 130%;
+}
+
+/* Cards: gentle lift on hover (additive — existing shadows preserved) */
+.edvana-card,
+.edvana-stat-card,
+.analytics-metric-box,
+.analytics-summary-card {
+  transition: transform var(--motion-base) var(--motion-ease-out),
+    box-shadow var(--motion-base) var(--motion-ease-out),
+    border-color var(--motion-base) var(--motion-ease-out);
+}
+
+.edvana-card:hover,
+.edvana-stat-card:hover {
+  transform: translateY(-2px);
+}
+
+/* ============================================================
+   Sidebar links — sliding active indicator + icon nudge
+   ============================================================ */
+.app-sidebar-link {
+  position: relative;
+  overflow: hidden;
+}
+
+.app-sidebar-link svg {
+  transition: transform var(--motion-fast) var(--motion-ease-out);
+}
+
+.app-sidebar-link:hover svg {
+  transform: translateX(2px) scale(1.06);
+}
+
+.app-sidebar-link::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 20%;
+  bottom: 20%;
+  width: 3px;
+  border-radius: 9999px;
+  background-color: #2563eb;
+  transform: scaleY(0);
+  transform-origin: center;
+  transition: transform var(--motion-base) var(--motion-ease-spring);
+}
+
+.app-sidebar-link.active::before {
+  transform: scaleY(1);
+}
+
+.app-sidebar-link.active svg {
+  transform: scale(1.08);
+}
+
+/* Sidebar profile avatar: soft entrance pop */
+.app-sidebar-profile-avatar {
+  animation: motion-scale-in var(--motion-slow) var(--motion-ease-spring) both;
+}
+
+/* Status dot: gentle pulse */
+.app-sidebar-profile-status-dot {
+  animation: motion-pulse 2.2s ease-in-out infinite;
+}
+
+@keyframes motion-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.82); }
+}
+
+/* Topbar: icon buttons micro-interaction */
+.app-topbar-toggle,
+.app-topbar-icon-btn {
+  transition: background-color var(--motion-fast) ease, transform var(--motion-fast) var(--motion-ease-out);
+}
+
+.app-topbar-toggle:active,
+.app-topbar-icon-btn:active {
+  transform: scale(0.9);
+}
+
+.app-topbar-toggle svg,
+.app-topbar-icon-btn svg {
+  transition: transform var(--motion-base) var(--motion-ease-out);
+}
+
+.app-topbar-icon-btn:hover svg {
+  transform: rotate(18deg) scale(1.08);
+}
+
+/* ============================================================
+   Banner: seal badge float-in + staggered text
+   ============================================================ */
+.edvana-banner .edvana-banner-title,
+.edvana-banner .edvana-banner-breadcrumb {
+  animation: motion-fade-up var(--motion-base) var(--motion-ease-out) both;
+}
+
+.edvana-banner .edvana-banner-breadcrumb {
+  animation-delay: 0ms;
+}
+
+.edvana-banner .edvana-banner-title {
+  animation-delay: 60ms;
+}
+
+.edvana-banner-seal-badge {
+  animation: motion-scale-in var(--motion-slow) var(--motion-ease-spring) both;
+  animation-delay: 120ms;
+}
+
+/* ============================================================
+   Tables: row entrance + hover affordance
+   ============================================================ */
+.edvana-table tbody tr {
+  animation: motion-fade-in var(--motion-base) ease-out both;
+}
+
+.edvana-table tbody tr:nth-child(1) { animation-delay: 0ms; }
+.edvana-table tbody tr:nth-child(2) { animation-delay: 30ms; }
+.edvana-table tbody tr:nth-child(3) { animation-delay: 60ms; }
+.edvana-table tbody tr:nth-child(4) { animation-delay: 90ms; }
+.edvana-table tbody tr:nth-child(5) { animation-delay: 120ms; }
+.edvana-table tbody tr:nth-child(6) { animation-delay: 150ms; }
+.edvana-table tbody tr:nth-child(7) { animation-delay: 180ms; }
+.edvana-table tbody tr:nth-child(8) { animation-delay: 210ms; }
+.edvana-table tbody tr:nth-child(9) { animation-delay: 240ms; }
+.edvana-table tbody tr:nth-child(10) { animation-delay: 270ms; }
+.edvana-table tbody tr:nth-child(n+11) { animation-delay: 300ms; }
+
+.edvana-table tbody tr {
+  transition: background-color var(--motion-fast) ease, transform var(--motion-fast) var(--motion-ease-out);
+}
+
+/* Tabs: icon lift on hover */
+.edvana-tab,
+.profile-tab-btn {
+  transition: color var(--motion-fast) ease, background-color var(--motion-fast) ease;
+}
+
+.profile-tab-btn:active {
+  transform: scale(0.98);
+}
+
+/* ============================================================
+   Badges: pop-in on mount
+   ============================================================ */
+@keyframes motion-badge-pop {
+  from { opacity: 0; transform: scale(0.88); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.edvana-badge {
+  animation: motion-badge-pop var(--motion-fast) var(--motion-ease-out) both;
+}
+
+/* ============================================================
+   Forms: focus lift + error shake
+   ============================================================ */
+.edvana-input,
+.edvana-select,
+.edvana-textarea,
+.login-text-input {
+  transition: border-color var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease,
+    transform var(--motion-fast) var(--motion-ease-out);
+}
+
+.edvana-input:focus,
+.edvana-select:focus,
+.edvana-textarea:focus,
+.login-text-input:focus {
+  transform: translateY(-1px);
+}
+
+@keyframes motion-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-5px); }
+  40% { transform: translateX(5px); }
+  60% { transform: translateX(-3px); }
+  80% { transform: translateX(3px); }
+}
+
+.login-error-alert,
+.edvana-form-error {
+  animation: motion-shake 0.35s ease-out, motion-fade-in var(--motion-fast) ease-out;
+}
+
+/* ============================================================
+   Loading: skeleton shimmer + spinner polish
+   ============================================================ */
+@keyframes motion-shimmer {
+  from { background-position: -400px 0; }
+  to { background-position: 400px 0; }
+}
+
+.skeleton {
+  border-radius: 6px;
+  background: linear-gradient(90deg, #eef2f7 25%, #e2e8f0 37%, #eef2f7 63%);
+  background-size: 800px 100%;
+  animation: motion-shimmer 1.4s linear infinite;
+  color: transparent !important;
+  pointer-events: none;
+  user-select: none;
+}
+
+.skeleton-text {
+  height: 0.85em;
+  min-width: 60px;
+}
+
+.spinner {
+  animation: spin 0.8s linear infinite;
+  transition: opacity var(--motion-fast) ease;
+}
+
+/* State icons: soft entrance */
+.state-container > div:first-child,
+.state-container > svg:first-child {
+  animation: motion-scale-in var(--motion-slow) var(--motion-ease-spring) both;
+}
+
+/* Login showcase: staggered feature list + floating seal */
+.login-features-list .login-feature-item {
+  animation: motion-fade-up var(--motion-base) var(--motion-ease-out) both;
+}
+
+.login-features-list .login-feature-item:nth-child(1) { animation-delay: 100ms; }
+.login-features-list .login-feature-item:nth-child(2) { animation-delay: 160ms; }
+.login-features-list .login-feature-item:nth-child(3) { animation-delay: 220ms; }
+.login-features-list .login-feature-item:nth-child(4) { animation-delay: 280ms; }
+
+.login-seal-wrapper {
+  animation: motion-seal-float 5s ease-in-out infinite;
+}
+
+@keyframes motion-seal-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+
+/* Role pills: active pop */
+.login-role-pill-btn.active {
+  animation: motion-badge-pop var(--motion-fast) var(--motion-ease-out) both;
+}
+
+/* Modal: keep existing keyframes, just smooth the curve */
+.edvana-modal-overlay {
+  animation: motion-fade-in 0.18s ease-out both;
+}
+
+.edvana-modal {
+  animation: motion-scale-in 0.26s var(--motion-ease-spring) both;
+}
+
+/* ============================================================
+   Accessibility: honor reduced motion
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .reveal {
+    opacity: 1;
+    transform: none;
+  }
+
+  .login-seal-wrapper,
+  .app-sidebar-profile-status-dot {
+    animation: none !important;
+  }
+}
