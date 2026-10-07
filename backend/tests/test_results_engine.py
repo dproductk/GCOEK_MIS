@@ -673,3 +673,57 @@ class TestAssignedTeacherOnlyReview:
         assert res.status_code == status.HTTP_403_FORBIDDEN
 
 
+class TestClassVerificationWorkflow:
+    """Tests for class cards, roster pipeline stages, and per-class verification start."""
+
+    def test_classes_and_roster_workflow(self, api_client, result_setup):
+        from apps.academic_structure.models import Division
+        user_ct = result_setup['user_ct']
+        user_hod = result_setup['user_hod']
+        student = result_setup['student']
+        div = Division.objects.create(
+            department=result_setup['dept'],
+            academic_year=result_setup['year'],
+            semester=result_setup['sem2'],
+            name='A',
+            class_teacher=user_ct,
+        )
+        enr = student.enrollments.filter(is_current=True).first()
+        enr.semester = result_setup['sem2']
+        enr.division = div
+        enr.save(update_fields=['semester', 'division'])
+
+        # 1. CT checks /classes/
+        api_client.force_authenticate(user=user_ct)
+        res_classes = api_client.get('/api/v1/results/eligibility/classes/')
+        assert res_classes.status_code == status.HTTP_200_OK
+        data = res_classes.json()
+        assert len(data) >= 1
+        cls_card = next((c for c in data if c['division_id'] == str(div.id)), None)
+        assert cls_card is not None
+        assert cls_card['total_students'] >= 1
+        assert 'results_filled_count' in cls_card
+        assert 'teacher_approved_count' in cls_card
+        assert 'can_start_verification' in cls_card
+
+        # 2. CT checks /class-roster/
+        res_roster = api_client.get(f'/api/v1/results/eligibility/class-roster/?division_id={div.id}')
+        assert res_roster.status_code == status.HTTP_200_OK
+        roster = res_roster.json()
+        assert roster['total_students'] >= 1
+        stu_entry = next((s for s in roster['students'] if s['student_id'] == str(student.id)), None)
+        assert stu_entry is not None
+        assert 'pipeline_stage' in stu_entry
+        assert 'result_filled' in stu_entry
+        assert 'final_eligible' in stu_entry
+
+        # 3. HOD starts class verification
+        api_client.force_authenticate(user=user_hod)
+        res_start = api_client.post(
+            '/api/v1/results/eligibility/start-class-verification/',
+            {'division_id': str(div.id)}, format='json')
+        assert res_start.status_code == status.HTTP_200_OK
+        assert 'created' in res_start.json()
+
+
+

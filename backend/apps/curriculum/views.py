@@ -104,13 +104,14 @@ class SubjectViewSet(_SysadminWriteMixin, viewsets.ModelViewSet):
             return Response({'detail': 'Subject is used by a scheme and cannot be deleted.'},
                             status=status.HTTP_400_BAD_REQUEST)
         code = obj.code
+        sid = str(obj.id)
         try:
             obj.delete()
         except Exception:
             return Response({'detail': 'Subject is in use and cannot be deleted.'},
                             status=status.HTTP_400_BAD_REQUEST)
         audit_log(request=request, actor=request.user, action=AuditLog.Action.DELETE,
-                  target_type='Subject', target_id='', target_display=code,
+                  target_type='Subject', target_id=sid, target_display=code,
                   reason='Sysadmin curriculum configuration',
                   description=f"Deleted subject {code}.")
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -380,6 +381,41 @@ class SchemeSubjectViewSet(_SchemeChildMixin, viewsets.ModelViewSet):
             return denied
         return super().destroy(request, *args, **kwargs)
 
+    def perform_create(self, serializer):
+        with transaction.atomic():
+            obj = serializer.save()
+            audit_log(request=self.request, actor=self.request.user,
+                      action=AuditLog.Action.CREATE, target_type='SchemeSubject',
+                      target_id=str(obj.id),
+                      target_display=f'{obj.course_code} ({obj.scheme.code if obj.scheme else "?"})',
+                      new_value={'course_code': obj.course_code, 'semester': obj.semester_number},
+                      reason='Sysadmin curriculum configuration',
+                      description=f"Added {obj.course_code} to scheme {obj.scheme.code if obj.scheme else '?'}. ")
+
+    def perform_update(self, serializer):
+        with transaction.atomic():
+            old = serializer.instance
+            old_code = old.course_code if old else ''
+            obj = serializer.save()
+            audit_log(request=self.request, actor=self.request.user,
+                      action=AuditLog.Action.UPDATE, target_type='SchemeSubject',
+                      target_id=str(obj.id),
+                      target_display=f'{obj.course_code}',
+                      old_value={'course_code': old_code},
+                      new_value={'course_code': obj.course_code},
+                      reason='Sysadmin curriculum configuration',
+                      description=f"Updated scheme subject {obj.course_code}.")
+
+    def perform_destroy(self, instance):
+        label = getattr(instance, 'course_code', str(instance.id))
+        sid = str(instance.id)
+        instance.delete()
+        audit_log(request=self.request, actor=self.request.user,
+                  action=AuditLog.Action.DELETE, target_type='SchemeSubject',
+                  target_id=sid, target_display=label,
+                  reason='Sysadmin curriculum configuration',
+                  description=f"Removed scheme subject {label}.")
+
 
 class AssessmentComponentViewSet(_SchemeChildMixin, viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
@@ -415,7 +451,13 @@ class AssessmentComponentViewSet(_SchemeChildMixin, viewsets.ModelViewSet):
                 ser = self.get_serializer(
                     existing, data=request.data, partial=True)
                 ser.is_valid(raise_exception=True)
-                ser.save()
+                updated = ser.save()
+                audit_log(request=request, actor=request.user,
+                          action=AuditLog.Action.UPDATE, target_type='AssessmentComponent',
+                          target_id=str(updated.id),
+                          target_display=f'{updated.component_type}',
+                          reason='Sysadmin curriculum configuration',
+                          description=f"Updated assessment split {updated.component_type} (idempotent re-post).")
                 return Response(ser.data, status=status.HTTP_200_OK)
         return super().create(request, *args, **kwargs)
 
@@ -436,6 +478,35 @@ class AssessmentComponentViewSet(_SchemeChildMixin, viewsets.ModelViewSet):
         if denied:
             return denied
         return super().destroy(request, *args, **kwargs)
+
+    def perform_create(self, serializer):
+        obj = serializer.save()
+        audit_log(request=self.request, actor=self.request.user,
+                  action=AuditLog.Action.CREATE, target_type='AssessmentComponent',
+                  target_id=str(obj.id),
+                  target_display=f'{obj.component_type} ({obj.scheme_subject_id})',
+                  new_value={'component_type': str(obj.component_type)},
+                  reason='Sysadmin curriculum configuration',
+                  description=f"Configured assessment split {obj.component_type}.")
+
+    def perform_update(self, serializer):
+        obj = serializer.save()
+        audit_log(request=self.request, actor=self.request.user,
+                  action=AuditLog.Action.UPDATE, target_type='AssessmentComponent',
+                  target_id=str(obj.id),
+                  target_display=f'{obj.component_type}',
+                  reason='Sysadmin curriculum configuration',
+                  description=f"Updated assessment split {obj.component_type}.")
+
+    def perform_destroy(self, instance):
+        label = str(getattr(instance, 'component_type', instance.id))
+        sid = str(instance.id)
+        instance.delete()
+        audit_log(request=self.request, actor=self.request.user,
+                  action=AuditLog.Action.DELETE, target_type='AssessmentComponent',
+                  target_id=sid, target_display=label,
+                  reason='Sysadmin curriculum configuration',
+                  description=f"Removed assessment split {label}.")
 
 
 class ElectiveGroupViewSet(_SchemeChildMixin, viewsets.ModelViewSet):
@@ -477,6 +548,33 @@ class ElectiveGroupViewSet(_SchemeChildMixin, viewsets.ModelViewSet):
             return denied
         return super().destroy(request, *args, **kwargs)
 
+    def perform_create(self, serializer):
+        obj = serializer.save()
+        audit_log(request=self.request, actor=self.request.user,
+                  action=AuditLog.Action.CREATE, target_type='ElectiveGroup',
+                  target_id=str(obj.id),
+                  target_display=str(obj.id),
+                  reason='Sysadmin curriculum configuration',
+                  description='Created elective group.')
+
+    def perform_update(self, serializer):
+        obj = serializer.save()
+        audit_log(request=self.request, actor=self.request.user,
+                  action=AuditLog.Action.UPDATE, target_type='ElectiveGroup',
+                  target_id=str(obj.id),
+                  target_display=str(obj.id),
+                  reason='Sysadmin curriculum configuration',
+                  description='Updated elective group.')
+
+    def perform_destroy(self, instance):
+        sid = str(instance.id)
+        instance.delete()
+        audit_log(request=self.request, actor=self.request.user,
+                  action=AuditLog.Action.DELETE, target_type='ElectiveGroup',
+                  target_id=sid, target_display=sid,
+                  reason='Sysadmin curriculum configuration',
+                  description='Removed elective group.')
+
 
 class ElectiveOptionViewSet(_SysadminWriteMixin, viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
@@ -511,3 +609,28 @@ class ElectiveOptionViewSet(_SysadminWriteMixin, viewsets.ModelViewSet):
         if denied:
             return denied
         return super().destroy(request, *args, **kwargs)
+
+    def perform_create(self, serializer):
+        obj = serializer.save()
+        audit_log(request=self.request, actor=self.request.user,
+                  action=AuditLog.Action.CREATE, target_type='ElectiveOption',
+                  target_id=str(obj.id), target_display=str(obj.id),
+                  reason='Sysadmin curriculum configuration',
+                  description='Created elective option.')
+
+    def perform_update(self, serializer):
+        obj = serializer.save()
+        audit_log(request=self.request, actor=self.request.user,
+                  action=AuditLog.Action.UPDATE, target_type='ElectiveOption',
+                  target_id=str(obj.id), target_display=str(obj.id),
+                  reason='Sysadmin curriculum configuration',
+                  description='Updated elective option.')
+
+    def perform_destroy(self, instance):
+        sid = str(instance.id)
+        instance.delete()
+        audit_log(request=self.request, actor=self.request.user,
+                  action=AuditLog.Action.DELETE, target_type='ElectiveOption',
+                  target_id=sid, target_display=sid,
+                  reason='Sysadmin curriculum configuration',
+                  description='Removed elective option.')

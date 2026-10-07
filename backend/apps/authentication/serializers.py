@@ -256,6 +256,10 @@ class UserAdminSerializer(serializers.ModelSerializer):
         ]
 
     def get_roles(self, user):
+        if hasattr(user, '_prefetched_objects_cache') and 'role_assignments' in user._prefetched_objects_cache:
+            assignments = [a for a in user.role_assignments.all() if a.status == RoleAssignment.Status.ACTIVE]
+        else:
+            assignments = user.role_assignments.filter(status=RoleAssignment.Status.ACTIVE).select_related('role')
         return [
             {
                 'id': str(a.id),
@@ -266,5 +270,5 @@ class UserAdminSerializer(serializers.ModelSerializer):
                 'division_id': str(a.division_id) if a.division_id else None,
                 'status': a.status,
             }
-            for a in user.role_assignments.filter(status=RoleAssignment.Status.ACTIVE).select_related('role')
+            for a in assignments
         ]

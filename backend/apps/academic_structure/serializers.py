@@ -37,9 +37,15 @@ class DepartmentSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at', 'programs_count', 'divisions_count']
 
     def get_programs_count(self, obj):
+        annotated = getattr(obj, '_programs_count', None)
+        if annotated is not None:
+            return annotated
         return obj.programs.filter(is_active=True).count()
 
     def get_divisions_count(self, obj):
+        annotated = getattr(obj, '_divisions_count', None)
+        if annotated is not None:
+            return annotated
         return obj.divisions.filter(is_active=True).count()
 
 

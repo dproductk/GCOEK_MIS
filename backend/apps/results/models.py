@@ -200,6 +200,13 @@ class EligibilityVerification(BaseModel):
         db_table = 'results_eligibility_verifications'
         ordering = ['department', '-academic_year__start_date', 'student']
         unique_together = ['student', 'academic_year', 'target_semester']
+        indexes = [
+            # Hot filter: HOD/fee-desk queues filter on department +
+            # final_eligible (+ class_teacher_status). Backs
+            # results/views.py eligible_candidates and students fee roster.
+            models.Index(fields=['department', 'final_eligible', 'class_teacher_status'],
+                         name='idx_elig_dept_final_ct'),
+        ]
 
     def __str__(self):
         return f'Eligibility: {self.student.display_name} -> Sem {self.target_semester.number} ({self.calculated_status})'

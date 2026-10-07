@@ -72,7 +72,7 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
                 e.student_id: e
                 for e in StudentEnrollment.objects.filter(
                     student_id__in=page_student_ids, is_current=True
-                ).select_related('department', 'semester', 'division')
+                ).select_related('department', 'semester', 'division', 'lab_batch')
             }
             for s in page:
                 s._current_enrollment = current_enrollments.get(s.id)
@@ -86,7 +86,7 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
             e.student_id: e
             for e in StudentEnrollment.objects.filter(
                 student_id__in=student_ids, is_current=True
-            ).select_related('department', 'semester', 'division')
+            ).select_related('department', 'semester', 'division', 'lab_batch')
         }
         for s in queryset:
             s._current_enrollment = current_enrollments.get(s.id)
@@ -115,13 +115,14 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
         if not user or not user.is_authenticated:
             return Student.objects.none()
 
-        qs = Student.objects.select_related('admission_year').prefetch_related(
+        qs = Student.objects.select_related('admission_year', 'user').prefetch_related(
             'personal_details',
             'guardians',
             'addresses',
             'aadhaar_details',
             'bank_accounts',
             'documents',
+            'eligibility_records',
             'enrollments__department',
             'enrollments__semester',
             'enrollments__division',
@@ -315,6 +316,7 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
                     'date_of_birth', 'gender', 'place_of_birth', 'religion',
                     'nationality', 'mother_tongue', 'domicile_state',
                     'student_email', 'student_mobile', 'blood_group',
+                    'caste', 'marital_status', 'abc_id',
                 }
                 personal, _ = StudentPersonalDetail.objects.get_or_create(student=student)
                 for field_name, value in personal_data.items():

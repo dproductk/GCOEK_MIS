@@ -82,16 +82,54 @@ class AdmissionImportViewSet(viewsets.ReadOnlyModelViewSet):
         if not file_obj:
             return Response({'detail': 'No file uploaded.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # SECURITY.md Sec 5/14: size + type gate before parsing untrusted input.
+        # SECURITY.md Sec 5/14: size + type + content gate before parsing.
+        if not file_obj.size or file_obj.size == 0:
+            return Response(
+                {'detail': 'Uploaded file is empty.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if file_obj.size and file_obj.size > 10 * 1024 * 1024:
             return Response(
                 {'detail': 'File exceeds 10 MB size limit.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        ext = '.' + (file_obj.name.rsplit('.', 1)[-1].lower() if '.' in file_obj.name else '')
+        import os as _os
+        raw_name = file_obj.name or 'upload'
+        safe_name = _os.path.basename(raw_name).strip().replace('\x00', '')
+        if not safe_name or safe_name in ('.', '..') or len(safe_name) > 255:
+            return Response(
+                {'detail': 'Invalid file name.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        ext = '.' + (safe_name.rsplit('.', 1)[-1].lower() if '.' in safe_name else '')
         if ext not in ('.xls', '.xlsx', '.csv'):
             return Response(
                 {'detail': 'Unsupported file type. Upload .xls, .xlsx or .csv only.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Lightweight magic-byte check (no new deps): xlsx=zip PK, xls=OLE,
+        # csv=text without NUL bytes. Full scan (ClamAV) stays out of scope.
+        try:
+            _head = file_obj.read(8)
+            file_obj.seek(0)
+        except Exception:
+            _head = b''
+        if ext == '.xlsx' and not _head.startswith(b'PK'):
+            return Response(
+                {'detail': 'File content does not match .xlsx format.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if ext == '.xls' and not (_head.startswith(b'\xd0\xcf\x11\xe0') or _head.startswith(b'PK') or b'<html' in _head.lower() or b'<table' in _head.lower()):
+            # Legacy .xls may be OLE, newer HTML-export, or zip-based — accept
+            # only if it looks like one of those, reject raw executables.
+            if _head.startswith(b'MZ'):
+                return Response(
+                    {'detail': 'File content does not match .xls format.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        if ext == '.csv' and b'\x00' in _head:
+            return Response(
+                {'detail': 'File content does not match .csv format.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -116,11 +154,31 @@ class AdmissionImportViewSet(viewsets.ReadOnlyModelViewSet):
             file_bytes = file_obj.read()
             batch = stage_admission_file(
                 file_bytes=file_bytes,
-                file_name=file_obj.name,
+                file_name=safe_name,
                 academic_year=academic_year,
                 user=user,
                 uploaded_file=file_obj,
                 admission_type=admission_type,
+            )
+            audit_log(
+                request=request,
+                actor=user,
+                action=AuditLog.Action.IMPORT,
+                target_type='ImportBatch',
+                target_id=str(batch.id),
+                target_display=f'Staged {safe_name}',
+                new_value={
+                    'file_name': batch.file_name,
+                    'file_checksum': batch.file_checksum,
+                    'total_rows': batch.total_rows,
+                    'academic_year': batch.academic_year.code,
+                    'admission_type': str(admission_type),
+                },
+                reason='Government admission list staged for review',
+                description=(
+                    f"Staged '{safe_name}' ({batch.total_rows} rows) for "
+                    f'{batch.academic_year.code} review. Checksum {batch.file_checksum}.'
+                ),
             )
             serializer = ImportBatchDetailSerializer(batch)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -147,24 +205,39 @@ class AdmissionImportViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         try:
+            # Idempotent retry: an already-COMPLETED batch returns as-is with
+            # NO new ingestion audit — auditing it again would falsely claim
+            # students were re-imported.
+            pre = ImportBatch.objects.filter(id=pk).first()
+            already_done = pre is not None and pre.status == ImportBatch.Status.COMPLETED
             batch = commit_import_batch(pk)
 
-            # Audit the commitment
-            audit_log(
-                request=request,
-                actor=user,
-                action=AuditLog.Action.CREATE,
-                target_type='ImportBatch',
-                target_id=str(batch.id),
-                target_display=f'Admission Batch {batch.file_name}',
-                reason='Government admission list ingestion committed',
-                description=f"Imported {batch.imported_rows} student records into core database from '{batch.file_name}'.",
-            )
+            if not already_done:
+                # Audit the commitment (SECURITY.md Sec 14: who imported)
+                audit_log(
+                    request=request,
+                    actor=user,
+                    action=AuditLog.Action.IMPORT,
+                    target_type='ImportBatch',
+                    target_id=str(batch.id),
+                    target_display=f'Admission Batch {batch.file_name}',
+                    new_value={
+                        'file_name': batch.file_name,
+                        'file_checksum': batch.file_checksum,
+                        'imported_rows': batch.imported_rows,
+                        'total_rows': batch.total_rows,
+                    },
+                    reason='Government admission list ingestion committed',
+                    description=f"Imported {batch.imported_rows} student records into core database from '{batch.file_name}'.",
+                )
 
             serializer = ImportBatchSerializer(batch)
             return Response(serializer.data, status=status.HTTP_200_OK)
         except ValueError as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = str(e)
+            if 'already in progress' in msg:
+                return Response({'detail': msg}, status=status.HTTP_409_CONFLICT)
+            return Response({'detail': msg}, status=status.HTTP_400_BAD_REQUEST)
         except Exception:
             return Response(
                 {'detail': 'Commit failed due to an internal error.'},

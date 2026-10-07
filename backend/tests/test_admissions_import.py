@@ -499,6 +499,252 @@ class TestDeleteFailedBatch:
 
 
 @pytest.mark.django_db
+class TestAdmittedYearFromFile:
+    """Batch admission year resolves from the file's year columns (ADR-018)."""
+
+    def _upload_year_csv(self, api_client, setup, year_header, year_value, app_id='EN26999301'):
+        import csv
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        headers = [
+            'Sr. No.', 'Application ID', 'Candidate Name', 'Gender', 'DOB',
+            'Mobile No', 'E-Mail ID', 'Category', 'Course Name', 'Choice Code',
+        ]
+        row = [
+            '1', app_id, 'Admitted Year Candidate', 'Female', '01/01/2008',
+            '9876543240', 'adyear@example.com', 'OPEN',
+            'Computer Science and Engineering', '627024210',
+        ]
+        if year_header:
+            headers.append(year_header)
+            row.append(year_value)
+        writer.writerow(headers)
+        writer.writerow(row)
+        raw = io.BytesIO(buf.getvalue().encode('utf-8'))
+        raw.name = 'FY_AdmittedYear_Test.csv'
+        return api_client.post(
+            '/api/v1/admissions/batches/upload/',
+            {'file': raw, 'academic_year_id': str(setup['year'].id)},
+            format='multipart',
+        )
+
+    @pytest.fixture
+    def year_setup(self, admission_setup):
+        import datetime
+        AcademicYear.objects.create(
+            code='2023-24', name='Academic Year 2023-2024',
+            start_date=datetime.date(2023, 7, 1), end_date=datetime.date(2024, 6, 30),
+            is_current=False,
+        )
+        dept = admission_setup['dept_cs']
+        dept.choice_code = '627024210'
+        dept.save(update_fields=['choice_code'])
+        return admission_setup
+
+    def test_admitted_year_column_resolves_batch_year(self, api_client, year_setup):
+        from apps.admissions.models import ImportRow
+        api_client.force_authenticate(user=year_setup['user_admin_head'])
+        res = self._upload_year_csv(api_client, year_setup, 'Student Admitted Year', '2023-24')
+        assert res.status_code == status.HTTP_201_CREATED, res.data
+        assert res.json()['academic_year_code'] == '2023-24'
+        row = ImportRow.objects.filter(batch_id=res.json()['id']).first()
+        assert row.validation_status == 'VALID', row.validation_errors
+        assert row.normalized_data['admitted_year_source'] == 'file:admitted-year'
+        assert row.normalized_data['admitted_year_raw'] == '2023-24'
+
+    def test_garbage_admitted_year_falls_back_to_current(self, api_client, year_setup):
+        from apps.admissions.models import ImportRow
+        api_client.force_authenticate(user=year_setup['user_admin_head'])
+        res = self._upload_year_csv(api_client, year_setup, 'Student Admitted Year', '2017-24')
+        assert res.status_code == status.HTTP_201_CREATED, res.data
+        assert res.json()['academic_year_code'] == '2026-27'
+        row = ImportRow.objects.filter(batch_id=res.json()['id']).first()
+        assert row.normalized_data['admitted_year_source'] == 'default'
+
+    def test_future_admitted_year_blocked(self, api_client, year_setup):
+        import datetime
+        AcademicYear.objects.create(
+            code='2028-29', name='Academic Year 2028-2029',
+            start_date=datetime.date(2028, 7, 1), end_date=datetime.date(2029, 6, 30),
+            is_current=False,
+        )
+        api_client.force_authenticate(user=year_setup['user_admin_head'])
+        res = self._upload_year_csv(api_client, year_setup, 'Student Admitted Year', '2028-29')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST, res.data
+
+    @pytest.mark.parametrize('raw,expected', [
+        ('2023-24', 2023), ('2023-2024', 2023), ('2023', 2023),
+        ('2025-26', 2025), (' 2026-27 ', 2026),
+        ('2017-24', None), ('ABC', None), ('', None), (None, None),
+        ('24', None), ('2023-24-25', None),
+    ])
+    def test_parse_file_year(self, raw, expected):
+        from apps.admissions.services import _parse_file_year
+        assert _parse_file_year(raw) == expected
+
+    def test_header_only_file_reports_no_rows(self, api_client, year_setup):
+        """A filter that matches nothing leaves headers + zero rows: clear error."""
+        import io
+        import openpyxl
+        api_client.force_authenticate(user=year_setup['user_admin_head'])
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(['PRN', 'Candidate Name', 'Student Admitted Year'])
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        buf.name = 'Filtered_2023.xlsx'
+        res = api_client.post(
+            '/api/v1/admissions/batches/upload/', {'file': buf},
+            format='multipart')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST, res.data
+        assert 'no student rows' in res.data['detail'], res.data
+
+    def test_data_on_second_sheet_is_found(self):
+        """Roster on Sheet2 with empty cover Sheet1 still parses."""
+        import io
+        import openpyxl
+        from apps.admissions.services import extract_table_rows
+        wb = openpyxl.Workbook()
+        wb.active.title = 'Cover'
+        ws2 = wb.create_sheet('Roster')
+        ws2.append(['PRN', 'Candidate Name', 'Category', 'Course Name', 'Gender', 'DOB', 'Mobile No'])
+        ws2.append(['123', 'Test Student', 'OPEN', 'CSE', 'Male', '01/01/2005', '9876543210'])
+        buf = io.BytesIO()
+        wb.save(buf)
+        headers, rows = extract_table_rows(buf.getvalue(), 'Cover.xlsx')
+        assert len(rows) == 1 and rows[0]['PRN'] == '123'
+
+    def test_legacy_ole_xls_parses(self):
+        """Genuine OLE .xls (BIFF) parses via xlrd — previously returned no rows."""
+        import io
+        xlwt = pytest.importorskip('xlwt')
+        from apps.admissions.services import extract_table_rows
+        wb = xlwt.Workbook()
+        ws = wb.add_sheet('Sheet1')
+        for c, h in enumerate(['PRN', 'Candidate Name', 'Category', 'Course Name', 'Gender', 'DOB', 'Mobile No']):
+            ws.write(0, c, h)
+        for c, v in enumerate(['23060361242001', 'OLE Student', 'OPEN', 'CSE', 'Male', '15/08/2005', 9876543210]):
+            ws.write(1, c, v)
+        buf = io.BytesIO()
+        wb.save(buf)
+        payload = buf.getvalue()
+        assert payload[:4] == b'\xd0\xcf\x11\xe0'
+        headers, rows = extract_table_rows(payload, 'Legacy.xls')
+        assert len(rows) == 1, (headers, rows)
+        assert rows[0]['PRN'] == '23060361242001'
+        assert rows[0]['Mobile No'] == '9876543210'
+
+
+@pytest.mark.django_db
+class TestCleanupMisimportedBatch:
+    """Ghost reversal removes onboarding records but keeps evidence + audit."""
+
+    def _ghost_batch(self, api_client, setup):
+        import csv
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([
+            'Sr. No.', 'PRN', 'Candidate Name', 'Gender', 'DOB',
+            'Mobile No', 'E-Mail ID', 'Category', 'Course Name', 'Program Code',
+        ])
+        writer.writerow([
+            '1', '230600000001', 'Ghost Senior', 'Male', '01/01/2004',
+            '9876543250', 'ghost@example.com', 'OPEN',
+            'Computer Science and Engineering', '11242',
+        ])
+        dept = setup['dept_cs']
+        dept.choice_code = '627024210'
+        dept.save(update_fields=['choice_code'])
+        prog = setup['prog_cs']
+        prog.university_program_code = '11242'
+        prog.save(update_fields=['university_program_code'])
+        raw = io.BytesIO(buf.getvalue().encode('utf-8'))
+        raw.name = 'Ghost_Sem7_Test.csv'
+        api_client.force_authenticate(user=setup['user_admin_head'])
+        up = api_client.post(
+            '/api/v1/admissions/batches/upload/',
+            {'file': raw, 'academic_year_id': str(setup['year'].id)},
+            format='multipart',
+        )
+        assert up.status_code == status.HTTP_201_CREATED, up.data
+        commit = api_client.post(f"/api/v1/admissions/batches/{up.json()['id']}/commit/")
+        assert commit.status_code == status.HTTP_200_OK, commit.data
+        return up.json()
+
+    def _sysadmin(self, setup):
+        return User.objects.create_user(
+            username='cleanup_sys', password='Password123!',
+            user_type=User.UserType.SYSADMIN, is_superuser=True,
+        )
+
+    def test_dry_run_removes_nothing(self, api_client, admission_setup):
+        from django.core.management import call_command
+        batch = self._ghost_batch(api_client, admission_setup)
+        ghost = Student.objects.filter(enrollment_no='230600000001').first()
+        assert ghost is not None
+        sysadmin = self._sysadmin(admission_setup)
+        call_command(
+            'cleanup_misimported_batch',
+            batch=[batch['file_name']], actor=sysadmin.username,
+        )
+        assert Student.objects.filter(enrollment_no='230600000001').exists() is True
+
+    def test_execute_removes_ghost_keeps_evidence_and_audits(self, api_client, admission_setup):
+        from django.core.management import call_command
+        from apps.admissions.models import ImportRow
+        from apps.audit.models import AuditLog
+        batch = self._ghost_batch(api_client, admission_setup)
+        ghost = Student.objects.filter(enrollment_no='230600000001').first()
+        username = ghost.user.username
+        sysadmin = self._sysadmin(admission_setup)
+        call_command(
+            'cleanup_misimported_batch',
+            batch=[batch['file_name']], actor=sysadmin.username, execute=True,
+        )
+        assert Student.objects.filter(enrollment_no='230600000001').exists() is False
+        assert User.objects.filter(username=username).exists() is False
+        # Evidence retained.
+        assert ImportRow.objects.filter(batch_id=batch['id']).count() == 1
+        assert ImportBatch.objects.filter(id=batch['id']).exists() is True
+        # Audit trail written.
+        assert AuditLog.objects.filter(
+            target_type='Student', action=AuditLog.Action.DELETE,
+            reason='Ghost onboarding reversal').count() == 1
+        assert AuditLog.objects.filter(
+            target_type='User', action=AuditLog.Action.DELETE,
+            reason='Ghost onboarding reversal').count() == 1
+
+    def test_student_with_results_is_skipped(self, api_client, admission_setup):
+        from django.core.management import call_command
+        from apps.results.models import SemesterResult
+        batch = self._ghost_batch(api_client, admission_setup)
+        ghost = Student.objects.filter(enrollment_no='230600000001').first()
+        SemesterResult.objects.create(
+            student=ghost, academic_year=admission_setup['year'],
+            semester=admission_setup['sem1'],
+        )
+        sysadmin = self._sysadmin(admission_setup)
+        call_command(
+            'cleanup_misimported_batch',
+            batch=[batch['file_name']], actor=sysadmin.username, execute=True,
+        )
+        assert Student.objects.filter(enrollment_no='230600000001').exists() is True
+
+    def test_non_sysadmin_actor_refused(self, api_client, admission_setup):
+        from django.core.management import call_command, CommandError
+        batch = self._ghost_batch(api_client, admission_setup)
+        with pytest.raises(CommandError):
+            call_command(
+                'cleanup_misimported_batch',
+                batch=batch['file_name'],
+                actor=admission_setup['user_regular'].username, execute=True,
+            )
+        assert Student.objects.filter(enrollment_no='230600000001').exists() is True
+
+
+@pytest.mark.django_db
 class TestUploadThrottle:
     """SECURITY.md Sec 10: uploads capped at 10/hr per user."""
 

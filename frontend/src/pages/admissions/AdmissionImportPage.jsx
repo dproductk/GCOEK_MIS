@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import admissionsApi from '../../api/admissionsApi';
+import academicApi from '../../api/academicApi';
 import PageHeader from '../../components/common/PageHeader';
 import StatCard from '../../components/common/StatCard';
 import DataTable from '../../components/common/DataTable';
@@ -17,7 +18,6 @@ import {
   RefreshCw,
   FileCheck,
   Layers,
-  Check,
   AlertCircle,
   Users,
   Trash2,
@@ -28,7 +28,10 @@ export default function AdmissionImportPage() {
 
   const [batches, setBatches] = useState([]);
   const [activeBatch, setActiveBatch] = useState(null);
-  const [admissionType, setAdmissionType] = useState('FIRST_YEAR');
+  // Single unified upload: the entry stream (FY Sem 1 vs DSY Sem 3) is resolved
+  // server-side — explicit admission_type if ever passed, else auto-detect from
+  // DSE/DSY filename markers, else FIRST_YEAR default (admissions/services.py).
+  const [deptNameByCode, setDeptNameByCode] = useState({});
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [committing, setCommitting] = useState(false);
@@ -40,7 +43,24 @@ export default function AdmissionImportPage() {
 
   useEffect(() => {
     loadBatches();
+    loadDepartmentNames();
   }, []);
+
+  // Department code → full branch name for the Branch column. Read-only
+  // academic config (WF-003); failure falls back to showing the raw code.
+  const loadDepartmentNames = async () => {
+    try {
+      const res = await academicApi.getDepartments();
+      const list = res.data.results || res.data || [];
+      const map = {};
+      list.forEach((d) => {
+        if (d.code) map[d.code] = d.name || d.code;
+      });
+      setDeptNameByCode(map);
+    } catch {
+      // Silent fallback: Branch column renders the stored department code.
+    }
+  };
 
   const loadBatches = async () => {
     try {
@@ -65,7 +85,9 @@ export default function AdmissionImportPage() {
 
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('admission_type', admissionType);
+    // Backend resolves the true stream (FY vs DSY auto-detect); the staged
+    // batch badge + history Stream column always show the resolved value.
+    formData.append('admission_type', 'FIRST_YEAR');
 
     try {
       setUploading(true);
@@ -74,7 +96,7 @@ export default function AdmissionImportPage() {
       const res = await admissionsApi.uploadFile(formData);
       setActiveBatch(res.data);
       setRowPage(1);
-      const streamLabel = admissionType === 'DIRECT_SECOND_YEAR' ? 'Direct Second Year (DSY)' : 'First Year (FY)';
+      const streamLabel = res.data.admission_type === 'DIRECT_SECOND_YEAR' ? 'Direct Second Year (DSY)' : 'First Year (FY)';
       setSuccessMsg(`File '${file.name}' staged as ${streamLabel}! Analyzed ${res.data.total_rows} student candidate rows.`);
       loadBatches();
     } catch (err) {
@@ -161,11 +183,11 @@ export default function AdmissionImportPage() {
       render: (r) => <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{r.row_number}</span>,
     },
     {
-      header: 'Application ID',
-      accessor: 'application_id',
+      header: 'PRN',
+      accessor: 'enrollment_no',
       render: (r) => (
-        <span style={{ fontFamily: 'monospace', fontWeight: 600, color: 'var(--edvana-primary)' }}>
-          {r.application_id || '—'}
+        <span style={{ fontFamily: 'monospace', fontWeight: 500, fontSize: '0.8125rem', color: '#334155' }}>
+          {r.enrollment_no || '—'}
         </span>
       ),
     },
@@ -175,9 +197,18 @@ export default function AdmissionImportPage() {
       render: (r) => <span style={{ fontWeight: 600, color: '#0f172a' }}>{r.candidate_name || '—'}</span>,
     },
     {
-      header: 'Allotted Course / Branch',
-      accessor: 'allotted_course',
-      render: (r) => <span style={{ fontSize: '0.85rem', color: '#334155' }}>{r.allotted_course || '—'}</span>,
+      header: 'Branch',
+      render: (r) => {
+        const deptCode = r.normalized_data?.department_code || '';
+        const fullName = deptNameByCode[deptCode] || deptCode;
+        return fullName ? (
+          <span style={{ fontSize: '0.85rem', fontWeight: 400, color: '#475569', maxWidth: '280px', display: 'inline-block' }}>
+            {fullName}
+          </span>
+        ) : (
+          <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>—</span>
+        );
+      },
     },
     {
       header: 'Validation Status',
@@ -353,66 +384,6 @@ export default function AdmissionImportPage() {
             </p>
           </div>
           <div className="edvana-card-body">
-            {/* Admission Stream Selector */}
-            <div style={{ marginBottom: '1.25rem' }}>
-              <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#334155', marginBottom: '0.5rem' }}>
-                Select Admission Entry Stream:
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' }}>
-                <div
-                  onClick={() => !uploading && setAdmissionType('FIRST_YEAR')}
-                  style={{
-                    border: `2px solid ${admissionType === 'FIRST_YEAR' ? '#2563eb' : '#e2e8f0'}`,
-                    backgroundColor: admissionType === 'FIRST_YEAR' ? '#eff6ff' : '#ffffff',
-                    borderRadius: '10px',
-                    padding: '1rem 1.25rem',
-                    cursor: uploading ? 'not-allowed' : 'pointer',
-                    transition: 'all 0.15s ease',
-                    boxShadow: admissionType === 'FIRST_YEAR' ? '0 2px 8px rgba(37,99,235,0.12)' : 'none',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.35rem' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <span style={{ fontSize: '1.25rem' }}>🎓</span>
-                      <span style={{ fontWeight: 700, fontSize: '0.95rem', color: admissionType === 'FIRST_YEAR' ? '#1e40af' : '#1e293b' }}>
-                        First Year (FY) Admissions
-                      </span>
-                    </div>
-                    {admissionType === 'FIRST_YEAR' && <CheckCircle2 size={18} style={{ color: '#2563eb' }} />}
-                  </div>
-                  <p style={{ fontSize: '0.8125rem', color: '#64748b', margin: 0, lineHeight: 1.4 }}>
-                    Standard Centralized Allotment Process (CAP) for regular students entering <strong>Semester 1 (FY)</strong>.
-                  </p>
-                </div>
-
-                <div
-                  onClick={() => !uploading && setAdmissionType('DIRECT_SECOND_YEAR')}
-                  style={{
-                    border: `2px solid ${admissionType === 'DIRECT_SECOND_YEAR' ? '#7e22ce' : '#e2e8f0'}`,
-                    backgroundColor: admissionType === 'DIRECT_SECOND_YEAR' ? '#faf5ff' : '#ffffff',
-                    borderRadius: '10px',
-                    padding: '1rem 1.25rem',
-                    cursor: uploading ? 'not-allowed' : 'pointer',
-                    transition: 'all 0.15s ease',
-                    boxShadow: admissionType === 'DIRECT_SECOND_YEAR' ? '0 2px 8px rgba(126,34,206,0.12)' : 'none',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.35rem' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <span style={{ fontSize: '1.25rem' }}>⚡</span>
-                      <span style={{ fontWeight: 700, fontSize: '0.95rem', color: admissionType === 'DIRECT_SECOND_YEAR' ? '#6b21a8' : '#1e293b' }}>
-                        Direct Second Year (DSY)
-                      </span>
-                    </div>
-                    {admissionType === 'DIRECT_SECOND_YEAR' && <CheckCircle2 size={18} style={{ color: '#7e22ce' }} />}
-                  </div>
-                  <p style={{ fontSize: '0.8125rem', color: '#64748b', margin: 0, lineHeight: 1.4 }}>
-                    Lateral entry allotment for diploma candidates enrolled directly into <strong>Semester 3 (SY)</strong>.
-                  </p>
-                </div>
-              </div>
-            </div>
-
             <div
               style={{
                 border: '2px dashed var(--edvana-border, #cbd5e1)',
@@ -427,15 +398,16 @@ export default function AdmissionImportPage() {
             >
               <FileSpreadsheet
                 size={52}
-                style={{ color: admissionType === 'DIRECT_SECOND_YEAR' ? '#7e22ce' : 'var(--edvana-primary, #1d4ed8)', margin: '0 auto 1rem', display: 'block' }}
+                style={{ color: 'var(--edvana-primary, #1d4ed8)', margin: '0 auto 1rem', display: 'block' }}
               />
               <div style={{ fontWeight: 700, fontSize: '1.05rem', color: '#0f172a' }}>
                 {uploading
-                  ? `Validating & staging ${admissionType === 'DIRECT_SECOND_YEAR' ? 'DSY' : 'FY'} records...`
-                  : `Click or Drag ${admissionType === 'DIRECT_SECOND_YEAR' ? 'DSY Candidate Allotment List' : 'FY Candidate List'} Here`}
+                  ? 'Validating & staging records...'
+                  : 'Click or Drag Candidate List Here'}
               </div>
               <p style={{ color: 'var(--edvana-text-muted, #64748b)', fontSize: '0.875rem', margin: '0.5rem 0 1.25rem' }}>
-                Fully compatible with DTE Maharashtra exports (.xls, .xlsx, .csv) with standardized candidate attributes
+                Fully compatible with DTE Maharashtra exports (.xls, .xlsx, .csv) with standardized candidate attributes.
+                FY and DSY lists are detected automatically.
               </p>
               <input
                 ref={fileInputRef}
@@ -454,11 +426,9 @@ export default function AdmissionImportPage() {
                   alignItems: 'center',
                   gap: '0.5rem',
                   margin: '0 auto',
-                  background: admissionType === 'DIRECT_SECOND_YEAR' ? '#7e22ce' : undefined,
-                  borderColor: admissionType === 'DIRECT_SECOND_YEAR' ? '#7e22ce' : undefined,
                 }}
               >
-                <Upload size={16} /> Select {admissionType === 'DIRECT_SECOND_YEAR' ? 'DSY Candidate File' : 'FY Candidate File'}
+                <Upload size={16} /> Select Candidate File
               </button>
             </div>
           </div>
@@ -517,39 +487,44 @@ export default function AdmissionImportPage() {
               {/* Metric Counters with StatCard */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '1rem', marginBottom: '1.75rem' }}>
                 <StatCard
-                  title="Total Rows"
+                  label="Total Rows"
                   value={activeBatch.total_rows}
-                  subtitle="Parsed from document"
+                  hint="Parsed from document"
                   icon={Layers}
-                  variant="neutral"
+                  color="var(--edvana-brand)"
+                  style={{ borderRadius: '20px' }}
                 />
                 <StatCard
-                  title="Valid Candidates"
+                  label="Valid Candidates"
                   value={activeBatch.valid_rows}
-                  subtitle="Ready for core import"
+                  hint="Ready for core import"
                   icon={CheckCircle2}
-                  variant="success"
+                  color="var(--edvana-success)"
+                  style={{ borderRadius: '20px' }}
                 />
                 <StatCard
-                  title="Invalid Records"
+                  label="Invalid Records"
                   value={activeBatch.invalid_rows}
-                  subtitle="Schema or format issues"
+                  hint="Schema or format issues"
                   icon={XCircle}
-                  variant="danger"
+                  color="var(--edvana-danger)"
+                  style={{ borderRadius: '20px' }}
                 />
                 <StatCard
-                  title="Duplicate Entries"
+                  label="Duplicate Entries"
                   value={activeBatch.duplicate_rows}
-                  subtitle="Already enrolled"
+                  hint="Already enrolled"
                   icon={AlertTriangle}
-                  variant="warning"
+                  color="var(--edvana-warning)"
+                  style={{ borderRadius: '20px' }}
                 />
                 <StatCard
-                  title="Imported to DB"
+                  label="Imported to DB"
                   value={activeBatch.imported_rows}
-                  subtitle="Active student accounts"
+                  hint="Active student accounts"
                   icon={Database}
-                  variant="primary"
+                  color="var(--edvana-info)"
+                  style={{ borderRadius: '20px' }}
                 />
               </div>
 

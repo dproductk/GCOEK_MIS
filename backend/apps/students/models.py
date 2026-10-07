@@ -135,6 +135,9 @@ class StudentPersonalDetail(TimestampedModel):
     student_email = models.EmailField(blank=True, null=True)
     student_mobile = models.CharField(max_length=15, blank=True, default='')
     blood_group = models.CharField(max_length=10, blank=True, default='')
+    caste = models.CharField(max_length=100, blank=True, default='', help_text='Sub-caste e.g. Maratha, Kunbi, Sutar.')
+    marital_status = models.CharField(max_length=20, blank=True, default='Unmarried')
+    abc_id = models.CharField(max_length=50, blank=True, default='', help_text='Academic Bank of Credits ID.')
 
     class Meta:
         db_table = 'student_personal_details'
@@ -404,6 +407,23 @@ class StudentEnrollment(BaseModel):
         db_table = 'student_enrollments'
         ordering = ['-academic_year__start_date', '-semester__number']
         unique_together = ['student', 'academic_year', 'semester']
+        constraints = [
+            # Exactly one current enrollment per student, enforced at the
+            # database level so two concurrent first writes cannot both win
+            # (the save() sibling-lock locks nothing when no sibling exists).
+            models.UniqueConstraint(
+                fields=['student'],
+                condition=models.Q(is_current=True),
+                name='uniq_current_enrollment_per_student',
+            ),
+        ]
+        indexes = [
+            # Hot filters: directory/rollover/HOD queue filter on
+            # is_current + department (+ division). Backs the queries in
+            # students/views.py, results/views.py, academic_structure/views.py.
+            models.Index(fields=['is_current', 'department', 'division'],
+                         name='idx_enr_current_dept_div'),
+        ]
 
     def __str__(self):
         return f'{self.student.display_name} - {self.department.code} Sem {self.semester.number} ({self.academic_year.code})'
@@ -412,6 +432,10 @@ class StudentEnrollment(BaseModel):
         """Ensure only one current enrollment record per student."""
         if self.is_current:
             with transaction.atomic():
+                # Lock sibling rows so concurrent saves can't create two currents.
+                list(StudentEnrollment.objects.select_for_update().filter(
+                    student=self.student, is_current=True
+                ).exclude(id=self.id)[:10])
                 StudentEnrollment.objects.filter(
                     student=self.student, is_current=True
                 ).exclude(id=self.id).update(is_current=False)

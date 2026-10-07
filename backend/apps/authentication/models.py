@@ -134,6 +134,14 @@ class User(AbstractBaseUser, PermissionsMixin):
         """Return a display-friendly name."""
         return self.username
 
+    def get_full_name(self):
+        """Standard Django User method."""
+        return self.username
+
+    def get_short_name(self):
+        """Standard Django User method."""
+        return self.username
+
 
 # ---------------------------------------------------------------------------
 # Role Model

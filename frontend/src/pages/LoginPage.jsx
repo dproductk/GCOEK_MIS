@@ -6,10 +6,10 @@
  * - Top tagline (KNOWLEDGE | INNOVATION | SOCIETY) with active innovation indicator
  * - Bottom footer (ESTD. 1960 — | Transforming Ideas Into a Better Tomorrow)
  * - Left institutional blue showcase with college seal, features list, and bottom motto
- * - Right panel with interactive "Login as" role switcher, inputs, password toggle, and submit
+ * - Right panel with inputs, password toggle, and submit
  * - Robust Vanilla CSS (login.css) eliminating broken uncompiled Tailwind dependencies
  */
-import { useState, useRef } from 'react';
+import { useState } from 'react';
 import { useNavigate, Navigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { 
@@ -24,54 +24,12 @@ export default function LoginPage() {
   const { login, isAuthenticated, loading: authLoading } = useAuth();
   const navigate = useNavigate();
 
-  const [activeRoleIndex, setActiveRoleIndex] = useState(null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-
-  // Role labels only — no credentials in the bundle.
-  const roles = [
-    { label: 'Sysadmin' },
-    { label: 'Admin Head' },
-    { label: 'Accountant' },
-    { label: 'HOD' },
-    { label: 'Class Teacher' },
-    { label: 'Faculty' },
-    { label: 'Student' },
-  ];
-
-  // TEMPORARY dev-only quick login — restores previous one-click behavior
-  // for LOCAL testing only. Vite strips this entire branch from production
-  // builds (import.meta.env.DEV is false after `npm run build`), verified
-  // no password/usernames in dist bundle. TODO: REMOVE before any demo/prod
-  // deploy and rotate all dev passwords.
-  const devQuickCreds = import.meta.env.DEV
-    ? [
-        { username: 'sysadmin', password: 'Password123!' },
-        { username: 'admin_head', password: 'Password123!' },
-        { username: 'accountant', password: 'Password123!' },
-        { username: 'hod_cse', password: 'Password123!' },
-        { username: 'ct_cse_a', password: 'Password123!' },
-        { username: 'faculty_cse1', password: 'Password123!' },
-        { username: 'EN26462534', password: 'Password123!' },
-      ]
-    : [];
-  const passwordInputRef = useRef(null);
-
-  const handleRoleSelect = (index) => {
-    setActiveRoleIndex(index);
-    setError('');
-    if (import.meta.env.DEV) {
-      const creds = devQuickCreds[index];
-      if (creds) {
-        setUsername(creds.username);
-        setPassword(creds.password);
-      }
-    }
-  };
 
   // If already authenticated, redirect to dashboard
   if (authLoading) {
@@ -238,23 +196,6 @@ export default function LoginPage() {
                 </button>
               </div>
 
-              {/* Role hint selector (UX only — does not fill credentials) */}
-              <div className="login-role-selector-card">
-                <div className="login-role-header-label">Login as</div>
-                <div className="login-role-pills-wrap">
-                  {roles.map((role, idx) => (
-                    <button
-                      key={role.label}
-                      type="button"
-                      onClick={() => handleRoleSelect(idx)}
-                      className={`login-role-pill-btn ${activeRoleIndex === idx ? 'active' : ''}`}
-                    >
-                      {role.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
               {error && (
                 <div className="login-error-alert">
                   {error}
@@ -301,7 +242,6 @@ export default function LoginPage() {
                     </div>
                     <input
                       id="login-password"
-                      ref={passwordInputRef}
                       type={showPassword ? 'text' : 'password'}
                       required
                       value={password}

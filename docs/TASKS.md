@@ -152,9 +152,55 @@
 - [x] UI consistency review matching EDVANA design references
 - [x] Frontend production bundle built cleanly with Vite
 
+## Post-Audit Hardening (2026-10-06, no architecture change)
+
+- [x] Role/user/assignment endpoints gated sysadmin-only (+ HOD own-dept CT create); ledger writes fee-desk only
+- [x] `SECRET_KEY` fail-closed + `FIELD_ENCRYPTION_KEY`; Fernet PII encrypt/decrypt (`common/encryption.py`); reveal requires reason, no mocks
+- [x] Receipt `max+1` + retry; single-active row locks; commit locks + no COMPLETED re-commit; upload magic-byte + filename checks
+- [x] Composite indexes `student_enrollments(is_current,department,division)` (migration `students/0007`), `eligibility_verifications(department,final_eligible,class_teacher_status)` (migration `results/0003`); paginated `graduation-pending` + `eligible-candidates` (tests + frontend accept both shapes)
+- [x] Full suite 159/159 green with new migrations applied
+
 ## Phase 16 — Full Testing + Verification
 
 - [x] Complete acceptance testing across all 16 phases (136/136 automated backend tests passing, 100% pass rate)
 - [x] Documentation updated (TASKS.md, BUILD_STATE.md, FILE_MAP.md, DECISIONS.md)
 - [x] Comprehensive walkthrough generated for user inspection
+
+## Phase 18 — Production Audit Hardening (2026-10-07, no architecture change)
+
+- [x] Fee-payment audit complete: `PAYMENT` for offline/online ledger capture, `UPDATE` for initiation failure, duplicate-block, tamper-reject, gateway IP/signature rejections (`finance/services.py`, `finance/views.py`); `new_value` carries receipt/amount/txn refs
+- [x] Academic/role/import audits complete: CT review + HOD endorse (`VERIFY`), scheme children CRUD, program/year/context CRUD, lab-batch delete, role update/delete + HOD revoke auditing, admission upload (`IMPORT`) + commit (`IMPORT`)
+- [x] Audit service hardened: real `actor_role` from scopes, secret redaction (passwords/tokens/Aadhaar/bank), UA truncation, `target_id` preserved everywhere, bulk update/delete blocked at manager level
+- [x] Sysadmin audit API: `date_from/date_to`, `target_id`, extended `search`, `ordering`, `select_related`, CSV `export/` capped 10k (archival only — trail stays append-only per SECURITY.md Sec 12/24)
+- [x] Sysadmin audit UI: full action/target options incl. fee types, date + target-ID + text filters, server pagination with total count, Download CSV, forensic inspector retained
+- [x] Production logging: `LOGGING` console + rotating `logs/django.log` + `logs/audit.log` (no secrets); 168/168 backend tests green, frontend build clean
+
+## Phase 17 — Production Feature: Easebuzz Online Fee Payment for Continuing Students
+
+- [x] Settings & Gateway config (`EASEBUZZ_ENABLED`, `EASEBUZZ_ENV`, `EASEBUZZ_KEY`, `EASEBUZZ_SALT`, `FRONTEND_BASE_URL`)
+- [x] Data Model & Migrations: `allow_online_payment` on `StudentFeeAssessment`, `FeeReceiptCounter` for serialized concurrency-safe receipts, `OnlinePaymentAttempt` state machine, `GatewayRawEvent` immutable event log (`finance.0005_gatewayrawevent_and_more`)
+- [x] Gateway Adapter: `EasebuzzGateway` with SHA-512 cryptographic initiation hash & reverse callback verification, server-to-server transaction status inquiry (`/transaction/v1/retrieve`), test sandbox mock detection
+- [x] Authoritative Payment Application: `apply_gateway_result()`, single-mark lock, permanent atomic `PaymentLedger` generation, non-blocking progression promotion (`check_and_promote_student()`), async email receipt notification
+- [x] Accountant Fee Setting: "Online Payment (Easebuzz Gateway)" toggle card on `CandidateFeeSetPage.jsx`, editable before payment
+- [x] Candidate Ledger & Fee Desk: Top animated sliding pill tab switcher between `Candidate Fee Desk` and `Online Payment Tracker` on `FeeDeskPage.jsx`
+- [x] Accountant Online Payment Tracker: Live monitor table showing candidates with online payment enabled, interactive permission switch, Easebuzz transaction IDs, gateway attempt statuses, and "Verify Bank" reconciliation action
+- [x] Student Fee Portal: Outstanding Fee Assessment card with heads breakdown and "Pay Online via Easebuzz" on `StudentFeeReceiptPage.jsx`
+- [x] Verification & Polling Page: `PaymentStatusPage.jsx` for polling bank callback/webhook, bank verification inquiry, receipt display, and developer mock sandbox checkout
+- [x] Test Suite: 15/15 unit and integration tests passing (`test_finance.py`, `test_online_payment.py`) covering cryptographic hashes, receipt sequence concurrency, idempotency, promotion fail-safe, and accountant tracking
+
+## Ghost Cleanup + File-Derived Admission Year (2026-10-07, owner-directed, ADR-018)
+
+- [x] Reversed 142 ghost fresher records from Sem-7 rosters mis-imported as FY 2026-27 admissions (`CSE_Semester7_26-27.xls` 77 + `M&A_Semester7_26_27.xls` 65) via sysadmin-only `cleanup_misimported_batch` (dry-run default, skip-gates, 428 audit entries; batches + staging rows retained as evidence)
+- [x] Batch admission year now resolves from file (`Student Admitted Year`, then `Academic Year`) with fallback to default; garbage spans rejected; future years still blocked; source recorded in `normalized_data`
+- [x] Tests: file-year resolution/fallback/block + cleanup execute/skip/refusal (`test_admissions_import.py`); full suite 187/187 green
+- [ ] Senior (2023/2024-cohort) onboarding needs its own channel — never upload Sem-7 rosters through admissions; EE/ETC/AIDS Sem-7 files still pending a decision
+## Senior Backfill via Admissions, Even-Sem Landing (owner-directed)
+- [x] Senior DSE rows use the DSE formula outcome (elapsed*2+3+term), not hardcoded Sem 3 — e.g. 2023 DSE in 2024-25 EVEN -> Sem 6; FY -> Sem 4 (`admissions/services.py`, both stage preview and commit)
+- [x] Test: 2023-24 file in 2024-25 EVEN lands FY->Sem 4, DSE->Sem 6 (`test_candidate_onboarding_excel.py::test_senior_2023_cohort_lands_even_sem_via_formula`)
+- [x] Legacy OLE `.xls` parses via xlrd (was accepted by validation but returned no rows); binary workbooks bypass the CSV sniffer; headers-only files report "no student rows"; all sheets scanned (tests: OLE parse, header-only message, second-sheet roster)
+- [ ] Ops runbook pending: create past AcademicYears (2023-24+), set term EVEN, import, HOD class+teacher, students fill results 1..4/1..6 (`ResultHistoryPage` already lists 1..current), initialize->review->endorse, fee mark, promote to Sem 5/7
+- [x] Classes & Divisions rebuilt (`HODDivisionsBatchesPage.jsx`): pending-imports banner+table derived from unconfirmed enrollments (no batch permission change), Create Division modal with intake select (create+finalize in one step), expandable class cards with roster, subject-teacher Set/green-Set+pencil (same `TeachingAssignment` API as dashboard), Add-students merge for later DSE imports (same `assign-students` endpoint). Obsolete sections removed: stat cards, Setup-2-steps bulk auto-create, per-student allocation table (single moves live on HOD Dashboard; lab-batch creation UI removed with it — re-add per-card if practicals need A1/A2 groups)
+- [x] Mounted rebuilt page: `/department/classes` (sidebar Classes & Divisions) now renders `HODDivisionsBatchesPage`; restored single-move + delete-empty-class on cards so nothing was lost. HOD home (`/dashboard`) still shows Department Dashboard stats/overview
+- [x] Design pass per owner screenshots: rounder class cards (18px) and tables (14px); subject teachers moved into a Set-popup table (Subject | Teacher, Set / green Set + pencil) with Class Teacher as its first row; Create popup restyled (Academic Year, Scheme aid, auto Year, Semester, Division, auto Class Code, Class Teacher, Expected Strength, live info box). Scheme/Year/Class-Code stay derived display aids — never persisted (DB ARCH Sec 15)
+- [x] Faculty dashboard simplified to HOD stat-card style (`FacultyDashboardPage.jsx`): real name/designation/department header, 4 cards (subjects, classes, responsibility, department), real allocations table only — removed hero illustration, checklist, and hardcoded CS201/CS202 fallback rows. HOD card label fixed (`N Professors` -> `N Faculty`)
 

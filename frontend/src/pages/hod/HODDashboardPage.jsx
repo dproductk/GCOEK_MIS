@@ -827,7 +827,7 @@ export default function HODDashboardPage() {
 
           <StatCard
             label="Faculty Members"
-            value={`${deptFaculties.length} Professors`}
+            value={`${deptFaculties.length} Faculty`}
             hint="Regular & Research Cadre"
             icon={Users}
             color="var(--edvana-info)"

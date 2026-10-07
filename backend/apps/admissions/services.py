@@ -165,7 +165,7 @@ _PROGRAM_KEYS = (
     'program_code', 'programme_code', 'branch code',
 )
 _COURSE_KEYS = ('course name', 'course', 'branch', 'allotted course')
-_NAME_KEYS = ('candidate name', 'student name', 'name')
+_NAME_KEYS = ('candidate name', 'student name', 'name', 'students full name', 'student full name', 'full name')
 _MOBILE_KEYS = ('mobile no', 'mobile', 'contact', 'mobile number')
 _EMAIL_KEYS = ('e-mail id', 'email id', 'email', 'e-mail')
 _DOB_KEYS = ('dob', 'date of birth')
@@ -173,6 +173,10 @@ _GENDER_KEYS = ('gender', 'sex')
 _CATEGORY_KEYS = ('category', 'reservation category')
 _ADM_DATE_KEYS = ('admission date',)
 _REP_DATE_KEYS = ('reported date',)
+_ADMITTED_YEAR_KEYS = (
+    'student admitted year', 'admitted year', 'admission year', 'year of admission',
+)
+_FILE_ACADEMIC_YEAR_KEYS = ('academic year', 'academic_year', 'acad year')
 
 
 def _lookup(row, *aliases):
@@ -188,8 +192,64 @@ def _lookup(row, *aliases):
 def extract_table_rows(content_bytes, file_name):
     """
     Extract headers and row dicts from Excel/HTML table/CSV.
-    Handles HTML table-formatted .xls, modern .xlsx, and .csv.
+    Handles legacy OLE .xls (xlrd), HTML table-formatted .xls,
+    modern .xlsx (openpyxl), and .csv.
     """
+    _head = (content_bytes or b'')[:8]
+    _is_ole = _head.startswith(b'\xd0\xcf\x11\xe0')
+    _is_zip = _head.startswith(b'PK')
+
+    # 0. Legacy OLE .xls straight to xlrd: binary must never reach the
+    # CSV sniffer below (decoded ZIP/OLE garbage can look like CSV).
+    if _is_ole:
+        try:
+            import xlrd
+            book = xlrd.open_workbook(file_contents=content_bytes)
+            best_headers, best_rows = [], []
+            for sheet in book.sheets():
+                if sheet.nrows == 0:
+                    continue
+                headers = [
+                    str(sheet.cell_value(0, c) or '').strip()
+                    for c in range(sheet.ncols)
+                ]
+                headers = [h for h in headers if h]
+                if not headers:
+                    continue
+                data_rows = []
+                for r in range(1, sheet.nrows):
+                    if all(
+                        sheet.cell_value(r, c) in (None, '')
+                        or str(sheet.cell_value(r, c)).strip() == ''
+                        for c in range(sheet.ncols)
+                    ):
+                        continue
+                    row_dict = {}
+                    for idx, h in enumerate(headers):
+                        if idx >= sheet.ncols:
+                            row_dict[h] = ''
+                            continue
+                        ctype = sheet.cell_type(r, idx)
+                        val = sheet.cell_value(r, idx)
+                        if ctype == xlrd.XL_CELL_DATE:
+                            try:
+                                val = xlrd.xldate_as_datetime(val, book.datemode).date().isoformat()
+                            except Exception:
+                                val = str(val or '').strip()
+                        elif isinstance(val, float) and val.is_integer():
+                            val = str(int(val))
+                        else:
+                            val = str(val or '').strip()
+                        row_dict[h] = val
+                    data_rows.append(row_dict)
+                if len(data_rows) > len(best_rows) or (not best_headers and headers):
+                    best_headers, best_rows = headers, data_rows
+            if best_headers or best_rows:
+                return best_headers, best_rows
+        except Exception:
+            pass
+        return [], []
+
     # 1. Check if HTML table (common for DTE government exports)
     try:
         text_sample = content_bytes[:2048].decode('utf-8', errors='ignore')
@@ -215,32 +275,48 @@ def extract_table_rows(content_bytes, file_name):
     except Exception:
         pass
 
-    # 2. Try CSV
-    try:
-        full_text = content_bytes.decode('utf-8', errors='ignore')
-        reader = csv.DictReader(io.StringIO(full_text))
-        rows = list(reader)
-        if rows and len(reader.fieldnames) > 5:
-            return reader.fieldnames, rows
-    except Exception:
-        pass
+    # 2. Try CSV (text uploads only — never binary workbooks)
+    if not _is_zip:
+        try:
+            full_text = content_bytes.decode('utf-8', errors='ignore')
+            reader = csv.DictReader(io.StringIO(full_text))
+            rows = list(reader)
+            if rows and len(reader.fieldnames) > 5:
+                return reader.fieldnames, rows
+        except Exception:
+            pass
 
-    # 3. Try openpyxl
+    # 3. Try openpyxl (scan every sheet: uploads sometimes open with an
+    # empty cover sheet active while the roster sits in Sheet2).
     try:
         import openpyxl
         wb = openpyxl.load_workbook(io.BytesIO(content_bytes), data_only=True)
-        sheet = wb.active
-        all_rows = list(sheet.iter_rows(values_only=True))
-        if all_rows:
+        best_headers, best_rows = [], []
+        for sheet in wb.worksheets:
+            try:
+                all_rows = list(sheet.iter_rows(values_only=True))
+            except Exception:
+                continue
+            if not all_rows:
+                continue
             headers = [str(h).strip() for h in all_rows[0] if h is not None]
+            if not headers:
+                continue
             data_rows = []
             for r in all_rows[1:]:
+                if r is None or all(v is None or str(v).strip() == '' for v in r):
+                    continue
                 row_dict = {}
                 for idx, h in enumerate(headers):
                     val = r[idx] if idx < len(r) else ''
                     row_dict[h] = str(val or '').strip()
                 data_rows.append(row_dict)
-            return headers, data_rows
+            # Prefer the sheet with the most student rows; keep headers even
+            # when a sheet has none so callers can report "headers, no rows".
+            if len(data_rows) > len(best_rows) or (not best_headers and headers):
+                best_headers, best_rows = headers, data_rows
+        if best_headers or best_rows:
+            return best_headers, best_rows
     except Exception:
         pass
 
@@ -301,6 +377,32 @@ def parse_date_flexible(raw):
             return datetime.datetime.strptime(text, fmt).date()
         except ValueError:
             continue
+    return None
+
+
+def _parse_file_year(raw):
+    """Starting-year int from file text like '2023-24', '2023-2024' or '2023'.
+
+    Returns None for anything else — including wide spans like '2017-24',
+    which indicate unreliable source data rather than a real admission
+    year (a valid academic year spans at most one year boundary).
+    """
+    text = str(raw or '').strip()
+    if not text:
+        return None
+    m = re.match(r'^((?:19|20)\d{2})\s*[-/]\s*(\d{2}|\d{4})$', text)
+    if m:
+        start = int(m.group(1))
+        end_raw = m.group(2)
+        end = int(end_raw) if len(end_raw) == 4 else (start // 100) * 100 + int(end_raw)
+        if end < start:
+            end += 100
+        if 0 <= end - start <= 1 and 2000 <= start <= 2100:
+            return start
+        return None
+    m = re.match(r'^((?:19|20)\d{2})$', text)
+    if m:
+        return int(m.group(1))
     return None
 
 
@@ -380,7 +482,53 @@ def stage_admission_file(file_bytes, file_name, academic_year, user, uploaded_fi
     headers, rows = extract_table_rows(file_bytes, file_name)
 
     if not rows:
+        if headers:
+            raise ValueError(
+                'File %r has headers (%d columns) but no student rows. '
+                'The sheet filter likely removed everything (e.g. filtering '
+                "'Student Admitted Year' for a value the file does not contain) "
+                'or the roster sits on another sheet. Open the file and check '
+                'row count below the header.' % (file_name, len(headers)))
         raise ValueError('Unable to parse rows from file. Ensure it is a valid government candidate list.')
+
+    # Admission year from the file itself ("Student Admitted Year" first,
+    # then "Academic Year"), falling back to the AH-selected/current default.
+    # The file wins only when it parses AND a matching AcademicYear is
+    # configured; future years stay blocked by the guard below. The winning
+    # source is recorded per-row in normalized_data for review.
+    from collections import Counter
+    admitted_votes, academic_votes = Counter(), Counter()
+    for _row in rows:
+        _admitted = _parse_file_year(_lookup(_row, *_ADMITTED_YEAR_KEYS))
+        if _admitted is not None:
+            admitted_votes[_admitted] += 1
+        else:
+            _acad = _parse_file_year(_lookup(_row, *_FILE_ACADEMIC_YEAR_KEYS))
+            if _acad is not None:
+                academic_votes[_acad] += 1
+    _file_year = (
+        admitted_votes.most_common(1)[0][0]
+        if admitted_votes
+        else (academic_votes.most_common(1)[0][0] if academic_votes else None)
+    )
+    _year_source = (
+        'file:admitted-year'
+        if admitted_votes
+        else ('file:academic-year' if academic_votes else 'default')
+    )
+    batch_year = academic_year
+    if _file_year is not None:
+        _configured = None
+        for _ay in AcademicYear.objects.all():
+            try:
+                from apps.students.placement import year_start as _ys
+                if _ys(_ay.code) == _file_year:
+                    _configured = _ay
+                    break
+            except ValueError:
+                continue
+        if _configured is not None:
+            batch_year = _configured
 
     # Auto-detect DSY if not explicitly provided
     if admission_type == ImportBatch.AdmissionType.FIRST_YEAR:
@@ -391,13 +539,13 @@ def stage_admission_file(file_bytes, file_name, academic_year, user, uploaded_fi
     # Block future-dated imports: admission year must not lie after the
     # current academic year.
     from apps.students.placement import FutureAdmissionError, year_start
-    current_year = AcademicYear.objects.filter(is_current=True).first() or academic_year
+    current_year = AcademicYear.objects.filter(is_current=True).first() or batch_year
     try:
-        if year_start(academic_year.code) > year_start(current_year.code):
+        if year_start(batch_year.code) > year_start(current_year.code):
             raise ValueError(
                 'This file belongs to future academic year %s; current year is %s. '
                 'Future admissions cannot be imported yet.' % (
-                    academic_year.code, current_year.code)
+                    batch_year.code, current_year.code)
             )
     except FutureAdmissionError:
         raise
@@ -407,19 +555,29 @@ def stage_admission_file(file_bytes, file_name, academic_year, user, uploaded_fi
     active_ctx = AcademicContext.objects.filter(is_active=True).first()
     current_term = active_ctx.term if active_ctx else 'ODD'
 
-    # Placement suggestion computed once per import (same admission year
-    # for every row). Formula lives in apps.students.placement.
+    # Placement suggestions computed once per import (same admission year
+    # for every row — single-year files per ADR-009/018). Formula lives once
+    # in apps.students.placement and is reused here, never reimplemented.
+    # Both FY and DSE suggestions are computed so mixed FY/DSE rows
+    # (row-level 'Student Admitted Semester == SEMESTER - 3') each get the
+    # correct formula result: senior DSE uses elapsed*2+3, not hardcoded Sem 3.
     from apps.students.placement import DSE, suggest_semester
     batch_adm_type = DSE if admission_type == ImportBatch.AdmissionType.DIRECT_SECOND_YEAR else 'FY'
     try:
         suggested_sem, suggested_year, _placement = suggest_semester(
-            year_start(academic_year.code), batch_adm_type,
+            year_start(batch_year.code), batch_adm_type,
+            year_start(current_year.code), current_term)
+        _dse_sem, _dse_year, _dse_place = suggest_semester(
+            year_start(batch_year.code), DSE,
+            year_start(current_year.code), current_term)
+        _fy_sem, _fy_year, _fy_place = suggest_semester(
+            year_start(batch_year.code), 'FY',
             year_start(current_year.code), current_term)
     except FutureAdmissionError:
         raise ValueError(
             'This file belongs to future academic year %s; current year is %s. '
             'Future admissions cannot be imported yet.' % (
-                academic_year.code, current_year.code)
+                batch_year.code, current_year.code)
         )
 
     # Data-driven department maps (no hard-coded keywords anywhere).
@@ -440,7 +598,7 @@ def stage_admission_file(file_bytes, file_name, academic_year, user, uploaded_fi
             file_name=file_name,
             file_checksum=checksum,
             file_size=len(file_bytes),
-            academic_year=academic_year,
+            academic_year=batch_year,
             admission_type=admission_type,
             status=ImportBatch.Status.VALIDATING,
             total_rows=len(rows),
@@ -527,6 +685,17 @@ def stage_admission_file(file_bytes, file_name, academic_year, user, uploaded_fi
                 else:
                     errors.append('Missing Choice Code / Program Code and course could not be mapped to a department.')
 
+            # Per-row stream: whole-DSE files are all DSE; FY files may still
+            # carry individual 'SEMESTER - 3' rows (lateral entry). Each row
+            # gets its matching formula suggestion (FY vs DSE).
+            _row_adm_sem_raw = _lookup(row, 'student admitted semester', 'admitted semester', 'admission semester')
+            _row_is_dse_preview = (
+                batch_adm_type == DSE
+                or ('3' in (_row_adm_sem_raw or '') or 'III' in (_row_adm_sem_raw or '').upper())
+            )
+            _row_sug_sem = _dse_sem if _row_is_dse_preview else _fy_sem
+            _row_sug_year = _dse_year if _row_is_dse_preview else _fy_year
+
             normalized = {
                 'application_id': app_id,
                 'enrollment_no': enr_no,
@@ -536,13 +705,21 @@ def stage_admission_file(file_bytes, file_name, academic_year, user, uploaded_fi
                 'course': course.strip(),
                 'department_code': dept.code if dept else '',
                 'department_match': match_method,
+                'admitted_year_raw': _lookup(row, *_ADMITTED_YEAR_KEYS) or _lookup(row, *_FILE_ACADEMIC_YEAR_KEYS),
+                'admitted_year_source': _year_source,
                 'mobile': mobile,
                 'email': email,
                 'dob': dob.isoformat() if dob else '',
                 'gender': gender,
                 'category': category,
-                'suggested_semester': suggested_sem,
-                'suggested_year': suggested_year,
+                'admitted_semester': _row_adm_sem_raw,
+                'caste': _lookup(row, 'cast', 'caste', 'sub caste', 'sub-caste'),
+                'marital_status': _lookup(row, 'marital status'),
+                'abc_id': _lookup(row, 'abc id', 'abc_id', 'academic bank of credits id'),
+                'blood_group': _lookup(row, 'blood group', 'blood_group'),
+                'admitted_category': _lookup(row, 'admitted_category', 'admitted category', 'seat type'),
+                'suggested_semester': _row_sug_sem,
+                'suggested_year': _row_sug_year,
                 'board_refs': {
                     'ssc_seat_no': _lookup(row, 'ssc seat no'),
                     'hsc_seat_no': _lookup(row, 'hsc seat no'),
@@ -663,19 +840,29 @@ def commit_import_batch(batch_id):
     transaction; IMPORTED/DUPLICATE/CONFLICT/INVALID rows are never re-created.
     Partial failure → PARTIALLY_COMPLETED with per-row import_error.
     """
-    batch = ImportBatch.objects.get(id=batch_id)
-    allowed = (
-        ImportBatch.Status.VALIDATED,
-        ImportBatch.Status.IMPORTING,
-        ImportBatch.Status.FAILED,
-        ImportBatch.Status.PARTIALLY_COMPLETED,
-        ImportBatch.Status.COMPLETED,
-    )
-    if batch.status not in allowed:
-        raise ValueError(f'Batch cannot be committed from status {batch.status}.')
+    from django.db import transaction as _tx
+    with _tx.atomic():
+        try:
+            batch = ImportBatch.objects.select_for_update().get(id=batch_id)
+        except ImportBatch.DoesNotExist:
+            raise ValueError('Batch not found.')
+        # Idempotent repeat: an already-completed batch returns as-is so a
+        # retried commit never errors and never duplicates students.
+        if batch.status == ImportBatch.Status.COMPLETED:
+            return batch
+        # Fence concurrent workers: only one may hold IMPORTING at a time.
+        if batch.status == ImportBatch.Status.IMPORTING:
+            raise ValueError('Batch import already in progress. Please wait and refresh.')
+        allowed = (
+            ImportBatch.Status.VALIDATED,
+            ImportBatch.Status.FAILED,
+            ImportBatch.Status.PARTIALLY_COMPLETED,
+        )
+        if batch.status not in allowed:
+            raise ValueError(f'Batch cannot be committed from status {batch.status}.')
 
-    batch.status = ImportBatch.Status.IMPORTING
-    batch.save(update_fields=['status'])
+        batch.status = ImportBatch.Status.IMPORTING
+        batch.save(update_fields=['status'])
 
     # Only VALID rows proceed (CONTEXT.md Sec 15.6). IMPORTED rows stay done.
     valid_rows = list(batch.rows.filter(
@@ -691,8 +878,11 @@ def commit_import_batch(batch_id):
         raise ValueError('STUDENT role not configured.')
 
     is_dsy = (batch.admission_type == ImportBatch.AdmissionType.DIRECT_SECOND_YEAR)
-    # Placement from the admission formula (computed once per import).
-    # HOD confirms or corrects it later; landing division stays Div A.
+    # Placement from the admission formula (single source in
+    # apps.students.placement, reused here — never reimplemented).
+    # Both FY and DSE outcomes are computed so senior lateral-entry rows
+    # land on the formula sem (e.g. 2023 DSE in 2024-25 EVEN -> Sem 6),
+    # not hardcoded Sem 3. HOD confirms or corrects it later (Div A landing).
     from apps.students.placement import (
         DSE as _DSE,
         FutureAdmissionError as _FutureError,
@@ -707,10 +897,20 @@ def commit_import_batch(batch_id):
             _ystart(batch.academic_year.code),
             _DSE if is_dsy else 'FY',
             _ystart(_current.code), _term)
+        _fy_no, _, _fy_place = _suggest(
+            _ystart(batch.academic_year.code), 'FY',
+            _ystart(_current.code), _term)
+        _dse_no, _, _dse_place = _suggest(
+            _ystart(batch.academic_year.code), _DSE,
+            _ystart(_current.code), _term)
     except _FutureError:
         raise ValueError('Batch admission year is in the future; cannot commit.')
     if _place == 'GRADUATED':
         _sem_no = 8
+    if _fy_place == 'GRADUATED':
+        _fy_no = 8
+    if _dse_place == 'GRADUATED':
+        _dse_no = 8
     target_sem = (
         Semester.objects.filter(number=_sem_no).first()
         or Semester.objects.filter(number=1).first()
@@ -733,11 +933,13 @@ def commit_import_batch(batch_id):
 
         try:
             with transaction.atomic():
-                if not app_id:
-                    raise ValueError('Missing Application ID at import.')
+                if not app_id and not file_enr:
+                    raise ValueError('Missing Application ID and Enrollment No / PRN at import.')
 
                 # Re-check identity under lock: never create duplicates.
-                existing = Student.objects.filter(application_id=app_id).first()
+                existing = None
+                if app_id:
+                    existing = Student.objects.filter(application_id=app_id).first()
                 if existing is None and file_enr:
                     existing = Student.objects.filter(enrollment_no=file_enr).first()
 
@@ -755,26 +957,33 @@ def commit_import_batch(batch_id):
                         f"Program Code '{norm.get('program_code', '')}'."
                     )
                 prog = programs.get(dept.id) or Program.objects.filter(department=dept).first()
-                div = _get_or_create_division(dept, batch.academic_year, target_sem)
+                # Division is per-row: senior DSE rows land in a different
+                # semester than FY rows, so each gets its own Div A.
+                # (Resolved fully after row_is_dsy is known below; see div fixup.)
+                div = None
 
                 # Sec 13: username = enrollment_no if available else application_id;
                 # initial password = same identifier.
                 login_id = file_enr or app_id
-                # Student.enrollment_no falls back to application_id so the
-                # login identifier is always unique + traceable.
                 enrollment_val = file_enr or app_id
-                existing_enr = Student.objects.filter(
-                    enrollment_no=enrollment_val
-                ).exclude(application_id=app_id).first()
+                app_id_val = app_id or None
+
+                existing_enr_query = Student.objects.filter(enrollment_no=enrollment_val)
+                if app_id:
+                    existing_enr_query = existing_enr_query.exclude(application_id=app_id)
+                existing_enr = existing_enr_query.first()
                 if existing_enr:
                     counter = 1
                     base = enrollment_val
-                    while Student.objects.filter(
-                        enrollment_no=enrollment_val
-                    ).exclude(application_id=app_id).exists():
+                    while True:
+                        q = Student.objects.filter(enrollment_no=enrollment_val)
+                        if app_id:
+                            q = q.exclude(application_id=app_id)
+                        if not q.exists():
+                            break
                         enrollment_val = f'{base}_{counter}'
                         counter += 1
-                    login_id = enrollment_val if file_enr else app_id
+                    login_id = enrollment_val if file_enr else (app_id or enrollment_val)
 
                 if existing is not None:
                     student = existing
@@ -839,6 +1048,17 @@ def commit_import_batch(batch_id):
                     defaults={'status': RoleAssignment.Status.ACTIVE},
                 )
 
+                # Row-level DSY (e.g. Admitted Semester == SEMESTER - 3).
+                # Senior laterals use the DSE formula outcome (elapsed*2+3),
+                # NOT hardcoded Sem 3 — e.g. 2023 DSE in 2024-25 EVEN -> Sem 6.
+                row_admitted_sem = (norm.get('admitted_semester') or _lookup(row.raw_data, 'student admitted semester', 'admitted semester') or '').strip()
+                row_is_dsy = is_dsy or ('3' in row_admitted_sem or 'III' in row_admitted_sem.upper())
+                _row_no = _dse_no if row_is_dsy else _fy_no
+                row_target_sem = (
+                    Semester.objects.filter(number=_row_no).first() or target_sem
+                )
+                div = _get_or_create_division(dept, batch.academic_year, row_target_sem)
+
                 # 2. Student identity (stable internal UUID PK; govt IDs unique cols).
                 name_parts = full_name.split()
                 first_name = name_parts[0] if name_parts else 'Candidate'
@@ -847,16 +1067,16 @@ def commit_import_batch(batch_id):
 
                 student = Student.objects.create(
                     user=user,
-                    application_id=app_id,
+                    application_id=app_id_val,
                     enrollment_no=enrollment_val,
                     first_name=first_name[:100],
                     middle_name=middle_name[:100],
                     last_name=last_name[:100],
                     display_name=full_name[:255],
                     status=Student.Status.ACTIVE,
-                    is_direct_second_year=is_dsy,
+                    is_direct_second_year=row_is_dsy,
                     admission_year=batch.academic_year,
-                    admission_type='DSE' if is_dsy else 'FY',
+                    admission_type='DSE' if row_is_dsy else 'FY',
                 )
 
                 # 3. Personal details (no fabricated defaults).
@@ -869,6 +1089,13 @@ def commit_import_batch(batch_id):
                 gender = norm.get('gender') or 'OTHER'
                 if gender not in ALLOWED_GENDERS:
                     gender = 'OTHER'
+
+                caste_val = (norm.get('caste') or _lookup(row.raw_data, 'cast', 'caste', 'sub caste', 'sub-caste'))[:100]
+                marital_val = (norm.get('marital_status') or _lookup(row.raw_data, 'marital status') or 'Unmarried')[:20]
+                abc_id_val = (norm.get('abc_id') or _lookup(row.raw_data, 'abc id', 'abc_id', 'academic bank of credits id'))[:50]
+                blood_group_val = (norm.get('blood_group') or _lookup(row.raw_data, 'blood group', 'blood_group'))[:10]
+                state_val = (_lookup(row.raw_data, 'student state', 'state') or 'Maharashtra').strip()[:50]
+
                 StudentPersonalDetail.objects.get_or_create(
                     student=student,
                     defaults={
@@ -877,14 +1104,20 @@ def commit_import_batch(batch_id):
                         'religion': (row.raw_data.get('Religion') or '').strip()[:50],
                         'nationality': 'Indian',
                         'mother_tongue': (row.raw_data.get('Mother Tongue') or '').strip()[:50],
-                        'domicile_state': (row.raw_data.get('State') or 'Maharashtra').strip()[:50],
+                        'domicile_state': state_val,
                         'student_email': norm.get('email') or f'{login_id}@gceok.ac.in',
                         'student_mobile': norm.get('mobile') or '',
+                        'blood_group': blood_group_val,
+                        'caste': caste_val,
+                        'marital_status': marital_val,
+                        'abc_id': abc_id_val,
                     },
                 )
 
                 # 4. Guardian (father when provided).
                 father_name = (row.raw_data.get('Father Name') or '').strip()
+                if not father_name and middle_name:
+                    father_name = middle_name
                 if father_name:
                     StudentGuardian.objects.get_or_create(
                         student=student,
@@ -899,18 +1132,25 @@ def commit_import_batch(batch_id):
                     )
 
                 # 5. Permanent address (raw values; no invented city/pincode).
+                city_val = _lookup(row.raw_data, 'student_city/village', 'student city/village', 'city/village', 'village', 'address line 1')
+                taluka_val = _lookup(row.raw_data, 'student taluka', 'taluka')
+                dist_val = _lookup(row.raw_data, 'student district', 'district')
+                st_val = _lookup(row.raw_data, 'student state', 'state') or 'Maharashtra'
+                pin_val = _lookup(row.raw_data, 'student location pincode', 'pincode', 'pin code')
+                addr_line_1 = ', '.join(filter(None, [city_val, taluka_val])) or city_val or 'Address Not Provided'
+
                 StudentAddress.objects.get_or_create(
                     student=student,
                     address_type=StudentAddress.AddressType.PERMANENT,
                     defaults={
-                        'address_line_1': (
-                            row.raw_data.get('Address Line 1') or 'Address Not Provided'
-                        ).strip()[:255],
+                        'address_line_1': addr_line_1[:255],
                         'address_line_2': (row.raw_data.get('Address Line 2') or '').strip()[:255],
                         'address_line_3': (row.raw_data.get('Address Line 3') or '').strip()[:255],
-                        'district': (row.raw_data.get('District') or '').strip()[:100],
-                        'state': (row.raw_data.get('State') or 'Maharashtra').strip()[:100],
-                        'pincode': (row.raw_data.get('Pincode') or '').strip()[:10],
+                        'village': city_val[:100],
+                        'taluka': taluka_val[:100],
+                        'district': dist_val[:100],
+                        'state': st_val[:100],
+                        'pincode': pin_val[:10],
                         'is_current': True,
                     },
                 )
@@ -924,20 +1164,23 @@ def commit_import_batch(batch_id):
                     raw.get('Admission Date') or _lookup(raw, *_ADM_DATE_KEYS))
                 reported_date = parse_date_flexible(
                     raw.get('Reported Date') or _lookup(raw, *_REP_DATE_KEYS))
-                adm_type = 'DIRECT_SECOND_YEAR' if is_dsy else 'CAP'
+                adm_type = 'DIRECT_SECOND_YEAR' if row_is_dsy else 'CAP'
+                adm_app_id = app_id or file_enr or f'ADM_{student.id}'
+                allotted_seat = (norm.get('admitted_category') or _lookup(raw, 'admitted_category', 'admitted category', 'seat type') or (raw.get('Seat Type') or '').strip())
+
                 StudentAdmission.objects.get_or_create(
                     student=student,
                     academic_year=batch.academic_year,
-                    application_id=app_id,
+                    application_id=adm_app_id,
                     defaults={
                         'admission_type': adm_type,
                         'category': (norm.get('category') or '').strip()[:20],
-                        'candidature_type': (raw.get('Candidature Type') or ('Type A' if is_dsy else '')).strip()[:50],
+                        'candidature_type': (raw.get('Candidature Type') or ('Type A' if row_is_dsy else '')).strip()[:50],
                         'institute_code': (raw.get('Institute Code') or '6270').strip()[:20],
                         'choice_code': (norm.get('choice_code') or '').strip()[:50],
                         'program_code': (norm.get('program_code') or '').strip()[:50],
-                        'seat_type': (raw.get('Seat Type') or '').strip()[:50],
-                        'allotted_seat_type': (raw.get('Seat Type') or '').strip()[:50],
+                        'seat_type': (raw.get('Seat Type') or allotted_seat).strip()[:50],
+                        'allotted_seat_type': allotted_seat[:50],
                         'merit_no': merit_no_val,
                         'merit_marks': merit_marks_val,
                         'entrance_percentile': cet_perc_val,
@@ -948,7 +1191,7 @@ def commit_import_batch(batch_id):
                 )
 
                 # 7. Enrollment (target_sem: Sem 3 for DSY, Sem 1 for regular FY; history preserved per enrollment).
-                if target_sem and prog:
+                if row_target_sem and prog:
                     try:
                         from apps.curriculum.services import resolve_applicable_scheme
                         enrollment_scheme = resolve_applicable_scheme(prog, batch.academic_year)
@@ -957,7 +1200,7 @@ def commit_import_batch(batch_id):
                     StudentEnrollment.objects.get_or_create(
                         student=student,
                         academic_year=batch.academic_year,
-                        semester=target_sem,
+                        semester=row_target_sem,
                         defaults={
                             'department': dept,
                             'program': prog,

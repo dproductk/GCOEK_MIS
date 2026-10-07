@@ -101,6 +101,20 @@ export default function FeeAnalyticsPage() {
   const partialCount = ledger.filter(r => r.status === 'PARTIAL').length;
   const pendingCount = ledger.filter(r => r.status === 'PENDING').length;
 
+  // Online payment gateway stats (from backend analytics.online_payment)
+  const online = analytics?.online_payment || {};
+  const onlineEnabledStudents = online.enabled_students || 0;
+  const onlineSuccessCount = online.successful_payments || 0;
+  const onlineSuccessStudents = online.successful_students || 0;
+  const onlineSuccessAmt = online.successful_amount || online.ledger_online_amount || 0;
+  const onlinePendingCount = online.pending_count || 0;
+  const onlinePendingStudents = online.pending_students || 0;
+  const onlinePendingAmt = online.pending_amount || 0;
+  const onlineFailedCount = online.failed_count || 0;
+  const onlineCancelledCount = online.cancelled_count || 0;
+  const onlineExpiredCount = online.expired_count || 0;
+  const onlineTotalAttempts = online.total_attempts || 0;
+
   // 12 metric boxes arranged in two 6-box rows matching the reference dashboard
   const metricBoxesRow1 = [
     {
@@ -177,6 +191,45 @@ export default function FeeAnalyticsPage() {
       label: 'Settled Accounts',
       value: paidCount.toString(),
       subtext: 'Verified',
+    },
+  ];
+
+  const onlineGatewayBoxes = [
+    {
+      id: 'online_enabled',
+      label: 'Online Enabled Students',
+      value: onlineEnabledStudents.toLocaleString('en-IN'),
+      subtext: 'Allowed by desk',
+    },
+    {
+      id: 'online_success',
+      label: 'Successful Online Payments',
+      value: onlineSuccessCount.toLocaleString('en-IN'),
+      subtext: `${onlineSuccessStudents.toLocaleString('en-IN')} students`,
+    },
+    {
+      id: 'online_collected',
+      label: 'Total Online Collected',
+      value: `₹${Number(onlineSuccessAmt).toLocaleString('en-IN', { minimumFractionDigits: 0 })}`,
+      subtext: 'Easebuzz verified',
+    },
+    {
+      id: 'online_pending',
+      label: 'Pending / In-Flight',
+      value: onlinePendingCount.toLocaleString('en-IN'),
+      subtext: `${onlinePendingStudents.toLocaleString('en-IN')} students • ₹${Number(onlinePendingAmt).toLocaleString('en-IN', { minimumFractionDigits: 0 })}`,
+    },
+    {
+      id: 'online_failed',
+      label: 'Failed Attempts',
+      value: onlineFailedCount.toLocaleString('en-IN'),
+      subtext: 'Bank / gateway failed',
+    },
+    {
+      id: 'online_cancelled',
+      label: 'Cancelled / Expired',
+      value: (onlineCancelledCount + onlineExpiredCount).toLocaleString('en-IN'),
+      subtext: `${onlineTotalAttempts.toLocaleString('en-IN')} total attempts`,
     },
   ];
 
@@ -313,6 +366,36 @@ export default function FeeAnalyticsPage() {
           ))}
         </div>
 
+        {/* Online Payment Gateway section */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', margin: '1.75rem 0 0.85rem 0' }}>
+          <Wallet size={16} style={{ color: '#15803d' }} />
+          <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#0f172a', margin: 0 }}>
+            Online Payment Gateway (Easebuzz)
+          </h3>
+          <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#64748b' }}>
+            attempts by status • students • total fees
+          </span>
+        </div>
+        <div className="analytics-metric-grid">
+          {onlineGatewayBoxes.map((box) => (
+            <div
+              key={box.id}
+              className={`analytics-metric-box ${activeCards[box.id] ? 'active' : ''}`}
+              onClick={() => toggleCard(box.id)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleCard(box.id); }}
+            >
+              <div className="metric-label">{box.label}</div>
+              <div className="metric-value-row">
+                <div className="metric-value">{box.value}</div>
+                {box.subtext && <div className="metric-subtext">{box.subtext}</div>}
+              </div>
+              <div className="metric-bottom-bar" />
+            </div>
+          ))}
+        </div>
+
         {/* 3 Summary Cards matching Reference UI */}
         <div className="analytics-summary-grid">
           {/* Card 1: Admission & Collection Lifecycle */}
@@ -359,6 +442,18 @@ export default function FeeAnalyticsPage() {
             <div className="analytics-summary-row">
               <span className="analytics-summary-row-label">Online Gateway</span>
               <span className="analytics-summary-row-val">₹{onlineAmt.toLocaleString('en-IN', { minimumFractionDigits: 0 })}</span>
+            </div>
+            <div className="analytics-summary-row">
+              <span className="analytics-summary-row-label">Online Success ({onlineSuccessStudents} students)</span>
+              <span className="analytics-summary-row-val" style={{ color: '#166534' }}>{onlineSuccessCount} • ₹{Number(onlineSuccessAmt).toLocaleString('en-IN', { minimumFractionDigits: 0 })}</span>
+            </div>
+            <div className="analytics-summary-row">
+              <span className="analytics-summary-row-label">Online Pending ({onlinePendingStudents} students)</span>
+              <span className="analytics-summary-row-val" style={{ color: '#b45309' }}>{onlinePendingCount} • ₹{Number(onlinePendingAmt).toLocaleString('en-IN', { minimumFractionDigits: 0 })}</span>
+            </div>
+            <div className="analytics-summary-row">
+              <span className="analytics-summary-row-label">Online Failed / Cancelled</span>
+              <span className="analytics-summary-row-val">{onlineFailedCount + onlineCancelledCount + onlineExpiredCount}</span>
             </div>
             <div className="analytics-summary-row">
               <span className="analytics-summary-row-label">Demand Draft (DD)</span>

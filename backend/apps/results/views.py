@@ -94,7 +94,14 @@ class SemesterResultViewSet(viewsets.ReadOnlyModelViewSet):
                                  student__enrollments__is_current=True)
         else:
             filtered = SemesterResult.objects.none()
-        serializer = self.get_serializer(filtered.distinct().order_by('student__display_name'), many=True)
+        qs = filtered.distinct().order_by('student__display_name')
+        # Paginate: graduation queue grows with every Sem-8 batch (Rule 22).
+        # Contract-safe: tests and frontend accept paginated or list shape.
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(qs, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='confirm-graduation')
@@ -161,6 +168,51 @@ class SemesterResultViewSet(viewsets.ReadOnlyModelViewSet):
         if not semester_num:
             return Response({'detail': 'semester_number is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        try:
+            semester_num_int = int(semester_num)
+        except (TypeError, ValueError):
+            return Response({'detail': 'semester_number must be an integer.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Server-side enforcement of the even-semester upload window:
+        # a student self-submission for Sem 2/4/6 in an assigned division is
+        # only allowed after HOD/Class Teacher opened verification (EV row
+        # exists). Staff bypass for corrections; existing results allow edits;
+        # students without a division fall through (legacy, preserves tests).
+        if semester_num_int in (2, 4, 6) and student is not None:
+            is_staff_actor = bool(
+                scopes.get('is_system_wide')
+                or request.user.is_superuser
+                or any(r in scopes.get('roles', []) for r in ('ADMIN_HEAD', 'HOD', 'CLASS_TEACHER', 'FACULTY'))
+            )
+            if not is_staff_actor:
+                is_self_submit = (
+                    getattr(student, 'user_id', None) == request.user.id
+                    or student_id is None
+                )
+                if is_self_submit:
+                    already_has_result = SemesterResult.objects.filter(
+                        student=student, semester__number=semester_num_int,
+                    ).exists()
+                    if not already_has_result:
+                        enr = student.enrollments.filter(is_current=True).select_related('division', 'division__semester').first()
+                        div = getattr(enr, 'division', None) if enr else None
+                        div_sem_num = getattr(getattr(div, 'semester', None), 'number', None) if div else None
+                        if div is not None and div_sem_num in (2, 4, 6):
+                            from apps.academic_structure.models import Semester as _Sem
+                            _target = _Sem.objects.filter(number=semester_num_int + 1).first()
+                            _ev_exists = False
+                            if _target is not None and enr is not None:
+                                _ev_exists = EligibilityVerification.objects.filter(
+                                    student=student,
+                                    academic_year=enr.academic_year,
+                                    target_semester=_target,
+                                ).exists()
+                            if not _ev_exists:
+                                return Response(
+                                    {'detail': 'Verification not started for this class. Ask your HOD or Class Teacher to start verification first.'},
+                                    status=status.HTTP_403_FORBIDDEN,
+                                )
+
         exam_session = request.data.get('exam_session', 'Winter 2026')
         seat_no = request.data.get('seat_number', '')
         subjects = request.data.get('subjects', [])
@@ -223,7 +275,11 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
         scopes = get_user_scopes(user)
 
         qs = EligibilityVerification.objects.select_related(
-            'student', 'department', 'academic_year', 'target_semester'
+            'student', 'department', 'academic_year', 'target_semester',
+            'class_teacher', 'hod',
+        ).prefetch_related(
+            'student__semester_results__semester',
+            'student__semester_results__subject_results',
         )
 
         dept_param = self.request.query_params.get('department_id') or self.request.query_params.get('department')
@@ -283,8 +339,366 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
     def eligible_candidates(self, request):
         """Returns only HOD-endorsed candidates (final_eligible=True) for fee processing."""
         qs = self.get_queryset().filter(final_eligible=True)
+        # Paginate: fee roster scales with admissions (Rule 22).
+        # Contract-safe: frontend accepts paginated or list shape.
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
         serializer = self.get_serializer(qs, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='classes')
+    def classes(self, request):
+        """Returns classes (divisions) in caller's scope with verification statistics."""
+        from django.db import models
+        from apps.academic_structure.models import AcademicContext, Division
+        from apps.students.models import StudentEnrollment
+        from apps.results.models import SemesterResult
+
+        scopes = get_user_scopes(request.user)
+        active_ctx = AcademicContext.objects.filter(is_active=True).select_related('academic_year').first()
+        active_term = active_ctx.term if active_ctx else 'EVEN'
+
+        div_qs = Division.objects.filter(is_active=True).select_related('department', 'semester', 'class_teacher', 'academic_year')
+        dept_param = request.query_params.get('department_id') or request.query_params.get('department')
+        if dept_param:
+            div_qs = div_qs.filter(department_id=dept_param)
+
+        if scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']:
+            pass
+        elif 'HOD' in scopes['roles']:
+            div_qs = div_qs.filter(department_id__in=scopes['department_ids'])
+        elif 'CLASS_TEACHER' in scopes['roles']:
+            # Assigned divisions only: explicit division scope OR Division.class_teacher.
+            # Dept-wide fallback removed — unassigned CTs see EmptyState, not the
+            # whole department roster (least-privilege; matches documented scope).
+            from django.db.models import Q as _Q
+            assigned_ids = list(scopes.get('division_ids', []) or [])
+            if assigned_ids:
+                div_qs = div_qs.filter(_Q(id__in=assigned_ids) | _Q(class_teacher_id=request.user.id))
+            else:
+                div_qs = div_qs.filter(class_teacher_id=request.user.id)
+        else:
+            return Response([], status=status.HTTP_200_OK)
+
+        divisions = list(div_qs.order_by('department__name', 'semester__number', 'name'))
+        data = []
+
+        for div in divisions:
+            sem_num = div.semester.number
+            is_year_change = sem_num in [2, 4, 6]
+            target_sem_num = sem_num + 1 if is_year_change else sem_num
+
+            enrollments = list(StudentEnrollment.objects.filter(division=div, is_current=True).values_list('student_id', flat=True))
+            total_students = len(enrollments)
+            if total_students == 0:
+                continue
+
+            results_filled_count = SemesterResult.objects.filter(
+                student_id__in=enrollments,
+                semester=div.semester,
+                is_published=True,
+            ).exclude(result_status=SemesterResult.ResultStatus.NOT_YET_HELD).count()
+
+            ev_qs = EligibilityVerification.objects.filter(
+                student_id__in=enrollments,
+                target_semester__number=target_sem_num,
+            )
+            ev_count = ev_qs.count()
+            teacher_approved_count = ev_qs.filter(class_teacher_status=EligibilityVerification.StageStatus.APPROVED).count()
+            hod_approved_count = ev_qs.filter(hod_status=EligibilityVerification.StageStatus.APPROVED).count()
+            final_eligible_count = ev_qs.filter(final_eligible=True).count()
+            flagged_count = ev_qs.filter(
+                models.Q(class_teacher_status=EligibilityVerification.StageStatus.FLAGGED) |
+                models.Q(hod_status=EligibilityVerification.StageStatus.FLAGGED)
+            ).count()
+
+            can_start = (
+                is_year_change and (
+                    scopes['is_system_wide'] or
+                    'ADMIN_HEAD' in scopes['roles'] or
+                    ('HOD' in scopes['roles'] and div.department_id in scopes['department_ids']) or
+                    ('CLASS_TEACHER' in scopes['roles'] and (
+                        div.class_teacher_id == request.user.id or
+                        str(div.id) in {str(x) for x in scopes.get('division_ids', [])}
+                    ))
+                )
+            )
+
+            year_level_label = {
+                1: 'First Year (FY)',
+                2: 'Second Year (SY)',
+                3: 'Third Year (TY)',
+                4: 'Final Year (B.Tech)',
+            }.get(div.semester.year_level, f'Year {div.semester.year_level}')
+
+            data.append({
+                'division_id': str(div.id),
+                'division_name': div.name,
+                'class_name': f"{year_level_label} - Div {div.name} (Sem {sem_num})",
+                'department_id': str(div.department_id),
+                'department_code': div.department.code,
+                'department_name': div.department.name,
+                'semester_number': sem_num,
+                'semester_name': div.semester.name,
+                'year_level': div.semester.year_level,
+                'year_level_label': year_level_label,
+                'class_teacher_name': div.class_teacher.get_full_name() if div.class_teacher else 'Unassigned',
+                'is_year_change_class': is_year_change,
+                'target_semester_number': target_sem_num,
+                'total_students': total_students,
+                'results_filled_count': results_filled_count,
+                'teacher_approved_count': teacher_approved_count,
+                'hod_approved_count': hod_approved_count,
+                'final_eligible_count': final_eligible_count,
+                'flagged_count': flagged_count,
+                'is_verification_started': ev_count > 0,
+                'can_start_verification': can_start,
+                'active_term': active_term,
+                'academic_year_code': div.academic_year.code if div.academic_year else '',
+            })
+
+        return Response(data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='class-roster')
+    def class_roster(self, request):
+        """Returns student roster for a specific division with pipeline status."""
+        import uuid as _uuid
+        from apps.academic_structure.models import Division, Semester
+        from apps.students.models import StudentEnrollment
+        from apps.results.models import SemesterResult
+
+        division_id = request.query_params.get('division_id')
+        if not division_id:
+            return Response({'detail': 'division_id query parameter is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            _uuid.UUID(str(division_id))
+        except (ValueError, AttributeError, TypeError):
+            return Response({'detail': 'Invalid division_id.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        div = Division.objects.filter(id=division_id).select_related('department', 'semester', 'class_teacher', 'academic_year').first()
+        if not div:
+            return Response({'detail': 'Division not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        scopes = get_user_scopes(request.user)
+        if not (scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']):
+            if 'HOD' in scopes['roles']:
+                if div.department_id not in scopes['department_ids']:
+                    return Response({'detail': 'You do not have access to this department.'}, status=status.HTTP_403_FORBIDDEN)
+            elif 'CLASS_TEACHER' in scopes['roles']:
+                # Assigned teacher only (Division.class_teacher or explicit
+                # division scope). Same-department but unassigned CTs are denied
+                # — roster contains marks/SGPA, so dept fallback would leak PII.
+                _assigned_div_ids = {str(x) for x in scopes.get('division_ids', [])}
+                is_assigned = (div.class_teacher_id == request.user.id or str(div.id) in _assigned_div_ids)
+                if not is_assigned:
+                    return Response({'detail': 'You do not have access to this division.'}, status=status.HTTP_403_FORBIDDEN)
+            else:
+                return Response({'detail': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
+
+        sem_num = div.semester.number
+        is_year_change = sem_num in [2, 4, 6]
+        target_sem_num = sem_num + 1 if is_year_change else sem_num
+
+        enrollments = list(StudentEnrollment.objects.filter(
+            division=div, is_current=True
+        ).select_related('student').order_by('roll_number', 'student__display_name'))
+
+        student_ids = [e.student_id for e in enrollments]
+
+        results_map = {
+            r.student_id: r
+            for r in SemesterResult.objects.filter(
+                student_id__in=student_ids,
+                semester=div.semester,
+                is_published=True,
+            ).prefetch_related('subject_results')
+        }
+
+        target_sem = Semester.objects.filter(number=target_sem_num).first() or div.semester
+        ev_map = {
+            ev.student_id: ev
+            for ev in EligibilityVerification.objects.filter(
+                student_id__in=student_ids,
+                target_semester=target_sem,
+            ).select_related('class_teacher', 'hod')
+        }
+
+        can_teacher_review = (
+            scopes['is_system_wide'] or
+            request.user.is_superuser or
+            ('CLASS_TEACHER' in scopes['roles'] and (
+                div.class_teacher_id == request.user.id or
+                str(div.id) in {str(x) for x in scopes.get('division_ids', [])}
+            ))
+        )
+        can_hod_endorse = (
+            scopes['is_system_wide'] or
+            'ADMIN_HEAD' in scopes['roles'] or
+            ('HOD' in scopes['roles'] and div.department_id in scopes['department_ids'])
+        )
+
+        students_data = []
+        for enr in enrollments:
+            stu = enr.student
+            sr = results_map.get(stu.id)
+            ev = ev_map.get(stu.id)
+
+            has_result = sr is not None and sr.result_status != SemesterResult.ResultStatus.NOT_YET_HELD
+
+            if not has_result:
+                stage = 'RESULT_PENDING'
+            elif ev and (ev.class_teacher_status == EligibilityVerification.StageStatus.FLAGGED or ev.hod_status == EligibilityVerification.StageStatus.FLAGGED):
+                stage = 'FLAGGED'
+            elif ev and ev.hod_status == EligibilityVerification.StageStatus.REJECTED:
+                stage = 'REJECTED'
+            elif ev and ev.final_eligible:
+                stage = 'ELIGIBLE'
+            elif ev and ev.class_teacher_status == EligibilityVerification.StageStatus.APPROVED:
+                stage = 'HOD_PENDING'
+            elif ev and ev.class_teacher_status == EligibilityVerification.StageStatus.PENDING:
+                stage = 'TEACHER_PENDING'
+            else:
+                stage = 'RESULT_FILLED'
+
+            students_data.append({
+                'student_id': str(stu.id),
+                'student_name': stu.display_name,
+                'enrollment_no': stu.enrollment_no,
+                'roll_number': enr.roll_number or '—',
+                'current_semester': sem_num,
+                'target_semester': target_sem_num,
+                'result_filled': has_result,
+                'semester_result': {
+                    'sgpa': str(sr.sgpa) if sr and sr.sgpa is not None else '—',
+                    'cgpa': str(sr.cgpa) if sr and sr.cgpa is not None else '—',
+                    'backlog_count': sr.backlog_count if sr else 0,
+                    'result_status': sr.result_status if sr else 'NOT_YET_HELD',
+                    'result_status_display': sr.get_result_status_display() if sr else 'Pending',
+                } if sr else None,
+                'eligibility_id': str(ev.id) if ev else None,
+                'calculated_status': ev.calculated_status if ev else None,
+                'calculated_status_display': ev.get_calculated_status_display() if ev else None,
+                'class_teacher_status': ev.class_teacher_status if ev else 'NOT_STARTED',
+                'class_teacher_status_display': ev.get_class_teacher_status_display() if ev else 'Not Started',
+                'class_teacher_remarks': ev.class_teacher_remarks if ev else '',
+                'class_teacher_name': ev.class_teacher.get_full_name() if ev and ev.class_teacher else '',
+                'hod_status': ev.hod_status if ev else 'NOT_STARTED',
+                'hod_status_display': ev.get_hod_status_display() if ev else 'Not Started',
+                'hod_remarks': ev.hod_remarks if ev else '',
+                'hod_name': ev.hod.get_full_name() if ev and ev.hod else '',
+                'final_eligible': ev.final_eligible if ev else False,
+                'is_locked_for_teacher': ev.is_locked_for_teacher if ev else False,
+                'pipeline_stage': stage,
+                'can_review_teacher': can_teacher_review and (ev is not None and not ev.is_locked_for_teacher),
+                'can_endorse_hod': can_hod_endorse and (ev is not None and ev.class_teacher_status == EligibilityVerification.StageStatus.APPROVED),
+            })
+
+        return Response({
+            'division_id': str(div.id),
+            'division_name': div.name,
+            'class_name': f"{div.semester.name} - Div {div.name}",
+            'department_code': div.department.code,
+            'department_name': div.department.name,
+            'semester_number': sem_num,
+            'target_semester_number': target_sem_num,
+            'total_students': len(students_data),
+            'can_teacher_review': can_teacher_review,
+            'can_hod_endorse': can_hod_endorse,
+            'students': students_data,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='start-class-verification')
+    def start_class_verification(self, request):
+        """Initializes or opens verification for all students in a specific division."""
+        import uuid as _uuid
+        from django.db import transaction as _transaction
+        from apps.academic_structure.models import Division, Semester
+        from apps.audit.models import AuditLog
+        from apps.audit.services import audit_log
+        from apps.results.services import evaluate_student_eligibility
+        from apps.students.models import StudentEnrollment
+
+        division_id = request.data.get('division_id')
+        if not division_id:
+            return Response({'detail': 'division_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            _uuid.UUID(str(division_id))
+        except (ValueError, AttributeError, TypeError):
+            return Response({'detail': 'Invalid division_id.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        div = Division.objects.filter(id=division_id).select_related('department', 'semester', 'academic_year').first()
+        if not div:
+            return Response({'detail': 'Division not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        scopes = get_user_scopes(request.user)
+        allowed = scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']
+        if not allowed:
+            if 'HOD' in scopes['roles'] and div.department_id in scopes['department_ids']:
+                allowed = True
+            elif 'CLASS_TEACHER' in scopes['roles'] and (
+                div.class_teacher_id == request.user.id or str(div.id) in {str(x) for x in scopes.get('division_ids', [])}
+            ):
+                allowed = True
+
+        if not allowed:
+            return Response({'detail': 'Only HOD, Class Teacher, or Admin can start verification.'}, status=status.HTTP_403_FORBIDDEN)
+
+        sem_num = div.semester.number
+        # Only year-change classes (Sem 2/4/6 → targets 3/5/7) have a verification
+        # cycle. Matches classes() target formula; Sem 8 uses graduation queue.
+        if sem_num not in (2, 4, 6):
+            return Response(
+                {'detail': 'Verification can only be started for year-change classes (Sem 2, 4, 6).'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        target_sem_num = sem_num + 1
+        # Semester.number is unique (academic_structure/models.py), so a plain
+        # number lookup is authoritative — no academic-year scoping needed.
+        target_sem = Semester.objects.filter(number=target_sem_num).first()
+        if target_sem is None:
+            return Response({'detail': 'Target semester not configured.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        enrollments = list(StudentEnrollment.objects.filter(
+            division=div, is_current=True
+        ).select_related('student', 'academic_year'))
+
+        with _transaction.atomic():
+            created = 0
+            for enr in enrollments:
+                exists = EligibilityVerification.objects.filter(
+                    student=enr.student,
+                    academic_year=enr.academic_year,
+                    target_semester=target_sem,
+                ).exists()
+                if not exists:
+                    evaluate_student_eligibility(enr.student, target_sem)
+                    created += 1
+
+            is_resync = (created == 0 and len(enrollments) > 0)
+            audit_log(
+                request=request, actor=request.user, action=AuditLog.Action.CREATE,
+                target_type='EligibilityVerification', target_id=str(div.id),
+                target_display=f'{"Re-synced" if is_resync else "Started"} verification for {div.department.code} Sem {sem_num} Div {div.name}',
+                new_value={'division_id': str(div.id), 'created': created, 'total': len(enrollments)},
+                reason='Class verification initiated',
+                description=f"{'Re-synced' if is_resync else 'Initiated'} verification cycle for {div.department.code} Sem {sem_num} Div {div.name} ({created} new rows, {len(enrollments)} total).",
+            )
+
+        detail_msg = (
+            f"Verification already up to date for {div.semester.name} Div {div.name} ({len(enrollments)} in queue)."
+            if created == 0 else
+            f"Verification cycle started for {div.semester.name} Div {div.name}. {created} verifications initialized."
+        )
+        return Response({
+            'detail': detail_msg,
+            'created': created,
+            'total': len(enrollments),
+            'division_id': str(div.id),
+        }, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['post'], url_path='initialize')
     def initialize(self, request):
@@ -340,8 +754,9 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
 
         audit_log(
             request=request, actor=request.user, action=AuditLog.Action.CREATE,
-            target_type='EligibilityVerification', target_id='',
+            target_type='EligibilityVerification', target_id='bulk-init',
             target_display=f'Initialized {created}/{len(enrollments)} verifications',
+            new_value={'created': created, 'in_scope': len(enrollments)},
             reason='Verification queue bootstrap for class/department',
             description=f"Initialized {created} pending eligibility verifications ({len(enrollments)} in scope).",
         )
@@ -387,6 +802,7 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
                 reviewer_user=request.user,
                 status_decision=decision,
                 remarks=remarks,
+                request=request,
             )
             return Response(EligibilityVerificationSerializer(updated_ev).data, status=status.HTTP_200_OK)
         except Exception as e:
@@ -409,6 +825,7 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
                 hod_user=request.user,
                 status_decision=decision,
                 remarks=remarks,
+                request=request,
             )
             return Response(EligibilityVerificationSerializer(updated_ev).data, status=status.HTTP_200_OK)
         except Exception as e:

@@ -11,6 +11,24 @@ from django.db import models
 from apps.common.models import UUIDPrimaryKeyModel
 
 
+class AuditLogQuerySet(models.QuerySet):
+    """Block bulk mutations — audit rows are append-only (SECURITY.md Sec 12)."""
+
+    def update(self, *args, **kwargs):
+        raise ValueError('Audit log records cannot be modified (bulk update blocked).')
+
+    def delete(self, *args, **kwargs):
+        raise ValueError('Audit log records cannot be deleted (bulk delete blocked).')
+
+
+class AuditLogManager(models.Manager):
+    def get_queryset(self):
+        return AuditLogQuerySet(self.model, using=self._db)
+
+    def bulk_update(self, *args, **kwargs):
+        raise ValueError('Audit log records cannot be modified (bulk_update blocked).')
+
+
 class AuditLog(UUIDPrimaryKeyModel):
     """
     Append-only audit log entry.
@@ -127,6 +145,8 @@ class AuditLog(UUIDPrimaryKeyModel):
         db_index=True,
         help_text='Exact time the action was recorded.',
     )
+
+    objects = AuditLogManager()
 
     class Meta:
         db_table = 'audit_logs'

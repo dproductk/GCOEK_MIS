@@ -33,6 +33,9 @@ class StudentPersonalDetailSerializer(serializers.ModelSerializer):
             'student_email',
             'student_mobile',
             'blood_group',
+            'caste',
+            'marital_status',
+            'abc_id',
         ]
 
 
@@ -214,7 +217,11 @@ class StudentListSerializer(serializers.ModelSerializer):
         ]
 
     def get_is_eligible(self, obj):
-        if obj.eligibility_records.filter(final_eligible=True).exists():
+        # Use prefetched in-memory records to eliminate N+1 SQL queries
+        if hasattr(obj, '_prefetched_objects_cache') and 'eligibility_records' in obj._prefetched_objects_cache:
+            if any(r.final_eligible for r in obj.eligibility_records.all()):
+                return True
+        elif obj.eligibility_records.filter(final_eligible=True).exists():
             return True
         # First-year auto-eligibility by admission: FY in Sem 1, or DSE in
         # Sem 3, admitted in the current year — AND seated in a division
@@ -428,8 +435,12 @@ class StudentProfileSerializer(serializers.ModelSerializer):
 
         return {
             'admission_type': adm.admission_type,
+            'admission_year': getattr(adm.academic_year, 'code', '') or getattr(obj.admission_year, 'code', ''),
+            'admission_date': str(adm.admission_date) if adm.admission_date else '',
             'application_id': adm.application_id,
+            'category': adm.category,
             'seat_type': adm.seat_type,
+            'allotted_seat_type': adm.allotted_seat_type or adm.seat_type,
             'merit_no': adm.merit_no,
             'merit_marks': str(adm.merit_marks) if adm.merit_marks is not None else '',
             'entrance_exam_type': adm.entrance_exam_type,

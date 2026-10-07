@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import facultyApi from '../../api/facultyApi';
 import PageHeader from '../../components/common/PageHeader';
+import PasswordChangeForm from '../../components/auth/PasswordChangeForm';
 import {
   User,
   Award,
@@ -16,6 +17,7 @@ import {
   Info,
   ChevronDown,
   ArrowLeft,
+  Lock,
 } from 'lucide-react';
 
 const DAYS = Array.from({ length: 31 }, (_, i) => String(i + 1));
@@ -299,6 +301,17 @@ export default function FacultyProfilePage() {
     { id: 'documents', label: 'Documents', icon: FileText },
   ];
 
+  // Password change is strictly self-service: the backend ChangePasswordView
+  // only ever updates request.user, so expose the Security tab solely on the
+  // viewer's OWN profile (/profile), never on another faculty record
+  // (/faculty/:id) opened from the directory. This one tab covers Faculty,
+  // Class Teacher, HOD, Accountant, Admin Head and Sysadmin, since all of
+  // them render through ProfileDispatcher → FacultyProfilePage.
+  const isOwnProfile = !id;
+  const visibleTabs = isOwnProfile
+    ? [...tabs, { id: 'security', label: 'Security', icon: Lock }]
+    : tabs;
+
   return (
     <>
       <PageHeader
@@ -330,7 +343,7 @@ export default function FacultyProfilePage() {
       <div className="edvana-banner-overlap" style={{ paddingBottom: '3.5rem' }}>
         {/* Continuous Navigation Tabs Bar with bottom gray/blue indicator under each option */}
         <div className="profile-tab-bar">
-          {tabs.map((tab) => {
+          {visibleTabs.map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
             return (
@@ -1706,6 +1719,21 @@ export default function FacultyProfilePage() {
               >
                 Upload Documents
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* Tab 6: Security — update password (same experience as first-login
+            password change; self-service only, covers all non-student roles) */}
+        {activeTab === 'security' && isOwnProfile && (
+          <div style={{ marginTop: '1.25rem', display: 'flex', justifyContent: 'center' }}>
+            <div className="profile-section-card" style={{ width: '100%', maxWidth: '560px' }}>
+              <h2 className="profile-section-title">Update Password</h2>
+              <p style={{ fontSize: '0.8125rem', color: '#64748B', margin: '0 0 1.25rem 0' }}>
+                Choose a strong, unique password for your account. Same security
+                policy as your first-login password setup.
+              </p>
+              <PasswordChangeForm embedded />
             </div>
           </div>
         )}

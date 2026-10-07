@@ -145,10 +145,11 @@ def evaluate_student_eligibility(student, target_semester, user_reviewer=None):
     return eligibility
 
 
-def class_teacher_review_eligibility(eligibility_id, reviewer_user, status_decision, remarks=''):
+def class_teacher_review_eligibility(eligibility_id, reviewer_user, status_decision, remarks='', request=None):
     """
     Class Teacher verifies or flags student eligibility.
     Enforces locking rule: Once confirmed/approved, it is locked unless flagged back by HOD.
+    Audited per SECURITY.md Sec 12/16 (who verified/flagged, old/new state).
     """
     from rest_framework.exceptions import ValidationError
 
@@ -162,6 +163,11 @@ def class_teacher_review_eligibility(eligibility_id, reviewer_user, status_decis
                 'It can only be edited if returned/flagged by the HOD.'
             )
 
+        old_snapshot = {
+            'class_teacher_status': ev.class_teacher_status,
+            'hod_status': ev.hod_status,
+            'final_eligible': ev.final_eligible,
+        }
         ev.class_teacher = reviewer_user
         ev.class_teacher_status = status_decision
         ev.class_teacher_remarks = remarks
@@ -175,18 +181,45 @@ def class_teacher_review_eligibility(eligibility_id, reviewer_user, status_decis
             ev.final_eligible = False
 
         ev.save()
+        from apps.audit.models import AuditLog as _AuditLog
+        from apps.audit.services import audit_log as _audit_log
+        _audit_log(
+            request=request,
+            actor=reviewer_user,
+            action=_AuditLog.Action.VERIFY,
+            target_type='EligibilityVerification',
+            target_id=str(ev.id),
+            target_display=f'{ev.student.display_name} -> Sem {ev.target_semester.number if ev.target_semester else "?"}',
+            old_value=old_snapshot,
+            new_value={
+                'class_teacher_status': ev.class_teacher_status,
+                'hod_status': ev.hod_status,
+                'final_eligible': ev.final_eligible,
+            },
+            reason=str(remarks or 'Class-teacher eligibility review')[:500],
+            description=(
+                f"Class teacher set {ev.student.display_name} to {status_decision} "
+                f"(target Sem {ev.target_semester.number if ev.target_semester else '?'})."
+            ),
+        )
         return ev
 
 
-def hod_endorse_eligibility(eligibility_id, hod_user, status_decision, remarks=''):
+def hod_endorse_eligibility(eligibility_id, hod_user, status_decision, remarks='', request=None):
     """
     HOD final approval of eligibility.
     - If APPROVED and class teacher APPROVED: final_eligible = True (eligible for admission).
     - If FLAGGED: returns candidate to Class Teacher (unlocks the record for teacher re-evaluation).
     - If REJECTED: final_eligible = False.
+    Audited per SECURITY.md Sec 12/16.
     """
     with transaction.atomic():
         ev = EligibilityVerification.objects.select_for_update().get(id=eligibility_id)
+        old_snapshot = {
+            'hod_status': ev.hod_status,
+            'final_eligible': ev.final_eligible,
+            'class_teacher_status': ev.class_teacher_status,
+        }
         ev.hod = hod_user
         ev.hod_status = status_decision
         ev.hod_remarks = remarks
@@ -198,11 +231,32 @@ def hod_endorse_eligibility(eligibility_id, hod_user, status_decision, remarks='
         ):
             ev.final_eligible = True
             from apps.students.services import check_and_promote_student
-            check_and_promote_student(ev.student_id, actor=hod_user)
+            check_and_promote_student(ev.student_id, actor=hod_user, request=request)
         else:
             ev.final_eligible = False
 
         ev.save()
+        from apps.audit.models import AuditLog as _AuditLog
+        from apps.audit.services import audit_log as _audit_log
+        _audit_log(
+            request=request,
+            actor=hod_user,
+            action=_AuditLog.Action.VERIFY,
+            target_type='EligibilityVerification',
+            target_id=str(ev.id),
+            target_display=f'{ev.student.display_name} -> Sem {ev.target_semester.number if ev.target_semester else "?"}',
+            old_value=old_snapshot,
+            new_value={
+                'hod_status': ev.hod_status,
+                'final_eligible': ev.final_eligible,
+                'class_teacher_status': ev.class_teacher_status,
+            },
+            reason=str(remarks or 'HOD eligibility endorsement')[:500],
+            description=(
+                f"HOD set {ev.student.display_name} to {status_decision} "
+                f"(final_eligible={ev.final_eligible})."
+            ),
+        )
         return ev
 
 
@@ -299,7 +353,7 @@ def submit_semester_marks(student, semester_number, exam_session, subjects_data,
                     'grade_letter': old_row.grade_letter,
                 }
 
-            SubjectResult.objects.update_or_create(
+            row, _ = SubjectResult.objects.update_or_create(
                 semester_result=sem_res,
                 course_code=code,
                 defaults={
@@ -328,7 +382,7 @@ def submit_semester_marks(student, semester_number, exam_session, subjects_data,
                     request=request, actor=actor,
                     action=AuditLog.Action.UPDATE,
                     target_type='SubjectResult',
-                    target_id='',
+                    target_id=str(row.id),
                     target_display=f'{student.display_name} Sem {semester_number} {code}',
                     old_value=old_marks, new_value=new_marks,
                     reason='Marks correction',

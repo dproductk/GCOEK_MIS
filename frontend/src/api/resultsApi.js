@@ -9,6 +9,15 @@ export const resultsApi = {
   getEligibilities: (params = {}) =>
     client.get('/results/eligibility/', { params }),
 
+  getClasses: (params = {}) =>
+    client.get('/results/eligibility/classes/', { params }),
+
+  getClassRoster: (divisionId) =>
+    client.get('/results/eligibility/class-roster/', { params: { division_id: divisionId } }),
+
+  startClassVerification: (divisionId) =>
+    client.post('/results/eligibility/start-class-verification/', { division_id: divisionId }),
+
   reviewClassTeacher: (id, status, remarks = '') =>
     client.post(`/results/eligibility/${id}/review-class-teacher/`, {
       status,

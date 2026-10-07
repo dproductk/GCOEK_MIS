@@ -252,7 +252,7 @@ class UserManagementViewSet(viewsets.ReadOnlyModelViewSet):
     """
     permission_classes = [IsSysadmin]
     serializer_class = UserAdminSerializer
-    queryset = User.objects.all().order_by('-date_joined')
+    queryset = User.objects.prefetch_related('role_assignments__role').all().order_by('-date_joined')
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -433,6 +433,42 @@ class RoleAssignmentViewSet(viewsets.ModelViewSet):
             description=f"Assigned role '{assignment.role.name}' to user '{assignment.user.username}'.",
         )
 
+    def perform_update(self, serializer):
+        old = serializer.instance
+        old_snapshot = {
+            'status': old.status,
+            'role': old.role.codename if old.role else '',
+            'user': old.user.username if old.user else '',
+        } if old else None
+        assignment = serializer.save()
+        audit_log(
+            request=self.request,
+            actor=self.request.user,
+            action=AuditLog.Action.UPDATE,
+            target_type='RoleAssignment',
+            target_id=str(assignment.id),
+            target_display=f"{assignment.user.username} -> {assignment.role.name}",
+            old_value=old_snapshot,
+            new_value={'status': assignment.status},
+            reason='Administrative role assignment update',
+            description=f"Updated role assignment '{assignment.role.name}' for user '{assignment.user.username}'.",
+        )
+
+    def perform_destroy(self, instance):
+        label = f"{instance.user.username} -> {instance.role.name}" if instance.user and instance.role else str(instance.id)
+        aid = str(instance.id)
+        instance.delete()
+        audit_log(
+            request=self.request,
+            actor=self.request.user,
+            action=AuditLog.Action.ROLE_REVOKE,
+            target_type='RoleAssignment',
+            target_id=aid,
+            target_display=label,
+            reason='Administrative role assignment deleted',
+            description=f"Deleted role assignment {label}. Row removed; audit entry retained.",
+        )
+
     @action(detail=True, methods=['post'], url_path='revoke')
     def revoke(self, request, pk=None):
         if not self._is_sysadmin(request.user):
@@ -544,6 +580,16 @@ class RoleAssignmentViewSet(viewsets.ModelViewSet):
                                 ca.revoked_at = timezone.now()
                                 ca.revoked_by = request.user
                                 ca.save(update_fields=['status', 'revoked_at', 'revoked_by', 'updated_at'])
+                                audit_log(
+                                    request=request,
+                                    actor=request.user,
+                                    action=AuditLog.Action.ROLE_REVOKE,
+                                    target_type='RoleAssignment',
+                                    target_id=str(ca.id),
+                                    target_display=f"HOD: {dept.code} <- {ca.user.username if ca.user else '?'}",
+                                    reason='Sysadmin department HOD replacement',
+                                    description=f"Revoked HOD of {dept.name} ({dept.code}) from user '{ca.user.username if ca.user else '?'}'.",
+                                )
 
                         assignment, created = RoleAssignment.objects.get_or_create(
                             user=target_user,
@@ -584,6 +630,16 @@ class RoleAssignmentViewSet(viewsets.ModelViewSet):
                             ca.revoked_at = timezone.now()
                             ca.revoked_by = request.user
                             ca.save(update_fields=['status', 'revoked_at', 'revoked_by', 'updated_at'])
+                            audit_log(
+                                request=request,
+                                actor=request.user,
+                                action=AuditLog.Action.ROLE_REVOKE,
+                                target_type='RoleAssignment',
+                                target_id=str(ca.id),
+                                target_display=f"HOD: {dept.code} <- {ca.user.username if ca.user else '?'}",
+                                reason='Sysadmin department HOD cleared',
+                                description=f"Cleared HOD of {dept.name} ({dept.code}); revoked from '{ca.user.username if ca.user else '?'}'.",
+                            )
 
             return Response({
                 'detail': f'HOD assignments successfully updated for {len(updated)} department(s).',

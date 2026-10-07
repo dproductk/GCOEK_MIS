@@ -22,12 +22,14 @@ import AdmissionImportPage from './pages/admissions/AdmissionImportPage';
 import ResultHistoryPage from './pages/results/ResultHistoryPage';
 import EligibilityVerificationPage from './pages/results/EligibilityVerificationPage';
 import MyClassPage from './pages/class_teacher/MyClassPage';
-import HODDashboardPage from './pages/hod/HODDashboardPage';
+import HODDivisionsBatchesPage from './pages/hod/HODDivisionsBatchesPage';
 import FeeHeadConfigPage from './pages/finance/FeeHeadConfigPage';
 import FeeDeskPage from './pages/finance/FeeDeskPage';
 import CandidateFeeSetPage from './pages/finance/CandidateFeeSetPage';
 import FeeAnalyticsPage from './pages/finance/FeeAnalyticsPage';
 import StudentFeeReceiptPage from './pages/finance/StudentFeeReceiptPage';
+import PaymentStatusPage from './pages/finance/PaymentStatusPage';
+
 import AdminHeadDashboardPage from './pages/admin_head/AdminHeadDashboardPage';
 import SchemesSubjectsPage from './pages/curriculum/SchemesSubjectsPage';
 import AuditLogViewerPage from './pages/admin/AuditLogViewerPage';
@@ -60,7 +62,13 @@ export default function App() {
         >
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/profile" element={<ProfileDispatcher />} />
+          {/* Per-profile password pages — same ChangePasswordPage (same UX as
+              first-login) for every role. /profile/security is canonical;
+              /account/security kept as a backward-compatible alias. */}
+          <Route path="/profile/security" element={<ChangePasswordPage />} />
+          <Route path="/profile/password" element={<Navigate to="/profile/security" replace />} />
           <Route path="/account/security" element={<ChangePasswordPage />} />
+          <Route path="/account/password" element={<Navigate to="/account/security" replace />} />
           
           {/* Students */}
           <Route path="/students" element={<StudentDirectoryPage />} />
@@ -79,12 +87,12 @@ export default function App() {
           <Route path="/results" element={<ResultHistoryPage />} />
           <Route path="/eligibility" element={<EligibilityVerificationPage />} />
           
-          {/* Class Teacher & HOD — single kept page: Classes & Divisions.
-              Legacy duplicate routes (/department/divisions, /classes,
-              /divisions previously rendered HODDivisionsBatchesPage)
-              now redirect to the kept page. */}
+          {/* Classes & Divisions — rebuilt flow (pending imports, create
+              class, merge DSE, subject teachers) lives in
+              HODDivisionsBatchesPage. Department Dashboard (HOD home)
+              keeps stats + intake overview. */}
           <Route path="/my-class" element={<MyClassPage />} />
-          <Route path="/department/classes" element={<HODDashboardPage />} />
+          <Route path="/department/classes" element={<HODDivisionsBatchesPage />} />
           <Route path="/department/divisions" element={<Navigate to="/department/classes" replace />} />
           <Route path="/classes" element={<Navigate to="/department/classes" replace />} />
           <Route path="/divisions" element={<Navigate to="/department/classes" replace />} />
@@ -98,6 +106,10 @@ export default function App() {
           <Route path="/finance/analytics" element={<FeeAnalyticsPage />} />
           <Route path="/fees" element={<StudentFeeReceiptPage />} />
           <Route path="/my-fees" element={<StudentFeeReceiptPage />} />
+          <Route path="/fees/payment/:attemptId" element={<PaymentStatusPage />} />
+          <Route path="/fees/payment/mock-checkout" element={<PaymentStatusPage />} />
+          <Route path="/fees/payment/error" element={<PaymentStatusPage />} />
+
 
           {/* Admin Head Executive Dashboard */}
           <Route path="/admin-head" element={<AdminHeadDashboardPage />} />

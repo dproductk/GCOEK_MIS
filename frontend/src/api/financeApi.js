@@ -18,6 +18,15 @@ export const financeApi = {
   getAssessments: (params) => client.get('/finance/assessments/', { params }),
   setAssessment: (data) => client.post('/finance/assessments/', data),
   updateAssessment: (id, data) => client.patch(`/finance/assessments/${id}/`, data),
+  toggleOnlinePayment: (id, data) => client.post(`/finance/assessments/${id}/toggle-online-payment/`, data),
+
+  // Online Payment Gateway (Easebuzz)
+  getOnlinePaymentStatus: () => client.get('/finance/online-payment/status/'),
+  initiateOnlinePayment: (data = {}, headers = {}) => client.post('/finance/online-payment/initiate/', data, { headers }),
+  getPaymentAttempt: (id) => client.get(`/finance/online-payment/attempt/${id}/`),
+  verifyPaymentAttempt: (id) => client.post(`/finance/online-payment/attempt/${id}/verify/`),
+  getOnlinePaymentTracker: (params) => client.get('/finance/online-payment/tracker/', { params }),
 };
 
 export default financeApi;
+

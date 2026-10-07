@@ -129,6 +129,10 @@ class EligibilityVerificationSerializer(serializers.ModelSerializer):
         ]
 
     def get_semester_results(self, obj):
+        student = getattr(obj, 'student', None)
+        if student and hasattr(student, '_prefetched_objects_cache') and 'semester_results' in student._prefetched_objects_cache:
+            results = sorted(student.semester_results.all(), key=lambda r: (r.semester.number if r.semester else 0))
+            return SemesterResultSerializer(results, many=True).data
         results = SemesterResult.objects.filter(
             student_id=obj.student_id
         ).prefetch_related('subject_results').order_by('semester__number')

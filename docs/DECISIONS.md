@@ -216,6 +216,21 @@
 
 ---
 
+## ADR-018: Ghost Onboarding Reversal + File-Derived Admission Year
+
+**Date:** 2026-10-07
+**Status:** Approved (owner-directed)
+
+**Context:** Two senior rosters (`CSE_Semester7_26-27.xls` 77 rows, `M&A_Semester7_26_27.xls` 65 rows) were uploaded through the admissions pipeline. The 2023/2024-cohort PRNs matched no onboarded students, so 142 seniors were created as fresh FY 2026-27 Sem-1 students with logins, polluting FY counts, HOD intake cards, and fee/verification rosters. Separately, DTE files carry a `Student Admitted Year` column the pipeline ignored (batch year always defaulted to AH-selected/current).
+
+**Decision:**
+1. Reversal via new sysadmin-only management command `cleanup_misimported_batch` (dry-run default, `--execute` to delete): removes only students whose every admission comes from the listed batches AND who have no payments/results/eligibility/fees/logins or other-batch links; skips otherwise. Deletes Student (cascades profile/enrollment/admission) + User login (cascades role/password history). ImportBatch + ImportRow rows are KEPT as evidence (SET_NULL); a cleanup note is appended to the batch summary; every removal writes ROLE_REVOKE + DELETE audit entries attributed to the sysadmin actor.
+2. Staging now resolves the batch year from the file (`Student Admitted Year` first, then `Academic Year`), falling back to the default when unparseable (e.g. wide spans like `2017-24` are rejected as unreliable) or unconfigured; future years stay blocked by the existing guard. Source recorded per-row in `normalized_data.admitted_year_source`.
+
+**Consequences:** 142 ghosts + logins removed, 142 staging rows + 2 batches retained, 428 audit entries. HOD cards now show genuine FY counts. EE/ETC/AIDS Sem-7 rosters must never go through admissions; senior onboarding needs its own channel (out of scope).
+
+---
+
 ## ADR-014: Fee Flow — AH Heads, Accountant Sets, Marking Is Permanent
 **Date:** 2026-10-03
 **Status:** Approved

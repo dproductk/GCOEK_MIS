@@ -36,9 +36,11 @@ export default function CandidateFeeSetPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [existingAssessment, setExistingAssessment] = useState(null);
+  const [allowOnlinePayment, setAllowOnlinePayment] = useState(false);
 
   // Payment history modal
   const [showHistoryModal, setShowHistoryModal] = useState(false);
+
   const [paymentHistory, setPaymentHistory] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
 
@@ -117,6 +119,7 @@ export default function CandidateFeeSetPage() {
       const existing = (assessRes?.data?.results || assessRes?.data || [])[0];
       if (existing?.id) {
         setExistingAssessment(existing);
+        setAllowOnlinePayment(Boolean(existing.allow_online_payment));
         Object.assign(initialAmounts, existing.fee_breakdown || {});
       }
 
@@ -158,8 +161,10 @@ export default function CandidateFeeSetPage() {
         academic_year: currentYear?.id,
         fee_breakdown: breakdown,
         total_fee: totalAdmissionFees,
+        allow_online_payment: allowOnlinePayment,
         remarks: 'Admission fee configured at candidate desk',
       };
+
       if (existingAssessment?.id) {
         await financeApi.updateAssessment(existingAssessment.id, payload);
       } else {
@@ -628,8 +633,69 @@ export default function CandidateFeeSetPage() {
                     </table>
                   </div>
 
+                  {/* Online Payment Gateway Selection Card */}
+                  <div style={{
+                    background: allowOnlinePayment ? '#f0fdf4' : '#f8fafc',
+                    border: allowOnlinePayment ? '1.5px solid #22c55e' : '1px solid #e2e8f0',
+                    borderRadius: '10px',
+                    padding: '1rem 1.25rem',
+                    marginBottom: '1.5rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '1rem',
+                    transition: 'all 0.2s ease',
+                  }}>
+                    <label 
+                      htmlFor="allow-online-payment-checkbox"
+                      style={{ 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        gap: '0.85rem', 
+                        cursor: 'pointer',
+                        margin: 0,
+                        flex: 1
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        id="allow-online-payment-checkbox"
+                        checked={allowOnlinePayment}
+                        onChange={(e) => setAllowOnlinePayment(e.target.checked)}
+                        style={{
+                          width: '19px',
+                          height: '19px',
+                          accentColor: '#16a34a',
+                          cursor: 'pointer',
+                        }}
+                      />
+                      <div>
+                        <div style={{ fontSize: '0.9rem', fontWeight: 600, color: '#0f172a' }}>
+                          Online Payment (Easebuzz Gateway)
+                        </div>
+                        <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '0.2rem' }}>
+                          Check this box to allow this continuing student to pay fees online via UPI, Cards, or Netbanking. You can edit this preference anytime before payment is completed.
+                        </div>
+                      </div>
+                    </label>
+
+                    <span style={{
+                      fontSize: '0.75rem',
+                      fontWeight: 600,
+                      padding: '0.3rem 0.75rem',
+                      borderRadius: '20px',
+                      background: allowOnlinePayment ? '#dcfce7' : '#f1f5f9',
+                      color: allowOnlinePayment ? '#15803d' : '#64748b',
+                      border: allowOnlinePayment ? '1px solid #86efac' : '1px solid #cbd5e1',
+                      whiteSpace: 'nowrap'
+                    }}>
+                      {allowOnlinePayment ? 'Online Gateway Allowed ✓' : 'Manual Fee Counter Only'}
+                    </span>
+                  </div>
+
                   {/* Save button (Sleek blue button with auto-return) */}
                   <div>
+
                     <button
                       type="submit"
                       disabled={saving}

@@ -167,6 +167,9 @@ class AcademicYear(BaseModel):
         """Ensure only one academic year can be marked as current."""
         if self.is_current:
             with transaction.atomic():
+                # Lock sibling rows so concurrent saves can't create two currents.
+                list(AcademicYear.objects.select_for_update().filter(
+                    is_current=True).exclude(id=self.id)[:50])
                 AcademicYear.objects.filter(is_current=True).exclude(id=self.id).update(is_current=False)
                 super().save(*args, **kwargs)
         else:
@@ -219,6 +222,8 @@ class AcademicContext(BaseModel):
         """Ensure only one AcademicContext is active at a time."""
         if self.is_active:
             with transaction.atomic():
+                list(AcademicContext.objects.select_for_update().filter(
+                    is_active=True).exclude(id=self.id)[:50])
                 AcademicContext.objects.filter(is_active=True).exclude(id=self.id).update(is_active=False)
                 super().save(*args, **kwargs)
         else:

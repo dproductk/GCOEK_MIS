@@ -356,6 +356,7 @@ img {
 .app-main {
   flex: 1;
   margin-left: 260px;
+  min-width: 0;
   min-height: calc(100vh - 54px);
   background-color: #f8fafc;
   display: flex;
@@ -364,6 +365,7 @@ img {
 
 .app-page-content {
   flex: 1;
+  min-width: 0;
 }
 
 .app-footer {

@@ -188,13 +188,18 @@ export default function ResultHistoryPage() {
       const isCurrent = sem === currentSemNumber;
 
       // Check eligibility workflow state for target semester
-      const targetSemEligibility = eligibilityRecords.find(e => e.target_semester_number === sem + 1) || eligibilityRecords[0];
+      const targetSemEligibility = eligibilityRecords.find(e => e.target_semester_number === sem + 1);
+      const isVerificationStarted = Boolean(targetSemEligibility);
       const isFlaggedByTeacher = targetSemEligibility?.class_teacher_status === 'FLAGGED';
       const isConfirmedByTeacher = targetSemEligibility?.class_teacher_status === 'APPROVED';
       const isFinalEligible = targetSemEligibility?.final_eligible === true;
       const teacherRemarks = targetSemEligibility?.class_teacher_remarks || '';
 
       const isLocked = Boolean((isConfirmedByTeacher && !isFlaggedByTeacher) || (backendResult && !isFlaggedByTeacher));
+
+      // Current even semesters (2, 4, 6) require HOD/Teacher to initiate verification before current marks can be uploaded
+      const isEvenSem = sem % 2 === 0;
+      const isUploadAllowed = !isCurrent || !isEvenSem || isVerificationStarted;
 
       let eligibility = 'pending';
       if (isFinalEligible) {
@@ -214,6 +219,8 @@ export default function ResultHistoryPage() {
         semester: sem,
         isCurrent,
         isLocked,
+        isUploadAllowed,
+        isVerificationStarted,
         isFlaggedByTeacher,
         teacherRemarks,
         isFinalEligible,
@@ -314,8 +321,10 @@ export default function ResultHistoryPage() {
   /* ──────────────── Fill Result Handlers ──────────────── */
 
   const openFillForm = async (semNumber, forceEdit = false) => {
-    // If published on the backend and not flagged, open in view mode directly
-    const targetSemEligibility = eligibilityRecords.find(e => e.target_semester_number === semNumber + 1) || eligibilityRecords[0];
+    // If published on the backend and not flagged, open in view mode directly.
+    // Exact target-semester match only — no fallback: a stale first-record
+    // fallback previously misread other semesters' FLAGGED status.
+    const targetSemEligibility = eligibilityRecords.find(e => e.target_semester_number === semNumber + 1);
     const isFlagged = targetSemEligibility?.class_teacher_status === 'FLAGGED';
     const publishedRes = results.find((r) => r.semester_number === semNumber);
 
@@ -774,6 +783,24 @@ export default function ResultHistoryPage() {
                                 <Eye size={14} />
                                 View
                               </button>
+                            ) : !row.isUploadAllowed ? (
+                              <span
+                                style={{
+                                  fontSize: '0.75rem',
+                                  color: '#64748b',
+                                  padding: '0.35rem 0.65rem',
+                                  background: '#f8fafc',
+                                  borderRadius: '6px',
+                                  border: '1px dashed #cbd5e1',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '0.3rem',
+                                }}
+                                title="Verification window opens once HOD or Class Teacher initiates annual result verification."
+                              >
+                                <Lock size={12} />
+                                Verification Not Started
+                              </span>
                             ) : (
                               <button
                                 onClick={() => openFillForm(row.semester)}

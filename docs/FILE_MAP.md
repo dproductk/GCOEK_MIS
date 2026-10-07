@@ -17,10 +17,10 @@
 | Workflow | User Authentication & Authorization |
 | Purpose | Login, JWT token rotation, HttpOnly refresh cookie, session restore, logout, first-login password change |
 | Actors/Roles | All users (Student, Faculty, Class Teacher, HOD, Admin Head, Accountant, Sysadmin) |
-| Entry Page | `/login` → `LoginPage.jsx` / `/change-password` → `ChangePasswordPage.jsx` |
-| Frontend Files | `src/pages/LoginPage.jsx`, `src/pages/ChangePasswordPage.jsx`, `src/context/AuthContext.jsx`, `src/api/client.js`, `src/routes/ProtectedRoute.jsx` |
+| Entry Page | `/login` → `LoginPage.jsx` / `/change-password` → `ChangePasswordPage.jsx` (first-login forced flow) / `/profile` Security tab + `/profile/security` (per-profile self-service, same form) |
+| Frontend Files | `src/pages/LoginPage.jsx`, `src/pages/ChangePasswordPage.jsx`, `src/components/auth/PasswordChangeForm.jsx` (shared form: first-login + profile Security tabs + account/profile security pages), `src/context/AuthContext.jsx`, `src/api/client.js`, `src/routes/ProtectedRoute.jsx` |
 | Backend Files | `apps/authentication/models.py`, `apps/authentication/serializers.py`, `apps/authentication/views.py`, `apps/authentication/permissions.py`, `apps/authentication/urls.py`, `apps/authentication/management/commands/seed_auth_roles.py` |
-| API Endpoints | `POST /api/v1/auth/login/`, `POST /api/v1/auth/refresh/`, `POST /api/v1/auth/logout/`, `POST /api/v1/auth/change-password/`, `GET /api/v1/auth/me/` |
+| API Endpoints | `POST /api/v1/auth/login/`, `POST /api/v1/auth/refresh/`, `POST /api/v1/auth/logout/`, `POST /api/v1/auth/change-password/` (single shared endpoint for first-login + all per-profile password updates — no per-role endpoint), `GET /api/v1/auth/me/` |
 | Services | SimpleJWT token rotation/blacklisting, Audit logging |
 | Models | `User`, `Role`, `Permission`, `RolePermission`, `RoleAssignment`, `PasswordHistory` |
 | Database Tables | `users`, `roles`, `permissions`, `role_permissions`, `role_assignments`, `password_history` |
@@ -35,13 +35,13 @@
 | Workflow | Audit Trail |
 | Purpose | Record all security-sensitive actions |
 | Actors/Roles | System (automatic), Sysadmin (read) |
-| Frontend Files | (Phase 13) |
-| Backend Files | `apps/audit/models.py`, `apps/audit/services.py` |
-| API Endpoints | (Phase 13) |
-| Services | `apps/audit/services.py` → `audit_log()` |
-| Models | `AuditLog` |
+| Frontend Files | `src/pages/admin/AuditLogViewerPage.jsx` (server pagination, date/action/target filters, CSV download), `src/api/auditApi.js` (`getAuditLogs`, `exportAuditLogs`) |
+| Backend Files | `apps/audit/models.py` (append-only + bulk-update/delete blocked manager), `apps/audit/services.py` (role snapshot, secret redaction, UA/IP hardening), `apps/audit/views.py` (date/target_id/search filters, ordering, `GET /export/` CSV capped 10k), `gceok_core/settings.py` (`LOGGING` console + rotating `logs/django.log`, `logs/audit.log`) |
+| API Endpoints | `GET /api/v1/audit/logs/` (paginated, filters: action, target_type, actor, target_id, date_from, date_to, search, ordering), `GET /api/v1/audit/logs/export/` (CSV archival, same filters, never deletes) |
+| Services | `apps/audit/services.py` → `audit_log()` (redacts passwords/tokens/Aadhaar/bank), `get_client_ip()` |
+| Models | `AuditLog` (actions include PAYMENT/VERIFY/IMPORT/EXPORT actively used) |
 | Database Tables | `audit_logs` |
-| Permissions/Scopes | Write: system/service layer. Read: Sysadmin only |
+| Permissions/Scopes | Write: system/service layer (fail-closed). Read: Sysadmin + Admin Head via `IsAuditViewer` |
 | Tests | `backend/tests/test_auth_api.py`, `backend/tests/test_academic_structure.py` |
 | Related Workflows | Used by all workflows that perform security-sensitive actions |
 
@@ -53,7 +53,7 @@
 | Purpose | Multi-section student records, sensitive data masking (Aadhaar, Bank) with audited reveal modal |
 | Actors/Roles | Student (Self), Faculty/Class Teacher/HOD (Scoped), Admin Head/Sysadmin (All) |
 | Entry Page | `/profile` (via `ProfileDispatcher.jsx`) / `/students/:id` / `/students` |
-| Frontend Files | `src/pages/student/StudentProfilePage.jsx`, `src/pages/student/StudentDirectoryPage.jsx`, `src/pages/student/StudentDashboardPage.jsx`, `src/api/studentApi.js` |
+| Frontend Files | `src/pages/student/StudentProfilePage.jsx` (6 tabs incl. self-service Security tab with shared PasswordChangeForm), `src/pages/student/StudentDirectoryPage.jsx`, `src/pages/student/StudentDashboardPage.jsx`, `src/api/studentApi.js` |
 | Backend Files | `apps/students/models.py`, `apps/students/serializers.py`, `apps/students/views.py`, `apps/students/urls.py`, `apps/students/management/commands/seed_students.py` |
 | API Endpoints | `GET /api/v1/students/me/`, `GET /api/v1/students/` (`eligible_only` gated on division+teacher per ADR-017), `GET /api/v1/students/<id>/`, `POST /api/v1/students/<id>/reveal/` |
 | Tests | `backend/tests/test_students.py` |
@@ -66,7 +66,7 @@
 | Purpose | Faculty qualifications, experience, publications, PhD guidance, salary masking |
 | Actors/Roles | Faculty (Self), HOD (Department), Admin Head/Sysadmin (All) |
 | Entry Page | `/profile` / `/faculty/:id` / `/faculty` |
-| Frontend Files | `src/pages/faculty/FacultyProfilePage.jsx`, `src/pages/faculty/FacultyDirectoryPage.jsx` (sysadmin Add Faculty modal), `src/pages/faculty/FacultyDashboardPage.jsx`, `src/api/facultyApi.js` (`createFaculty`) |
+| Frontend Files | `src/pages/faculty/FacultyProfilePage.jsx` (6 tabs incl. self-service Security tab with shared PasswordChangeForm — serves Faculty/Class Teacher/HOD/Accountant/Admin Head/Sysadmin own profiles via ProfileDispatcher), `src/pages/faculty/FacultyDirectoryPage.jsx` (sysadmin Add Faculty modal), `src/pages/faculty/FacultyDashboardPage.jsx`, `src/api/facultyApi.js` (`createFaculty`) |
 | Backend Files | `apps/faculty/models.py`, `apps/faculty/serializers.py` (`FacultyCreateSerializer`), `apps/faculty/views.py` (`FacultyViewSet.create` sysadmin-only), `apps/faculty/urls.py`, `apps/faculty/management/commands/seed_faculty.py` |
 | API Endpoints | `GET /api/v1/faculty/me/`, `GET /api/v1/faculty/`, `POST /api/v1/faculty/` (sysadmin onboarding: User+Faculty+RoleAssignment, atomic, audited), `GET /api/v1/faculty/<id>/`, `POST /api/v1/faculty/<id>/reveal/` |
 | Tests | `backend/tests/test_faculty.py` |
@@ -94,8 +94,8 @@
 | Actors/Roles | Admin Head, Sysadmin |
 | Entry Page | `/admissions/import` |
 | Frontend Files | `src/pages/admissions/AdmissionImportPage.jsx`, `src/api/admissionsApi.js` |
-| Backend Files | `apps/admissions/models.py` (`ImportRow.program_code`, `StudentAdmission.program_code`), `apps/admissions/services.py` (`normalize_program_code`, `build_dept_program_map`, choice→program→course resolution), `apps/admissions/serializers.py`, `apps/admissions/views.py`, `apps/admissions/urls.py` |
-| API Endpoints | `POST /api/v1/admissions/batches/upload/`, `POST /api/v1/admissions/batches/<id>/commit/`, `DELETE /api/v1/admissions/batches/<id>/delete/` (failed zero-import batches only, audited). Placement formula (`apps/students/placement.py`) suggests sem/year once per import; HOD confirms/corrects; future-dated files blocked; login = PRN (enrollment_no) else application ID |
+| Backend Files | `apps/admissions/models.py` (`ImportRow.program_code`, `StudentAdmission.program_code`), `apps/admissions/services.py` (`normalize_program_code`, `build_dept_program_map`, choice→program→course resolution, `_parse_file_year` batch-year resolution), `apps/admissions/serializers.py`, `apps/admissions/views.py`, `apps/admissions/urls.py`, `apps/admissions/management/commands/cleanup_misimported_batch.py` (sysadmin ghost reversal, dry-run default, audited) |
+| API Endpoints | `POST /api/v1/admissions/batches/upload/`, `POST /api/v1/admissions/batches/<id>/commit/`, `DELETE /api/v1/admissions/batches/<id>/delete/` (failed zero-import batches only, audited). Placement formula (`apps/students/placement.py`) suggests sem/year once per import; HOD confirms/corrects; future-dated files blocked; login = PRN (enrollment_no) else application ID. Batch year resolves from file (`Student Admitted Year`, then `Academic Year`) with fallback to default (ADR-018); ghost reversal via `cleanup_misimported_batch` command |
 | Tests | `backend/tests/test_admissions_import.py` |
 
 ### WF-007: Results Engine & Eligibility Verification
@@ -127,14 +127,14 @@
 
 | Field | Content |
 |---|---|
-| Workflow | Institutional Fee Lifecycle |
-| Purpose | Fee head configuration, candidate fee collection, receipt generation, revenue analytics |
-| Actors/Roles | Student (Receipts), Accountant (Desk/Ledger), Admin Head/Sysadmin (Analytics/Config) |
-| Entry Page | `/finance/fee-config` / `/finance/fee-desk` / `/finance/analytics` / `/fees` |
-| Frontend Files | `src/pages/finance/FeeHeadConfigPage.jsx`, `src/pages/finance/FeeDeskPage.jsx`, `src/pages/finance/FeeAnalyticsPage.jsx`, `src/pages/finance/StudentFeeReceiptPage.jsx`, `src/api/financeApi.js` |
-| Backend Files | `apps/finance/models.py`, `apps/finance/serializers.py`, `apps/finance/views.py`, `apps/finance/urls.py`, `apps/finance/management/commands/seed_finance.py` |
-| API Endpoints | `/api/v1/finance/fee-heads/` (audited mutations), `/api/v1/finance/ledger/`, `/api/v1/finance/ledger/my-payments/`, `/api/v1/finance/ledger/analytics/`, `/api/v1/finance/assessments/` (server-side Set Fee with preset validation, frozen once paid). Paid ledgers immutable; throttles per SECURITY-10 |
-| Tests | `backend/tests/test_finance.py` |
+| Workflow | Institutional Fee Lifecycle & Easebuzz Online Payment Gateway |
+| Purpose | Fee head configuration, candidate fee collection, receipt generation, online fee payment for continuing students via Easebuzz, accountant online payment tracking & bank reconciliation, revenue analytics |
+| Actors/Roles | Student (Pay Online / Receipts), Accountant (Desk/Ledger/Online Tracker), Admin Head/Sysadmin (Analytics/Config) |
+| Entry Page | `/finance/fee-config` / `/finance/fee-desk` / `/finance/analytics` / `/fees` / `/fees/payment/:attemptId` |
+| Frontend Files | `src/pages/finance/FeeHeadConfigPage.jsx`, `src/pages/finance/CandidateFeeSetPage.jsx` (with Online Payment toggle), `src/pages/finance/FeeDeskPage.jsx` (with sliding pill tabs: Candidate Desk & Online Tracker), `src/pages/finance/FeeAnalyticsPage.jsx`, `src/pages/finance/StudentFeeReceiptPage.jsx` (with Pay Online button), `src/pages/finance/PaymentStatusPage.jsx` (polling & bank verify), `src/api/financeApi.js` |
+| Backend Files | `apps/finance/models.py` (`FeeReceiptCounter`, `OnlinePaymentAttempt`, `GatewayRawEvent`), `apps/finance/gateway/easebuzz.py`, `apps/finance/services.py`, `apps/finance/notifications.py`, `apps/finance/serializers.py`, `apps/finance/views.py`, `apps/finance/urls.py` |
+| API Endpoints | `/api/v1/finance/fee-heads/`, `/api/v1/finance/ledger/`, `/api/v1/finance/assessments/`, `/api/v1/finance/assessments/<id>/toggle-online-payment/`, `/api/v1/finance/online-payment/status/`, `/api/v1/finance/online-payment/initiate/`, `/api/v1/finance/online-payment/attempt/<id>/`, `/api/v1/finance/online-payment/attempt/<id>/verify/`, `/api/v1/finance/online-payment/callback/`, `/api/v1/finance/online-payment/webhook/`, `/api/v1/finance/tracker/` |
+| Tests | `backend/tests/test_finance.py`, `backend/tests/test_online_payment.py` |
 
 ### WF-010: Sysadmin Governance & Audit Trail
 
@@ -205,6 +205,7 @@
 | Path | Layer | Domain | Purpose | Contains |
 |---|---|---|---|---|
 | `backend/apps/common/models.py` | Domain | Common | Base models | `UUIDPrimaryKeyModel`, `TimestampedModel`, `BaseModel` |
+| `backend/apps/common/encryption.py` | Application | Common | PII field encryption (Fernet, key from `FIELD_ENCRYPTION_KEY`) | `encrypt_value()`, `decrypt_value()` (legacy-plaintext tolerant), `is_encryption_configured()` |
 | `backend/apps/common/validators.py` | Domain | Common | Shared validators | `validate_mobile_number`, `validate_email_format`, `validate_pincode` |
 | `backend/apps/common/apps.py` | Infrastructure | Common | App config | `CommonConfig` |
 
@@ -304,7 +305,8 @@
 | Path | Layer | Domain | Purpose | Contains |
 |---|---|---|---|---|
 | `frontend/src/pages/LoginPage.jsx` | UI | Identity | Login page | EDVANA gradient login, error display, show/hide password |
-| `frontend/src/pages/ChangePasswordPage.jsx` | UI | Identity | Password update | First-login & self-service password change, 12+ chars, history check |
+| `frontend/src/pages/ChangePasswordPage.jsx` | UI | Identity | Password update | First-login (/change-password) & self-service (/profile/security, /account/security alias) thin wrapper over PasswordChangeForm, same UX everywhere |
+| `frontend/src/components/auth/PasswordChangeForm.jsx` | UI | Identity | Shared password form | Single source of truth: current/new/confirm, 12-char + history policy, used by ChangePasswordPage + Student/Faculty Security tabs |
 | `frontend/src/pages/DashboardPage.jsx` | UI | — | Dashboard | EDVANA banner + card placeholder |
 | `frontend/src/pages/academic/AcademicStructurePage.jsx` | UI | Academic | Academic management | Departments, B.Tech programs, class divisions, academic calendars |
 

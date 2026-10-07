@@ -77,6 +77,13 @@ class DepartmentViewSet(viewsets.ModelViewSet):
     serializer_class = DepartmentSerializer
     permission_classes = [AcademicStructurePermission]
 
+    def get_queryset(self):
+        from django.db.models import Count, Q
+        return Department.objects.annotate(
+            _programs_count=Count('programs', filter=Q(programs__is_active=True), distinct=True),
+            _divisions_count=Count('divisions', filter=Q(divisions__is_active=True), distinct=True),
+        ).order_by('name')
+
     def perform_create(self, serializer):
         dept = serializer.save()
         audit_log(
@@ -138,7 +145,35 @@ class ProgramViewSet(viewsets.ModelViewSet):
             target_type='Program',
             target_id=str(prog.id),
             target_display=prog.name,
+            new_value={'name': prog.name, 'code': prog.code},
             description=f"Created program '{prog.name}' ({prog.code}).",
+        )
+
+    def perform_update(self, serializer):
+        old = serializer.instance
+        old_snapshot = {'name': old.name, 'code': old.code} if old else None
+        prog = serializer.save()
+        audit_log(
+            request=self.request,
+            action=AuditLog.Action.UPDATE,
+            target_type='Program',
+            target_id=str(prog.id),
+            target_display=prog.name,
+            old_value=old_snapshot,
+            new_value={'name': prog.name, 'code': prog.code},
+            description=f"Updated program '{prog.name}' ({prog.code}).",
+        )
+
+    def perform_destroy(self, instance):
+        name, code, pid = instance.name, instance.code, str(instance.id)
+        instance.delete()
+        audit_log(
+            request=self.request,
+            action=AuditLog.Action.DELETE,
+            target_type='Program',
+            target_id=pid,
+            target_display=name,
+            description=f"Deleted program '{name}' ({code}).",
         )
 
 
@@ -150,6 +185,45 @@ class AcademicYearViewSet(viewsets.ModelViewSet):
     queryset = AcademicYear.objects.all().order_by('-start_date')
     serializer_class = AcademicYearSerializer
     permission_classes = [AcademicStructurePermission]
+
+    def perform_create(self, serializer):
+        year = serializer.save()
+        audit_log(
+            request=self.request,
+            action=AuditLog.Action.CREATE,
+            target_type='AcademicYear',
+            target_id=str(year.id),
+            target_display=year.code,
+            new_value={'code': year.code, 'name': year.name},
+            description=f"Created academic year '{year.code}'.",
+        )
+
+    def perform_update(self, serializer):
+        old = serializer.instance
+        old_snapshot = {'code': old.code, 'name': old.name} if old else None
+        year = serializer.save()
+        audit_log(
+            request=self.request,
+            action=AuditLog.Action.UPDATE,
+            target_type='AcademicYear',
+            target_id=str(year.id),
+            target_display=year.code,
+            old_value=old_snapshot,
+            new_value={'code': year.code, 'name': year.name},
+            description=f"Updated academic year '{year.code}'.",
+        )
+
+    def perform_destroy(self, instance):
+        code, yid = instance.code, str(instance.id)
+        instance.delete()
+        audit_log(
+            request=self.request,
+            action=AuditLog.Action.DELETE,
+            target_type='AcademicYear',
+            target_id=yid,
+            target_display=code,
+            description=f"Deleted academic year '{code}'.",
+        )
 
     @action(detail=True, methods=['post'], url_path='set_current')
     def set_current(self, request, pk=None):
@@ -177,6 +251,42 @@ class AcademicContextViewSet(viewsets.ModelViewSet):
     queryset = AcademicContext.objects.select_related('academic_year').all().order_by('-created_at')
     serializer_class = AcademicContextSerializer
     permission_classes = [AcademicStructurePermission]
+
+    def perform_create(self, serializer):
+        ctx = serializer.save()
+        audit_log(
+            request=self.request,
+            action=AuditLog.Action.CREATE,
+            target_type='AcademicContext',
+            target_id=str(ctx.id),
+            target_display=f'{ctx.academic_year.code if ctx.academic_year else "?"} {ctx.term}',
+            new_value={'term': str(ctx.term)},
+            description='Created academic term context.',
+        )
+
+    def perform_update(self, serializer):
+        ctx = serializer.save()
+        audit_log(
+            request=self.request,
+            action=AuditLog.Action.UPDATE,
+            target_type='AcademicContext',
+            target_id=str(ctx.id),
+            target_display=str(ctx.id),
+            description='Updated academic term context.',
+        )
+
+    def perform_destroy(self, instance):
+        cid = str(instance.id)
+        label = str(instance)
+        instance.delete()
+        audit_log(
+            request=self.request,
+            action=AuditLog.Action.DELETE,
+            target_type='AcademicContext',
+            target_id=cid,
+            target_display=label,
+            description='Deleted academic term context.',
+        )
 
     @action(detail=False, methods=['get'], url_path='current')
     def get_current(self, request):
@@ -234,10 +344,11 @@ class AcademicContextViewSet(viewsets.ModelViewSet):
             ctx = AcademicContext.objects.create(academic_year=year, term=term, is_active=True)
             # Auto-advance only on same-year odd->even flips.
             if same_year and term == 'EVEN':
-                odds = list(StudentEnrollment.objects.filter(
+                odds = list(StudentEnrollment.objects.select_for_update().filter(
                     is_current=True, semester__number__in=[1, 3, 5, 7]
                 ).select_related('semester', 'student'))
                 sem_cache = {s.number: s for s in Semester.objects.filter(number__in=[2, 4, 6, 8])}
+                from django.db import IntegrityError as _IE
                 for enr in odds:
                     if (enr.student.repeat_count or 0) > 0:
                         skipped_repeats += 1
@@ -245,29 +356,38 @@ class AcademicContextViewSet(viewsets.ModelViewSet):
                     nxt = sem_cache.get(enr.semester.number + 1)
                     if not nxt:
                         continue
-                    clash = StudentEnrollment.objects.filter(
-                        student=enr.student, academic_year=enr.academic_year,
-                        semester=nxt).exclude(id=enr.id).first()
-                    enr.is_current = False
-                    enr.status = StudentEnrollment.Status.COMPLETED
-                    enr.save(update_fields=['is_current', 'status'])
-                    if clash:
-                        clash.division = None
-                        clash.lab_batch = None
-                        clash.status = StudentEnrollment.Status.ACTIVE
-                        clash.is_current = True
-                        clash.placement_confirmed = False
-                        clash.save()
-                    else:
-                        StudentEnrollment.objects.create(
-                            student=enr.student, academic_year=enr.academic_year,
-                            department=enr.department, program=enr.program,
-                            semester=nxt, division=None, lab_batch=None,
-                            scheme=enr.scheme, roll_number=enr.roll_number,
-                            status=StudentEnrollment.Status.ACTIVE, is_current=True,
-                            placement_confirmed=False,
-                        )
-                    advanced += 1
+                    try:
+                        # Per-row savepoint: an IntegrityError must not abort
+                        # the outer rollover transaction (Postgres aborts the
+                        # whole txn otherwise and every later row would fail).
+                        with transaction.atomic():
+                            clash = StudentEnrollment.objects.select_for_update().filter(
+                                student=enr.student, academic_year=enr.academic_year,
+                                semester=nxt).exclude(id=enr.id).first()
+                            enr.is_current = False
+                            enr.status = StudentEnrollment.Status.COMPLETED
+                            enr.save(update_fields=['is_current', 'status'])
+                            if clash:
+                                clash.division = None
+                                clash.lab_batch = None
+                                clash.status = StudentEnrollment.Status.ACTIVE
+                                clash.is_current = True
+                                clash.placement_confirmed = False
+                                clash.save()
+                            else:
+                                StudentEnrollment.objects.create(
+                                    student=enr.student, academic_year=enr.academic_year,
+                                    department=enr.department, program=enr.program,
+                                    semester=nxt, division=None, lab_batch=None,
+                                    scheme=enr.scheme, roll_number=enr.roll_number,
+                                    status=StudentEnrollment.Status.ACTIVE, is_current=True,
+                                    placement_confirmed=False,
+                                )
+                            advanced += 1
+                    except _IE:
+                        # Concurrent rollover created the target row — skip,
+                        # don't abort the whole batch.
+                        continue
             audit_log(
                 request=request,
                 action=AuditLog.Action.STATUS_CHANGE,
@@ -651,4 +771,17 @@ class LabBatchViewSet(viewsets.ModelViewSet):
             target_id=str(batch.id),
             target_display=str(batch),
             description=f"Updated lab batch '{batch.name}' for {batch.division}.",
+        )
+
+    def perform_destroy(self, instance):
+        self._check_hod_scope(instance.division)
+        label, bid = str(instance), str(instance.id)
+        instance.delete()
+        audit_log(
+            request=self.request,
+            action=AuditLog.Action.DELETE,
+            target_type='LabBatch',
+            target_id=bid,
+            target_display=label,
+            description=f"Deleted lab batch '{label}'.",
         )

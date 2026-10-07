@@ -113,6 +113,7 @@ DATABASES = {
         'PASSWORD': os.getenv('DB_PASSWORD', ''),
         'HOST': os.getenv('DB_HOST', 'localhost'),
         'PORT': os.getenv('DB_PORT', '5432'),
+        'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '60')),
         'OPTIONS': {
             'connect_timeout': 5,
         },
@@ -187,6 +188,7 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.AnonRateThrottle',
         'rest_framework.throttling.UserRateThrottle',
+        'rest_framework.throttling.ScopedRateThrottle',
     ],
     # SECURITY.md Sec 10 targets: login 5/min (scoped), import 10/hr
     # (scoped), general authenticated use 1000/hr.
@@ -195,6 +197,10 @@ REST_FRAMEWORK = {
         'user': '1000/hour',
         'login': '5/minute',
         'import_upload': '10/hour',
+        'payment_initiate': '10/minute',
+        'payment_verify': '20/minute',
+        'payment_status': '60/minute',
+        'payment_callback': '60/minute',
     },
     'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
 }
@@ -260,3 +266,97 @@ PASSWORD_HISTORY_COUNT = 5
 # ---------------------------------------------------------------------------
 FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10 MB
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10 MB
+
+# ---------------------------------------------------------------------------
+# Easebuzz Payment Gateway Configuration (Production Ready)
+# ---------------------------------------------------------------------------
+EASEBUZZ_ENABLED = os.getenv('EASEBUZZ_ENABLED', 'True').lower() in ('true', '1', 'yes')
+EASEBUZZ_ENV = os.getenv('EASEBUZZ_ENV', 'sandbox').lower()  # 'sandbox' or 'production'
+EASEBUZZ_KEY = os.getenv('EASEBUZZ_KEY', '')
+EASEBUZZ_SALT = os.getenv('EASEBUZZ_SALT', '')
+EASEBUZZ_SUB_MERCHANT_ID = os.getenv('EASEBUZZ_SUB_MERCHANT_ID', '')
+EASEBUZZ_TIMEOUT = int(os.getenv('EASEBUZZ_TIMEOUT', '5'))  # seconds
+# Mock checkout works ONLY when this is True (kept False in prod even with DEBUG on).
+EASEBUZZ_MOCK_MODE = os.getenv('EASEBUZZ_MOCK_MODE', 'False').lower() in ('true', '1', 'yes')
+# Comma-separated Easebuzz server IPs allowed to hit callback/webhook. Empty = allow all (dev).
+EASEBUZZ_WEBHOOK_ALLOWED_IPS = [
+    ip.strip() for ip in os.getenv('EASEBUZZ_WEBHOOK_ALLOWED_IPS', '').split(',') if ip.strip()
+]
+FRONTEND_BASE_URL = os.getenv('FRONTEND_BASE_URL', 'http://localhost:5173').rstrip('/')
+
+# ---------------------------------------------------------------------------
+# Notification / Email Configuration
+# ---------------------------------------------------------------------------
+EMAIL_ENABLED = os.getenv('EMAIL_ENABLED', 'True').lower() in ('true', '1', 'yes')
+EMAIL_PROVIDER = os.getenv('EMAIL_PROVIDER', 'console')  # 'console' or 'smtp'
+EMAIL_FROM_ADDRESS = os.getenv('EMAIL_FROM_ADDRESS', 'accounts@gceok.ac.in')
+EMAIL_FROM_NAME = os.getenv('EMAIL_FROM_NAME', 'GCOEK Accounts Desk')
+
+# ---------------------------------------------------------------------------
+# Production application logging (SECURITY.md Sec 13)
+# Console + rotating files under <BASE_DIR>/logs. No secrets, passwords,
+# tokens, Aadhaar or bank numbers are ever written here by convention —
+# callers must pass redacted values (audit service enforces redaction).
+# ---------------------------------------------------------------------------
+LOG_DIR = BASE_DIR / 'logs'
+try:
+    LOG_DIR.mkdir(exist_ok=True)
+except Exception:
+    pass
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{asctime} {levelname} {name} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {name}: {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose' if not DEBUG else 'simple',
+        },
+        'file': {
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': str(LOG_DIR / 'django.log'),
+            'maxBytes': 5 * 1024 * 1024,
+            'backupCount': 5,
+            'formatter': 'verbose',
+        },
+        'audit_file': {
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': str(LOG_DIR / 'audit.log'),
+            'maxBytes': 5 * 1024 * 1024,
+            'backupCount': 5,
+            'formatter': 'verbose',
+        },
+    },
+    'root': {
+        'handlers': ['console', 'file'],
+        'level': 'DEBUG' if DEBUG else 'INFO',
+    },
+    'loggers': {
+        'django.request': {
+            'handlers': ['console', 'file'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
+        'apps.audit': {
+            'handlers': ['console', 'audit_file', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'apps.finance': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}
+

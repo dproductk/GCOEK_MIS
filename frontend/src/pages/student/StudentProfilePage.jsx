@@ -4,6 +4,7 @@ import { useAuth } from '../../context/AuthContext';
 import studentApi from '../../api/studentApi';
 import { LoadingState, ErrorState } from '../../components/common/StateDisplays';
 import PageHeader from '../../components/common/PageHeader';
+import PasswordChangeForm from '../../components/auth/PasswordChangeForm';
 import {
   GraduationCap,
   Image as ImageIcon,
@@ -14,6 +15,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   FileCheck,
+  Lock,
 } from 'lucide-react';
 
 export default function StudentProfilePage() {
@@ -31,52 +33,57 @@ export default function StudentProfilePage() {
   const [photoPreview, setPhotoPreview] = useState(null);
   const [signaturePreview, setSignaturePreview] = useState(null);
 
-  // Form State initialized to institutional defaults & populated from backend
+  // Form State initialized to clean defaults & populated from backend
   const [formData, setFormData] = useState({
     fullName: '',
-    dteAppId: 'DEN18146293',
-    fatherName: 'SURESH KUMAR',
-    motherName: 'SUNITA KUMAR',
-    placeOfBirth: 'Kolhapur',
-    dobDay: '12',
-    dobMonth: 'May',
-    dobYear: '2004',
+    prn: '',
+    dteAppId: '',
+    fatherName: '',
+    motherName: '',
+    placeOfBirth: '',
+    dobDay: '1',
+    dobMonth: 'January',
+    dobYear: '2005',
     gender: 'Male',
-    dateOfAdmission: '2024-08-14',
+    caste: '',
+    maritalStatus: 'Unmarried',
+    abcId: '',
+    admittedYear: '',
     admissionType: 'CAP',
-    allottedSeatType: 'NT-C',
-    scholarshipApplied: 'Yes',
-    scholarshipType: 'NT-C',
-    annualIncome: '600000 to 700000',
-    address: 'Near Shivaji University, Rajaram College Road',
-    district: 'Kolhapur',
+    category: '',
+    allottedSeatType: '',
+    scholarshipApplied: 'No',
+    scholarshipType: 'None',
+    annualIncome: '',
+    address: '',
+    district: '',
     state: 'Maharashtra',
-    pincode: '416004',
+    pincode: '',
     // Aadhaar
-    aadhaarNo: 'XXXX-XXXX-XXXX',
+    aadhaarNo: '',
     aadhaarName: '',
-    aadhaarMobile: '9989776855',
+    aadhaarMobile: '',
     // Bank
     bankHolderName: '',
-    bankName: 'State Bank of India',
-    branchName: 'Kolhapur Main Branch',
-    accountNo: '39485729103',
-    ifscCode: 'SBIN0001234',
+    bankName: '',
+    branchName: '',
+    accountNo: '',
+    ifscCode: '',
     // SSC Marksheet
-    sscBoard: 'Maharashtra State Board of Secondary and Higher Secondary Education (MSBSHSE)',
-    sscSchool: 'Chhatrapati Shahu Vidyalaya, Kolhapur',
-    sscPassingYear: '2022',
-    sscSeatNo: 'M094821',
-    sscMarksObtained: '468 / 500',
-    sscPercentage: '93.60%',
-    // HSC Marksheet
+    sscBoard: '',
+    sscSchool: '',
+    sscPassingYear: '',
+    sscSeatNo: '',
+    sscMarksObtained: '',
+    sscPercentage: '',
+    // HSC / Diploma Marksheet
     hscStream: 'Class XII (Science)',
-    hscBoard: 'Maharashtra State Board (MSBSHSE)',
-    hscCollege: 'Vivekanand College, Kolhapur',
-    hscPassingYear: '2024',
-    hscSeatNo: 'H083921',
-    hscMarksObtained: '522 / 600',
-    hscPercentage: '87.00%',
+    hscBoard: '',
+    hscCollege: '',
+    hscPassingYear: '',
+    hscSeatNo: '',
+    hscMarksObtained: '',
+    hscPercentage: '',
   });
 
   const [retryCount, setRetryCount] = useState(0);
@@ -118,9 +125,9 @@ export default function StudentProfilePage() {
         const bk = data.bank_accounts?.[0] || {};
         const adh = data.aadhaar_details || {};
 
-        let day = '12';
-        let month = 'May';
-        let year = '2004';
+        let day = '1';
+        let month = 'January';
+        let year = '2005';
         if (p.date_of_birth) {
           const dObj = new Date(p.date_of_birth);
           if (!isNaN(dObj.getTime())) {
@@ -134,43 +141,53 @@ export default function StudentProfilePage() {
           data.display_name ||
           `${data.first_name || ''} ${data.last_name || ''}`.trim() ||
           user?.first_name ||
-          'ROHIT KUMAR';
+          '';
 
         const isDSY = Boolean(data.is_direct_second_year || data.admission_details?.admission_type === 'DIRECT_SECOND_YEAR');
         const adm = data.admission_details || {};
+        const enr = data.current_enrollment || {};
 
         setFormData((prev) => ({
           ...prev,
           fullName: candidateName,
-          dteAppId: data.application_id || 'DEN18146293',
-          fatherName: gFather?.name || prev.fatherName,
-          motherName: gMother?.name || prev.motherName,
-          placeOfBirth: p.place_of_birth || prev.placeOfBirth,
+          prn: data.enrollment_no || '',
+          dteAppId: data.application_id || '',
+          fatherName: gFather?.name || '',
+          motherName: gMother?.name || '',
+          placeOfBirth: p.place_of_birth || '',
           dobDay: day,
           dobMonth: month,
           dobYear: year,
-          gender: p.gender || 'Male',
-          address: perm.address_line_1 || prev.address,
-          district: perm.district || prev.district,
-          state: perm.state || prev.state,
-          pincode: perm.pincode || prev.pincode,
-          aadhaarNo: adh.aadhaar_number_masked || prev.aadhaarNo,
+          gender: p.gender === 'FEMALE' ? 'Female' : p.gender === 'OTHER' ? 'Other' : 'Male',
+          caste: p.caste || '',
+          maritalStatus: p.marital_status || 'Unmarried',
+          abcId: p.abc_id || '',
+          admittedYear: adm.admission_year || enr.academic_year_code || '',
+          admissionType: adm.admission_type || (isDSY ? 'Direct Second Year' : 'CAP'),
+          category: adm.category || '',
+          allottedSeatType: adm.allotted_seat_type || adm.seat_type || '',
+          annualIncome: gFather?.annual_income ? String(gFather.annual_income) : '',
+          address: perm.address_line_1 || '',
+          district: perm.district || '',
+          state: perm.state || 'Maharashtra',
+          pincode: perm.pincode || '',
+          aadhaarNo: adh.aadhaar_number_masked || '',
           aadhaarName: candidateName,
-          aadhaarMobile: p.student_mobile || prev.aadhaarMobile,
-          bankHolderName: candidateName,
-          bankName: bk.bank_name || prev.bankName,
-          branchName: bk.branch_name || prev.branchName,
-          accountNo: bk.account_number_masked || prev.accountNo,
-          ifscCode: bk.ifsc_code || prev.ifscCode,
+          aadhaarMobile: p.student_mobile || '',
+          bankHolderName: bk.account_holder_name || candidateName,
+          bankName: bk.bank_name || '',
+          branchName: bk.branch_name || '',
+          accountNo: bk.account_number_masked || '',
+          ifscCode: bk.ifsc_code || '',
           ...(isDSY
             ? {
                 hscStream: 'Polytechnic Diploma',
-                hscBoard: adm.diploma_board || 'MSBTE (Maharashtra State Board of Technical Education)',
-                hscCollege: adm.diploma_college || prev.hscCollege || 'Government Polytechnic',
-                hscPassingYear: '2025',
-                hscSeatNo: adm.diploma_seat_no || prev.hscSeatNo,
-                hscPercentage: adm.diploma_percentage ? `${adm.diploma_percentage}%` : prev.hscPercentage,
-                hscMarksObtained: adm.merit_marks ? `${adm.merit_marks} / 100` : prev.hscMarksObtained,
+                hscBoard: adm.diploma_board || '',
+                hscCollege: adm.diploma_college || '',
+                hscPassingYear: '',
+                hscSeatNo: adm.diploma_seat_no || '',
+                hscPercentage: adm.diploma_percentage ? `${adm.diploma_percentage}%` : '',
+                hscMarksObtained: adm.merit_marks ? `${adm.merit_marks} / 100` : '',
               }
             : {}),
         }));
@@ -238,25 +255,32 @@ export default function StudentProfilePage() {
           gender: String(formData.gender || '').toUpperCase(),
           date_of_birth: `${formData.dobYear}-${monthNum}-${dayNum}`,
           student_mobile: formData.aadhaarMobile,
+          caste: formData.caste,
+          marital_status: formData.maritalStatus,
+          abc_id: formData.abcId,
         },
         guardians: [
-          { relationship: 'FATHER', name: formData.fatherName },
-          { relationship: 'MOTHER', name: formData.motherName },
+          ...(formData.fatherName ? [{ relationship: 'FATHER', name: formData.fatherName }] : []),
+          ...(formData.motherName ? [{ relationship: 'MOTHER', name: formData.motherName }] : []),
         ],
-        address: {
-          address_line_1: formData.address,
-          district: formData.district,
-          state: formData.state,
-          pincode: formData.pincode,
-        },
-        bank: {
-          account_holder_name: formData.bankHolderName,
-          bank_name: formData.bankName,
-          branch_name: formData.branchName,
-          ifsc_code: formData.ifscCode,
-          // Never send the masked display value back as a new account number.
-          ...(!String(formData.accountNo || '').includes('X') && { account_number: formData.accountNo }),
-        },
+        ...(formData.address ? {
+          address: {
+            address_line_1: formData.address,
+            district: formData.district,
+            state: formData.state,
+            pincode: formData.pincode,
+          },
+        } : {}),
+        ...(formData.bankName || formData.accountNo ? {
+          bank: {
+            account_holder_name: formData.bankHolderName,
+            bank_name: formData.bankName,
+            branch_name: formData.branchName,
+            ifsc_code: formData.ifscCode,
+            // Never send the masked display value back as a new account number.
+            ...(!String(formData.accountNo || '').includes('X') && formData.accountNo ? { account_number: formData.accountNo } : {}),
+          },
+        } : {}),
       };
       const res = await studentApi.updateMyProfile(payload);
       const changed = res.data?.changed?.length ? `: ${res.data.changed.join(', ')}` : '';
@@ -311,6 +335,14 @@ export default function StudentProfilePage() {
     { id: 'marksheets', label: isDSYStudent ? 'Diploma & SSC Marksheet' : 'HSC & SSC Marksheet', icon: FileText },
   ];
 
+  // Password change is strictly self-service: the backend ChangePasswordView
+  // only ever updates request.user, so expose the Security tab solely on the
+  // student's OWN profile (/profile), never on another student's record
+  // (/students/:id) opened from the directory.
+  const visibleTabs = isOwnProfile
+    ? [...tabs, { id: 'security', label: 'Security', icon: Lock }]
+    : tabs;
+
   return (
     <>
       <PageHeader
@@ -359,7 +391,7 @@ export default function StudentProfilePage() {
       <div className="edvana-banner-overlap" style={{ paddingBottom: '3.5rem' }}>
         {/* Continuous Navigation Tabs Bar with bottom gray/blue indicator under each option */}
         <div className="profile-tab-bar">
-          {tabs.map((tab) => {
+          {visibleTabs.map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
             return (
@@ -530,16 +562,14 @@ export default function StudentProfilePage() {
                         marginBottom: '0.375rem',
                       }}
                     >
-                      DTE Application ID <span style={{ color: '#ef4444' }}>*</span>
+                      University PRN (Enrollment No) <span style={{ color: '#ef4444' }}>*</span>
                     </label>
                     <input
                       type="text"
                       className="edvana-input"
                       disabled
-                      title="Locked: government application ID."
-                      placeholder="For Eg. DEN18146293"
-                      value={formData.dteAppId}
-                      onChange={(e) => handleInputChange('dteAppId', e.target.value)}
+                      title="Locked: University Permanent Registration Number (PRN)."
+                      value={formData.prn || student.enrollment_no || ''}
                     />
                     <span
                       style={{
@@ -549,7 +579,7 @@ export default function StudentProfilePage() {
                         display: 'block',
                       }}
                     >
-                      For Eg. DEN18146293
+                      DBATU University Permanent Registration Number
                     </span>
                   </div>
 
@@ -563,11 +593,13 @@ export default function StudentProfilePage() {
                         marginBottom: '0.375rem',
                       }}
                     >
-                      Father's Name <span style={{ color: '#ef4444' }}>*</span>
+                      Father's Name
                     </label>
                     <input
                       type="text"
-                      className="edvana-input" disabled={!canEdit}
+                      className="edvana-input"
+                      disabled={!canEdit}
+                      placeholder="Father's full name"
                       value={formData.fatherName}
                       onChange={(e) => handleInputChange('fatherName', e.target.value)}
                     />
@@ -583,11 +615,13 @@ export default function StudentProfilePage() {
                         marginBottom: '0.375rem',
                       }}
                     >
-                      Mother's Name (FIRST) <span style={{ color: '#ef4444' }}>*</span>
+                      Mother's Name
                     </label>
                     <input
                       type="text"
-                      className="edvana-input" disabled={!canEdit}
+                      className="edvana-input"
+                      disabled={!canEdit}
+                      placeholder="Mother's name"
                       value={formData.motherName}
                       onChange={(e) => handleInputChange('motherName', e.target.value)}
                     />
@@ -603,11 +637,90 @@ export default function StudentProfilePage() {
                         marginBottom: '0.375rem',
                       }}
                     >
-                      Place of Birth <span style={{ color: '#ef4444' }}>*</span>
+                      Sub-Caste (जात)
                     </label>
                     <input
                       type="text"
-                      className="edvana-input" disabled={!canEdit}
+                      className="edvana-input"
+                      disabled={!canEdit}
+                      placeholder="e.g. Maratha, Kunbi, Sutar"
+                      value={formData.caste}
+                      onChange={(e) => handleInputChange('caste', e.target.value)}
+                    />
+                  </div>
+
+                  <div>
+                    <label
+                      style={{
+                        display: 'block',
+                        fontSize: '0.8125rem',
+                        fontWeight: 600,
+                        color: '#334155',
+                        marginBottom: '0.375rem',
+                      }}
+                    >
+                      Marital Status
+                    </label>
+                    <select
+                      className="edvana-select"
+                      disabled={!canEdit}
+                      value={formData.maritalStatus}
+                      onChange={(e) => handleInputChange('maritalStatus', e.target.value)}
+                    >
+                      <option value="Unmarried">Unmarried</option>
+                      <option value="Married">Married</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label
+                      style={{
+                        display: 'block',
+                        fontSize: '0.8125rem',
+                        fontWeight: 600,
+                        color: '#334155',
+                        marginBottom: '0.375rem',
+                      }}
+                    >
+                      ABC ID (Academic Bank of Credits)
+                    </label>
+                    <input
+                      type="text"
+                      className="edvana-input"
+                      disabled={!canEdit}
+                      placeholder="e.g. 123-456-789-012"
+                      value={formData.abcId}
+                      onChange={(e) => handleInputChange('abcId', e.target.value)}
+                    />
+                    <span
+                      style={{
+                        fontSize: '0.75rem',
+                        color: '#64748b',
+                        marginTop: '0.25rem',
+                        display: 'block',
+                      }}
+                    >
+                      NEP 2020 DigiLocker / APAAR ID
+                    </span>
+                  </div>
+
+                  <div>
+                    <label
+                      style={{
+                        display: 'block',
+                        fontSize: '0.8125rem',
+                        fontWeight: 600,
+                        color: '#334155',
+                        marginBottom: '0.375rem',
+                      }}
+                    >
+                      Place of Birth
+                    </label>
+                    <input
+                      type="text"
+                      className="edvana-input"
+                      disabled={!canEdit}
+                      placeholder="e.g. Kolhapur"
                       value={formData.placeOfBirth}
                       onChange={(e) => handleInputChange('placeOfBirth', e.target.value)}
                     />
@@ -724,15 +837,14 @@ export default function StudentProfilePage() {
                         marginBottom: '0.375rem',
                       }}
                     >
-                      Date of Admission <span style={{ color: '#ef4444' }}>*</span>
+                      Admitted Academic Year <span style={{ color: '#ef4444' }}>*</span>
                     </label>
                     <input
-                      type="date"
+                      type="text"
                       className="edvana-input"
                       disabled
-                      title="Locked: admission record."
-                      value={formData.dateOfAdmission}
-                      onChange={(e) => handleInputChange('dateOfAdmission', e.target.value)}
+                      title="Locked: authoritative admission year."
+                      value={formData.admittedYear || student.admission_year_code || '2024-25'}
                     />
                   </div>
 
@@ -748,18 +860,13 @@ export default function StudentProfilePage() {
                     >
                       Admission Type <span style={{ color: '#ef4444' }}>*</span>
                     </label>
-                    <select
-                      className="edvana-select"
+                    <input
+                      type="text"
+                      className="edvana-input"
                       disabled
                       title="Locked: admission record."
-                      value={formData.admissionType}
-                      onChange={(e) => handleInputChange('admissionType', e.target.value)}
-                    >
-                      <option value="CAP">CAP</option>
-                      <option value="Institute Level">Institute Level</option>
-                      <option value="TFWS">TFWS</option>
-                      <option value="Management">Management</option>
-                    </select>
+                      value={formData.admissionType || (isDSYStudent ? 'Direct Second Year (DSE)' : 'First Year (CAP)')}
+                    />
                   </div>
 
                   <div>
@@ -772,25 +879,15 @@ export default function StudentProfilePage() {
                         marginBottom: '0.375rem',
                       }}
                     >
-                      Allotted Seat Type <span style={{ color: '#ef4444' }}>*</span>
+                      Candidate Category <span style={{ color: '#ef4444' }}>*</span>
                     </label>
-                    <select
-                      className="edvana-select"
+                    <input
+                      type="text"
+                      className="edvana-input"
                       disabled
-                      title="Locked: admission record."
-                      value={formData.allottedSeatType}
-                      onChange={(e) => handleInputChange('allottedSeatType', e.target.value)}
-                    >
-                      <option value="NT-C">NT-C</option>
-                      <option value="OPEN">OPEN</option>
-                      <option value="OBC">OBC</option>
-                      <option value="SC">SC</option>
-                      <option value="ST">ST</option>
-                      <option value="NT-A">NT-A</option>
-                      <option value="NT-B">NT-B</option>
-                      <option value="NT-D">NT-D</option>
-                      <option value="EWS">EWS</option>
-                    </select>
+                      title="Locked: official candidate category."
+                      value={formData.category || 'OPEN'}
+                    />
                   </div>
 
                   <div>
@@ -803,12 +900,32 @@ export default function StudentProfilePage() {
                         marginBottom: '0.375rem',
                       }}
                     >
-                      Scholarship Applied <span style={{ color: '#ef4444' }}>*</span>
+                      Allotted Seat Type / Quota <span style={{ color: '#ef4444' }}>*</span>
+                    </label>
+                    <input
+                      type="text"
+                      className="edvana-input"
+                      disabled
+                      title="Locked: admission allotment quota."
+                      value={formData.allottedSeatType || formData.category || 'General'}
+                    />
+                  </div>
+
+                  <div>
+                    <label
+                      style={{
+                        display: 'block',
+                        fontSize: '0.8125rem',
+                        fontWeight: 600,
+                        color: '#334155',
+                        marginBottom: '0.375rem',
+                      }}
+                    >
+                      Scholarship Applied
                     </label>
                     <select
                       className="edvana-select"
-                      disabled
-                      title="Locked: admission record."
+                      disabled={!canEdit}
                       value={formData.scholarshipApplied}
                       onChange={(e) => handleInputChange('scholarshipApplied', e.target.value)}
                     >
@@ -827,21 +944,21 @@ export default function StudentProfilePage() {
                         marginBottom: '0.375rem',
                       }}
                     >
-                      Scholarship Type <span style={{ color: '#ef4444' }}>*</span>
+                      Scholarship Type
                     </label>
                     <select
                       className="edvana-select"
-                      disabled
-                      title="Locked: admission record."
+                      disabled={!canEdit}
                       value={formData.scholarshipType}
                       onChange={(e) => handleInputChange('scholarshipType', e.target.value)}
                     >
-                      <option value="NT-C">NT-C</option>
-                      <option value="EBC">EBC</option>
-                      <option value="SC Scholarship">SC Scholarship</option>
-                      <option value="OBC Freeship">OBC Freeship</option>
-                      <option value="ST Scholarship">ST Scholarship</option>
                       <option value="None">None</option>
+                      <option value="EBC">EBC (Economically Backward Class)</option>
+                      <option value="OBC Freeship">OBC Freeship</option>
+                      <option value="SC Scholarship">SC Scholarship</option>
+                      <option value="ST Scholarship">ST Scholarship</option>
+                      <option value="NT-C">NT-C</option>
+                      <option value="Minority Scholarship">Minority Scholarship</option>
                     </select>
                   </div>
 
@@ -855,21 +972,16 @@ export default function StudentProfilePage() {
                         marginBottom: '0.375rem',
                       }}
                     >
-                      Father's /Guardian's Annual Income (from all sources) <span style={{ color: '#ef4444' }}>*</span>
+                      Parent's / Guardian's Annual Income
                     </label>
-                    <select
-                      className="edvana-select"
-                      disabled
-                      title="Locked: admission record."
+                    <input
+                      type="text"
+                      className="edvana-input"
+                      disabled={!canEdit}
+                      placeholder="e.g. ₹ 1,50,000"
                       value={formData.annualIncome}
                       onChange={(e) => handleInputChange('annualIncome', e.target.value)}
-                    >
-                      <option value="600000 to 700000">600000 to 700000</option>
-                      <option value="Below 100000">Below 100000</option>
-                      <option value="100000 to 250000">100000 to 250000</option>
-                      <option value="250000 to 600000">250000 to 600000</option>
-                      <option value="Above 800000">Above 800000</option>
-                    </select>
+                    />
                   </div>
                 </div>
               </div>
@@ -2047,6 +2159,27 @@ export default function StudentProfilePage() {
               >
                 Update Marksheet Details (Locked)
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================
+            TAB 6: Security — update password (same experience as
+            first-login password change; self-service only)
+            ======================================================== */}
+        {activeTab === 'security' && isOwnProfile && (
+          <div style={{ display: 'flex', justifyContent: 'center' }}>
+            <div className="edvana-card" style={{ width: '100%', maxWidth: '560px' }}>
+              <div className="edvana-card-header">
+                <h3 className="edvana-card-title">Update Password</h3>
+                <p className="edvana-card-description">
+                  Choose a strong, unique password for your account. Same security
+                  policy as your first-login password setup.
+                </p>
+              </div>
+              <div className="edvana-card-body">
+                <PasswordChangeForm embedded />
+              </div>
             </div>
           </div>
         )}

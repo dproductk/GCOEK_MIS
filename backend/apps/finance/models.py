@@ -153,6 +153,11 @@ class StudentFeeAssessment(BaseModel):
     )
     total_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
     is_marked = models.BooleanField(default=False)
+    allow_online_payment = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text='Accountant selection to allow candidate to pay online via payment gateway.',
+    )
     assessed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -169,4 +174,152 @@ class StudentFeeAssessment(BaseModel):
 
     def __str__(self):
         return f'{self.student.display_name} ({self.academic_year.code}): ₹{self.total_fee}'
+
+
+class FeeReceiptCounter(BaseModel):
+    """
+    Concurrency-safe sequence tracker for official institutional receipts.
+    Format: GCOEK/<academic_year.code>/FEE/<sequence:04d>
+    Rows are locked with SELECT FOR UPDATE to prevent colliding receipt numbers
+    under concurrent online payments.
+    """
+
+    academic_year = models.OneToOneField(
+        AcademicYear,
+        on_delete=models.PROTECT,
+        related_name='receipt_counter',
+    )
+    last_sequence = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        db_table = 'finance_fee_receipt_counters'
+
+    def __str__(self):
+        return f'{self.academic_year.code}: {self.last_sequence}'
+
+
+class OnlinePaymentAttempt(BaseModel):
+    """
+    Authoritative log and state machine of each online fee payment attempt.
+    Tracks initiation, redirect, callback, webhook, and server verification.
+    """
+
+    class Status(models.TextChoices):
+        INITIATED = 'INITIATED', 'Initiated'
+        REDIRECTED = 'REDIRECTED', 'Redirected to Gateway'
+        PENDING = 'PENDING', 'Pending Verification'
+        SUCCESS = 'SUCCESS', 'Payment Successful'
+        FAILED = 'FAILED', 'Payment Failed'
+        CANCELLED = 'CANCELLED', 'Cancelled by User'
+        EXPIRED = 'EXPIRED', 'Payment Link Expired'
+        UNKNOWN = 'UNKNOWN', 'Ambiguous / Needs Re-check'
+
+    student = models.ForeignKey(
+        'students.Student',
+        on_delete=models.PROTECT,
+        related_name='online_payment_attempts',
+    )
+    academic_year = models.ForeignKey(
+        AcademicYear,
+        on_delete=models.PROTECT,
+        related_name='online_payment_attempts',
+    )
+    assessment = models.ForeignKey(
+        StudentFeeAssessment,
+        on_delete=models.PROTECT,
+        related_name='online_payment_attempts',
+    )
+    transaction_id = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+        help_text='Unique college transaction reference sent to Easebuzz (txnid).',
+    )
+    idempotency_key = models.CharField(
+        max_length=64,
+        db_index=True,
+        help_text='Client or server idempotency key to prevent double initiation.',
+    )
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text='Exact payable fee derived authoritatively from StudentFeeAssessment.',
+    )
+    currency = models.CharField(max_length=10, default='INR')
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.INITIATED,
+        db_index=True,
+    )
+    gateway_provider = models.CharField(max_length=30, default='EASEBUZZ')
+    customer_email = models.CharField(
+        max_length=254,
+        blank=True,
+        default='',
+        help_text='Email sent to Easebuzz at initiation; reused for verify/retrieve hash.',
+    )
+    customer_phone = models.CharField(
+        max_length=15,
+        blank=True,
+        default='',
+        help_text='Phone sent to Easebuzz at initiation; reused for verify/retrieve hash.',
+    )
+    easebuzz_txn_id = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text='Easebuzz internal transaction reference (easepayid).',
+    )
+    easebuzz_status = models.CharField(max_length=50, blank=True, default='')
+    payment_mode = models.CharField(
+        max_length=50,
+        blank=True,
+        default='',
+        help_text='Payment instrument (e.g. UPI, NetBanking, Credit Card, Debit Card).',
+    )
+    checkout_url = models.TextField(blank=True, default='')
+    access_key = models.CharField(max_length=150, blank=True, default='')
+    failure_reason = models.TextField(blank=True, default='')
+    raw_initiation_response = models.JSONField(default=dict, blank=True)
+    raw_callback_payload = models.JSONField(default=dict, blank=True)
+    initiated_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'finance_online_payment_attempts'
+        ordering = ['-initiated_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['student', 'idempotency_key'],
+                name='uniq_online_payment_student_idempotency',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.transaction_id} ({self.student.display_name}) - ₹{self.amount} [{self.status}]'
+
+
+class GatewayRawEvent(BaseModel):
+    """
+    Durable, tamper-evident log of all incoming raw gateway events (callbacks, webhooks).
+    Recorded immediately upon receipt before any parsing or business processing.
+    """
+
+    event_source = models.CharField(max_length=50, default='EASEBUZZ')
+    event_type = models.CharField(max_length=50, default='CALLBACK')  # CALLBACK / WEBHOOK / RECONCILE
+    transaction_id = models.CharField(max_length=100, blank=True, default='', db_index=True)
+    payload = models.JSONField(default=dict)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    is_verified = models.BooleanField(default=False)
+    processed = models.BooleanField(default=False)
+    processing_error = models.TextField(blank=True, default='')
+
+    class Meta:
+        db_table = 'finance_gateway_raw_events'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.event_source} {self.event_type} - {self.transaction_id} (Processed: {self.processed})'
 

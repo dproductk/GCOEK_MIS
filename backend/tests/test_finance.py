@@ -248,3 +248,72 @@ def test_assessment_api_validates_and_freezes_on_payment(api_client, finance_set
                               format='json')
     assert frozen.status_code == status.HTTP_400_BAD_REQUEST
     assert StudentFeeAssessment.objects.filter(student=stu2).count() == 1
+
+
+@pytest.mark.django_db
+def test_manual_marking_happy_path_receipt_backend_generated(api_client, finance_setup):
+    """Manual desk happy path: Set Fee -> Mark Fee succeeds once, receipt is backend-generated."""
+    import datetime
+    from apps.authentication.models import Role, RoleAssignment, User
+    from apps.finance.models import PaymentLedger
+    from apps.students.models import Student
+
+    head = finance_setup['fee_head']
+    head.allowed_amounts = [65000]
+    head.save(update_fields=['allowed_amounts'])
+    year = finance_setup['year']
+    api_client.force_authenticate(user=finance_setup['user_acc'])
+
+    # Fresh student with no ledger yet.
+    role_student, _ = Role.objects.get_or_create(codename='STUDENT', defaults={'name': 'Student'})
+    u = User.objects.create_user(username='manual_happy', password='Password123!', user_type=User.UserType.STUDENT)
+    RoleAssignment.objects.create(user=u, role=role_student, status=RoleAssignment.Status.ACTIVE)
+    stu = Student.objects.create(user=u, enrollment_no='PRN-FIN-HAPPY', first_name='Amit', last_name='Patil')
+
+    # 1. Mark without Set Fee -> blocked.
+    no_set = api_client.post('/api/v1/finance/ledger/', {
+        'student': str(stu.id), 'academic_year': str(year.id),
+        'total_fee_due': '65000.00', 'amount_paid': '65000.00',
+        'payment_mode': PaymentLedger.PaymentMode.CASH,
+        'transaction_ref': 'CASH-1', 'payment_date': datetime.date.today().isoformat(),
+    }, format='json')
+    assert no_set.status_code == status.HTTP_400_BAD_REQUEST
+
+    # 2. Set Fee.
+    ok = api_client.post('/api/v1/finance/assessments/', {
+        'student': str(stu.id), 'academic_year': str(year.id),
+        'fee_breakdown': {'Tuition Fee': 65000}, 'total_fee': '65000'}, format='json')
+    assert ok.status_code in (200, 201), ok.data
+
+    # 3. Half payment rejected (university rule: full payment only).
+    half = api_client.post('/api/v1/finance/ledger/', {
+        'student': str(stu.id), 'academic_year': str(year.id),
+        'total_fee_due': '65000.00', 'amount_paid': '35000.00',
+        'payment_mode': PaymentLedger.PaymentMode.CASH,
+        'transaction_ref': 'CASH-HALF', 'payment_date': datetime.date.today().isoformat(),
+    }, format='json')
+    assert half.status_code == status.HTTP_400_BAD_REQUEST
+
+    # 4. Full payment succeeds even when client sends a fake receipt_no;
+    # backend must ignore it and generate GCOEK/<year>/FEE/<nnnn>.
+    good = api_client.post('/api/v1/finance/ledger/', {
+        'student': str(stu.id), 'academic_year': str(year.id),
+        'receipt_no': 'MY-BILL-123',
+        'total_fee_due': '65000.00', 'amount_paid': '65000.00',
+        'payment_mode': PaymentLedger.PaymentMode.CASH,
+        'transaction_ref': 'CASH-2', 'payment_date': datetime.date.today().isoformat(),
+    }, format='json')
+    assert good.status_code in (200, 201), good.data
+    assert good.data['receipt_no'] != 'MY-BILL-123'
+    assert good.data['receipt_no'].startswith('GCOEK/')
+    assert good.data['status'] == PaymentLedger.PaymentStatus.PAID
+
+    # 5. Second marking blocked (duplicate).
+    dup = api_client.post('/api/v1/finance/ledger/', {
+        'student': str(stu.id), 'academic_year': str(year.id),
+        'total_fee_due': '65000.00', 'amount_paid': '65000.00',
+        'payment_mode': PaymentLedger.PaymentMode.CASH,
+        'transaction_ref': 'CASH-3', 'payment_date': datetime.date.today().isoformat(),
+    }, format='json')
+    assert dup.status_code == status.HTTP_400_BAD_REQUEST
+    assert PaymentLedger.objects.filter(student=stu, academic_year=year).count() == 1
