@@ -339,11 +339,15 @@
     transform var(--motion-fast) var(--motion-ease-out);
 }
 
+/* Focus keeps the border-color/box-shadow affordance from the design system.
+   No translateY lift here: shifting a focused control by even 1px misaligns it
+   with its grid neighbours and with a native <select> popup, making the
+   focused border look bigger / detached from the control. */
 .edvana-input:focus,
 .edvana-select:focus,
 .edvana-textarea:focus,
 .login-text-input:focus {
-  transform: translateY(-1px);
+  transform: none;
 }
 
 @keyframes motion-shake {

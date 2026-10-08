@@ -832,6 +832,17 @@ def _get_or_create_division(dept, academic_year, sem1):
     return div
 
 
+def _landing_year(batch_year):
+    """Academic year whose divisions receive fresh imports.
+
+    Classes run in the CURRENT year: landing senior/backfill imports under
+    their old admission year would strand a duplicate past-year Div A that
+    the HOD must merge by hand. Fresh files (batch == current) are
+    unaffected. Falls back to the batch year when no current year exists.
+    """
+    return AcademicYear.objects.filter(is_current=True).first() or batch_year
+
+
 def commit_import_batch(batch_id):
     """
     Commit all VALID rows into core records (Student + Enrollment + Login).
@@ -993,7 +1004,7 @@ def commit_import_batch(batch_id):
                         if user is None:
                             user = User(
                                 username=login_id,
-                                email=norm.get('email') or f'{login_id}@gceok.ac.in',
+                                email=norm.get('email') or None,
                                 user_type=User.UserType.STUDENT,
                                 is_active=True,
                                 must_change_password=True,
@@ -1034,7 +1045,7 @@ def commit_import_batch(batch_id):
                 # 1. Login account (password set once, never reset on re-import).
                 user = User(
                     username=login_id,
-                    email=norm.get('email') or f'{login_id}@gceok.ac.in',
+                    email=norm.get('email') or None,
                     user_type=User.UserType.STUDENT,
                     is_active=True,
                     must_change_password=True,
@@ -1057,7 +1068,7 @@ def commit_import_batch(batch_id):
                 row_target_sem = (
                     Semester.objects.filter(number=_row_no).first() or target_sem
                 )
-                div = _get_or_create_division(dept, batch.academic_year, row_target_sem)
+                div = _get_or_create_division(dept, _landing_year(batch.academic_year), row_target_sem)
 
                 # 2. Student identity (stable internal UUID PK; govt IDs unique cols).
                 name_parts = full_name.split()
@@ -1091,10 +1102,10 @@ def commit_import_batch(batch_id):
                     gender = 'OTHER'
 
                 caste_val = (norm.get('caste') or _lookup(row.raw_data, 'cast', 'caste', 'sub caste', 'sub-caste'))[:100]
-                marital_val = (norm.get('marital_status') or _lookup(row.raw_data, 'marital status') or 'Unmarried')[:20]
+                marital_val = (norm.get('marital_status') or _lookup(row.raw_data, 'marital status') or '')[:20]
                 abc_id_val = (norm.get('abc_id') or _lookup(row.raw_data, 'abc id', 'abc_id', 'academic bank of credits id'))[:50]
                 blood_group_val = (norm.get('blood_group') or _lookup(row.raw_data, 'blood group', 'blood_group'))[:10]
-                state_val = (_lookup(row.raw_data, 'student state', 'state') or 'Maharashtra').strip()[:50]
+                state_val = (_lookup(row.raw_data, 'student state', 'state') or '').strip()[:50]
 
                 StudentPersonalDetail.objects.get_or_create(
                     student=student,
@@ -1102,10 +1113,10 @@ def commit_import_batch(batch_id):
                         'date_of_birth': dob,
                         'gender': gender,
                         'religion': (row.raw_data.get('Religion') or '').strip()[:50],
-                        'nationality': 'Indian',
+                        'nationality': '',
                         'mother_tongue': (row.raw_data.get('Mother Tongue') or '').strip()[:50],
                         'domicile_state': state_val,
-                        'student_email': norm.get('email') or f'{login_id}@gceok.ac.in',
+                        'student_email': norm.get('email') or '',
                         'student_mobile': norm.get('mobile') or '',
                         'blood_group': blood_group_val,
                         'caste': caste_val,
@@ -1114,10 +1125,9 @@ def commit_import_batch(batch_id):
                     },
                 )
 
-                # 4. Guardian (father when provided).
+                # 4. Guardian (father only when the file states one —
+                # never guessed from the student's middle name).
                 father_name = (row.raw_data.get('Father Name') or '').strip()
-                if not father_name and middle_name:
-                    father_name = middle_name
                 if father_name:
                     StudentGuardian.objects.get_or_create(
                         student=student,
@@ -1135,9 +1145,9 @@ def commit_import_batch(batch_id):
                 city_val = _lookup(row.raw_data, 'student_city/village', 'student city/village', 'city/village', 'village', 'address line 1')
                 taluka_val = _lookup(row.raw_data, 'student taluka', 'taluka')
                 dist_val = _lookup(row.raw_data, 'student district', 'district')
-                st_val = _lookup(row.raw_data, 'student state', 'state') or 'Maharashtra'
+                st_val = _lookup(row.raw_data, 'student state', 'state') or ''
                 pin_val = _lookup(row.raw_data, 'student location pincode', 'pincode', 'pin code')
-                addr_line_1 = ', '.join(filter(None, [city_val, taluka_val])) or city_val or 'Address Not Provided'
+                addr_line_1 = ', '.join(filter(None, [city_val, taluka_val])) or city_val or ''
 
                 StudentAddress.objects.get_or_create(
                     student=student,
@@ -1165,7 +1175,9 @@ def commit_import_batch(batch_id):
                 reported_date = parse_date_flexible(
                     raw.get('Reported Date') or _lookup(raw, *_REP_DATE_KEYS))
                 adm_type = 'DIRECT_SECOND_YEAR' if row_is_dsy else 'CAP'
-                adm_app_id = app_id or file_enr or f'ADM_{student.id}'
+                adm_app_id = app_id or file_enr
+                if not adm_app_id:
+                    raise ValueError('Missing Application ID and Enrollment No / PRN at import.')
                 allotted_seat = (norm.get('admitted_category') or _lookup(raw, 'admitted_category', 'admitted category', 'seat type') or (raw.get('Seat Type') or '').strip())
 
                 StudentAdmission.objects.get_or_create(
@@ -1175,8 +1187,8 @@ def commit_import_batch(batch_id):
                     defaults={
                         'admission_type': adm_type,
                         'category': (norm.get('category') or '').strip()[:20],
-                        'candidature_type': (raw.get('Candidature Type') or ('Type A' if row_is_dsy else '')).strip()[:50],
-                        'institute_code': (raw.get('Institute Code') or '6270').strip()[:20],
+                        'candidature_type': (raw.get('Candidature Type') or '').strip()[:50],
+                        'institute_code': (raw.get('Institute Code') or '').strip()[:20],
                         'choice_code': (norm.get('choice_code') or '').strip()[:50],
                         'program_code': (norm.get('program_code') or '').strip()[:50],
                         'seat_type': (raw.get('Seat Type') or allotted_seat).strip()[:50],

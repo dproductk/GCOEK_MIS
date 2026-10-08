@@ -241,7 +241,7 @@ export default function AdmissionImportPage() {
     {
       header: 'Academic Term',
       accessor: 'academic_year_code',
-      render: (b) => <span style={{ fontWeight: 500 }}>{b.academic_year_code || '2025-2026'}</span>,
+      render: (b) => <span style={{ fontWeight: 500 }}>{b.academic_year_code || '—'}</span>,
     },
     {
       header: 'Stream',

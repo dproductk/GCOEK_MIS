@@ -147,19 +147,36 @@ def evaluate_student_eligibility(student, target_semester, user_reviewer=None):
 
 def class_teacher_review_eligibility(eligibility_id, reviewer_user, status_decision, remarks='', request=None):
     """
-    Class Teacher verifies or flags student eligibility.
-    Enforces locking rule: Once confirmed/approved, it is locked unless flagged back by HOD.
+    Class Teacher verifies, flags, or fails student eligibility.
+    FAIL (REJECTED) is terminal at teacher level: the student is not
+    eligible this cycle and fees can never promote them. Only the HOD
+    can reopen a failed case by flagging it back.
+    Enforces locking rule: Once decided, it is locked unless flagged back by HOD.
     Audited per SECURITY.md Sec 12/16 (who verified/flagged, old/new state).
     """
     from rest_framework.exceptions import ValidationError
 
+    allowed = {
+        EligibilityVerification.StageStatus.APPROVED,
+        EligibilityVerification.StageStatus.FLAGGED,
+        EligibilityVerification.StageStatus.REJECTED,
+    }
+    if status_decision not in allowed:
+        raise ValidationError(f'Invalid decision {status_decision!r}. Use APPROVED, FLAGGED or REJECTED (fail).')
+
     with transaction.atomic():
         ev = EligibilityVerification.objects.select_for_update().get(id=eligibility_id)
 
-        # Enforce lock: If already approved and HOD has not flagged it back, block edit.
+        # HOD-closed (failed) cases are untouchable by the teacher.
+        if ev.hod_status == EligibilityVerification.StageStatus.REJECTED:
+            raise ValidationError(
+                'The HOD has closed this case as failed. It cannot be edited.'
+            )
+
+        # Enforce lock: If already decided and HOD has not flagged it back, block edit.
         if ev.is_locked_for_teacher:
             raise ValidationError(
-                'This eligibility verification is locked because it was already confirmed by the Class Teacher. '
+                'This eligibility verification is locked because it was already decided by the Class Teacher. '
                 'It can only be edited if returned/flagged by the HOD.'
             )
 
@@ -177,7 +194,10 @@ def class_teacher_review_eligibility(eligibility_id, reviewer_user, status_decis
         if status_decision == EligibilityVerification.StageStatus.APPROVED:
             ev.hod_status = EligibilityVerification.StageStatus.PENDING
             ev.final_eligible = False
-        elif status_decision == EligibilityVerification.StageStatus.FLAGGED:
+        elif status_decision in (
+            EligibilityVerification.StageStatus.FLAGGED,
+            EligibilityVerification.StageStatus.REJECTED,
+        ):
             ev.final_eligible = False
 
         ev.save()
@@ -210,11 +230,29 @@ def hod_endorse_eligibility(eligibility_id, hod_user, status_decision, remarks='
     HOD final approval of eligibility.
     - If APPROVED and class teacher APPROVED: final_eligible = True (eligible for admission).
     - If FLAGGED: returns candidate to Class Teacher (unlocks the record for teacher re-evaluation).
-    - If REJECTED: final_eligible = False.
+    - If REJECTED (fail): terminal. The student is not eligible this cycle and
+      fee payment can never promote them. Only a HOD flag can reopen it.
     Audited per SECURITY.md Sec 12/16.
     """
     with transaction.atomic():
         ev = EligibilityVerification.objects.select_for_update().get(id=eligibility_id)
+        allowed = {
+            EligibilityVerification.StageStatus.APPROVED,
+            EligibilityVerification.StageStatus.FLAGGED,
+            EligibilityVerification.StageStatus.REJECTED,
+        }
+        from rest_framework.exceptions import ValidationError as _ValidationError
+        if status_decision not in allowed:
+            raise _ValidationError(
+                f'Invalid decision {status_decision!r}. Use APPROVED, FLAGGED or REJECTED (fail).')
+        if (status_decision == EligibilityVerification.StageStatus.APPROVED
+                and ev.class_teacher_status == EligibilityVerification.StageStatus.REJECTED):
+            raise _ValidationError(
+                'The Class Teacher marked this student as failed. Flag it back to reopen instead of approving.')
+        if (ev.hod_status == EligibilityVerification.StageStatus.REJECTED
+                and status_decision != EligibilityVerification.StageStatus.FLAGGED):
+            raise _ValidationError(
+                'This case is closed as failed. Only flagging can reopen it.')
         old_snapshot = {
             'hod_status': ev.hod_status,
             'final_eligible': ev.final_eligible,
@@ -281,7 +319,18 @@ def submit_semester_marks(student, semester_number, exam_session, subjects_data,
         if not semester:
             raise ValidationError(f'Semester {semester_number} not found.')
 
+        if not (exam_session or '').strip():
+            raise ValidationError('exam_session is required (e.g. Winter 2026).')
+
         target_sem = Semester.objects.filter(number=semester_number + 1).first() or semester
+        # Backlog catch-up (submitted older than the student's current
+        # semester) rides the current class window instead: demanding or
+        # birthing the stale first-year cycle (submitted+1) would block
+        # seniors on long-closed verifications and pollute teacher queues.
+        cur_sem_num = enrollment.semester.number if enrollment and enrollment.semester else None
+        is_backlog_submit = cur_sem_num is not None and semester_number < cur_sem_num
+        if is_backlog_submit:
+            target_sem = Semester.objects.filter(number=cur_sem_num + 1).first() or target_sem
 
         # Check existing eligibility lock
         existing_ev = EligibilityVerification.objects.filter(
@@ -302,7 +351,7 @@ def submit_semester_marks(student, semester_number, exam_session, subjects_data,
             academic_year=academic_year,
             semester=semester,
             defaults={
-                'exam_session': exam_session or 'Winter 2026',
+                'exam_session': exam_session,
                 'seat_number': seat_number or '',
                 'is_published': True,
                 'published_at': timezone.now(),
@@ -323,16 +372,26 @@ def submit_semester_marks(student, semester_number, exam_session, subjects_data,
         except Exception:
             min_theory, min_total = 20.0, 40.0
         for s in subjects_data:
-            code = s.get('course_code') or s.get('code')
+            code = (s.get('course_code') or s.get('code') or '').strip()
+            if not code:
+                raise ValidationError('Every subject needs a course_code.')
             name = s.get('course_name') or s.get('name') or code
-            credits_val = int(s.get('credits') or 3)
+            if s.get('credits') in (None, ''):
+                raise ValidationError(f'Subject {code} needs credits from the scheme.')
+            credits_val = int(s.get('credits'))
 
             th = float(s.get('theory_marks') or s.get('theory_ese_marks') or 0.0)
             m1 = float(s.get('mid1_marks') or 0.0)
             m2 = float(s.get('mid2_marks') or 0.0)
             ise = m1 + m2 if (m1 or m2) else float(s.get('theory_ise_marks') or 0.0)
             prac = float(s.get('practical_marks') or 0.0)
-            tot = float(s.get('total_marks') or (th + ise + prac))
+            # Server is authoritative on totals: recompute from components
+            # whenever any component is present; a client-sent total is only
+            # a fallback for component-less payloads (never trusted over parts).
+            if th or ise or prac:
+                tot = th + ise + prac
+            else:
+                tot = float(s.get('total_marks') or 0.0)
 
             # Scheme passing rule (fallback: Theory >= 20 AND Total >= 40)
             is_pass = (th >= min_theory and tot >= min_total)
@@ -395,8 +454,11 @@ def submit_semester_marks(student, semester_number, exam_session, subjects_data,
 
         # Eligibility rows exist only for year-change targets (3, 5, 7).
         # Other semesters record results without spawning verification.
+        # A backlog entry never births a cycle on its own — it only refreshes
+        # the open class window (if any), so stale first-year rows are never
+        # created for seniors catching up on old semesters.
         ev = None
-        if target_sem.number in YEAR_CHANGE_TARGETS:
+        if target_sem.number in YEAR_CHANGE_TARGETS and not (is_backlog_submit and existing_ev is None):
             ev = evaluate_student_eligibility(student, target_sem)
 
             # If student corrected previously flagged result, reset teacher status to PENDING

@@ -97,104 +97,116 @@ export default function FacultyProfilePage() {
   const [activeTab, setActiveTab] = useState('profile-info');
   const [loading, setLoading] = useState(true);
   const [successMessage, setSuccessMessage] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
   const [sameAsPermanent, setSameAsPermanent] = useState(false);
+  // Edit-lock mode: everything stays read-only until the owner clicks Edit.
+  // Save persists via PATCH /faculty/me/update/ and re-locks the form.
+  // Directory views (/faculty/:id) are always read-only.
+  const [isEditing, setIsEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [snapshot, setSnapshot] = useState(null);
 
-  // Form States matching the screenshots
+  // Form states start blank: every visible value must come from the backend.
+  // No sample-person data may live here (production rule).
   const [profileInfo, setProfileInfo] = useState({
-    department: 'Computer Engineering',
-    designation: 'Lecturer',
-    facultyName: user?.first_name ? `${user.first_name} ${user.last_name || ''}`.trim() : 'SURAJ S BHOSALE',
-    dobDay: '1',
-    dobMonth: 'January',
-    dobYear: '1990',
-    gender: 'Male',
-    nationality: 'Indian',
-    domicileState: 'Maharashtra State',
-    subjectsTaught: 'Database Management Systems, Software Engineering, Object Oriented Programming with Java',
-    additionalInfo: 'Department NBA Accreditation Coordinator and Class Mentor for Final Year Diploma.',
-    dateOfAppointment: '2017-01-01',
-    category: 'OPEN',
-    specialReservation: 'Not Applicable',
-    email: user?.email || 'surajbhosalegp@gmail.com',
-    mobile: '8446951964',
-    resTelephoneStd: '0231',
-    resTelephoneNum: '2654321',
-    officialEmail: user?.email || 'surajbhosalegp@gmail.com',
+    department: '',
+    designation: '',
+    facultyName: user?.first_name ? `${user.first_name} ${user.last_name || ''}`.trim() : '',
+    dobDay: '',
+    dobMonth: '',
+    dobYear: '',
+    gender: '',
+    nationality: '',
+    domicileState: '',
+    subjectsTaught: '',
+    additionalInfo: '',
+    dateOfAppointment: '',
+    category: '',
+    specialReservation: '',
+    email: user?.email || '',
+    mobile: '',
+    resTelephoneStd: '',
+    resTelephoneNum: '',
+    officialEmail: user?.email || '',
     permanentAddress: {
-      address: 'Plot No. 42, Anand Nagar, Near Circuit House, Tarabai Park',
-      district: 'Kolhapur',
-      state: 'Maharashtra State',
-      pincode: '416003',
+      address: '',
+      district: '',
+      state: '',
+      pincode: '',
     },
     correspondenceAddress: {
-      address: 'Plot No. 42, Anand Nagar, Near Circuit House, Tarabai Park',
-      district: 'Kolhapur',
-      state: 'Maharashtra State',
-      pincode: '416003',
+      address: '',
+      district: '',
+      state: '',
+      pincode: '',
     },
   });
 
   const [qualifications, setQualifications] = useState({
     graduation: {
-      course: 'B.E.',
+      course: '',
       otherCourse: '',
-      branchName: 'Computer Science & Engineering',
-      classObtained: 'First Class with Distinction',
-      university: 'Shivaji University, Kolhapur',
+      branchName: '',
+      classObtained: '',
+      university: '',
       otherUniversity: '',
     },
     postGraduation: {
-      course: 'M.E.',
+      course: '',
       otherCourse: '',
-      branchName: 'Computer Science & Engineering',
-      classObtained: 'First Class with Distinction',
-      university: 'Dr. Babasaheb Ambedkar Technological University (BATU)',
+      branchName: '',
+      classObtained: '',
+      university: '',
       otherUniversity: '',
     },
     phd: {
-      course: 'Ph.D.',
-      branchName: 'Computer Science & Engineering (Data Engineering)',
-      classObtained: 'Pursuing',
-      university: 'Shivaji University, Kolhapur',
+      course: '',
+      branchName: '',
+      classObtained: '',
+      university: '',
     },
     other: {
-      course: 'Post Graduate Diploma in Cyber Security',
-      branchName: 'Information Security',
-      classObtained: 'First Class',
-      university: 'Autonomous / MSBTE',
+      course: '',
+      branchName: '',
+      classObtained: '',
+      university: '',
     },
   });
 
   const [academicDetail, setAcademicDetail] = useState({
-    nationalPapers: '4',
-    internationalPapers: '2',
-    conferenceNational: '3',
-    conferenceInternational: '1',
-    booksPatents: 'Published 1 Book Chapter on Cloud Computing Architectures with CRC Press.',
-    professionalMembership: 'Life Member of Indian Society for Technical Education (ISTE - LM12498), CSI Member.',
-    consultancyActivities: 'Technical consultant for local industrial automation projects in Gokul Shirgaon MIDC.',
-    awards: 'Best Faculty Mentor Award 2024, Directorate of Technical Education Maharashtra.',
-    grantsFetched: 'Received MODROBS grant of ₹8.5 Lakhs for Advanced Network Simulation Laboratory.',
-    interactionInstitution: 'Visiting expert lecturer at Government Polytechnic Karad and Miraj.',
+    nationalPapers: '',
+    internationalPapers: '',
+    conferenceNational: '',
+    conferenceInternational: '',
+    booksPatents: '',
+    professionalMembership: '',
+    consultancyActivities: '',
+    awards: '',
+    grantsFetched: '',
+    interactionInstitution: '',
   });
 
   const [bankDetail, setBankDetail] = useState({
-    bankName: 'State Bank of India',
-    branchName: 'Treasury Branch, Kolhapur',
-    accountNo: '38492019485',
-    ifscCode: 'SBIN0000302',
+    bankName: '',
+    branchName: '',
+    accountNo: '',
+    ifscCode: '',
   });
 
   const [documents, setDocuments] = useState({
-    passportPhotoName: 'passport_photo.jpg',
-    signatureName: 'signature_scan.jpg',
-    aadhaarNumber: '5421 8902 3411',
-    aadhaarFileName: 'aadhaar_card_scanned.pdf',
-    panNumber: 'ABCDE1234F',
-    panFileName: 'pan_card_scanned.pdf',
+    passportPhotoName: '',
+    signatureName: '',
+    aadhaarNumber: '',
+    aadhaarFileName: '',
+    panNumber: '',
+    panFileName: '',
   });
 
   useEffect(() => {
+    setIsEditing(false);
+    setSnapshot(null);
+    setSuccessMessage('');
+    setErrorMessage('');
     loadFacultyData();
   }, [id]);
 
@@ -210,17 +222,47 @@ export default function FacultyProfilePage() {
 
       if (res?.data) {
         const d = res.data;
-        setProfileInfo((prev) => ({
-          ...prev,
-          department: d.department_name || d.department?.name || prev.department,
-          designation: d.designation_display || d.designation || prev.designation,
-          facultyName: d.display_name || `${d.first_name || ''} ${d.last_name || ''}`.trim() || prev.facultyName,
-          email: d.personal_email || d.user?.email || prev.email,
-          officialEmail: d.official_email || d.user?.email || prev.officialEmail,
-          mobile: d.mobile || prev.mobile,
-          residentialTelephoneNum: d.residential_telephone || prev.residentialTelephoneNum,
-          dateOfAppointment: d.date_of_joining || prev.dateOfAppointment,
-        }));
+        setProfileInfo((prev) => {
+          // Backend stores one telephone string; split STD-number on load.
+          let std = prev.resTelephoneStd;
+          let num = prev.resTelephoneNum;
+          if (d.residential_telephone) {
+            const parts = String(d.residential_telephone).split('-');
+            if (parts.length > 1) {
+              std = parts[0].trim();
+              num = parts.slice(1).join('-').trim();
+            } else if (/^\d+$/.test(String(d.residential_telephone).replace(/\s/g, ''))) {
+              num = String(d.residential_telephone).trim();
+            } else {
+              num = String(d.residential_telephone).trim();
+            }
+          }
+          return {
+            ...prev,
+            department: d.department_name || d.department?.name || prev.department,
+            designation: d.designation_display || d.designation || prev.designation,
+            facultyName: d.display_name || `${d.first_name || ''} ${d.last_name || ''}`.trim() || prev.facultyName,
+            email: d.personal_email || d.user?.email || prev.email,
+            officialEmail: d.official_email || d.user?.email || prev.officialEmail,
+            mobile: d.mobile || prev.mobile,
+            resTelephoneStd: std,
+            resTelephoneNum: num,
+            dateOfAppointment: d.date_of_joining || prev.dateOfAppointment,
+          };
+        });
+
+        // Populate bank tab from the masked primary account (never echo the
+        // masked value back as a new account number on save).
+        if (d.bank_accounts && d.bank_accounts.length > 0) {
+          const primary = d.bank_accounts.find((b) => b.is_primary) || d.bank_accounts[0];
+          setBankDetail((prev) => ({
+            ...prev,
+            bankName: primary.bank_name || prev.bankName,
+            branchName: primary.branch_name || prev.branchName,
+            accountNo: primary.account_number_masked || prev.accountNo,
+            ifscCode: primary.ifsc_code || prev.ifscCode,
+          }));
+        }
 
         if (d.personal_details) {
           const pd = d.personal_details;
@@ -276,14 +318,143 @@ export default function FacultyProfilePage() {
     }
   };
 
-  const handleSave = (tabName) => {
-    setSuccessMessage(`${tabName} updated successfully!`);
-    setTimeout(() => {
-      setSuccessMessage('');
-    }, 4000);
+  const showSuccess = (msg) => {
+    setSuccessMessage(msg);
+    setErrorMessage('');
+    setTimeout(() => setSuccessMessage(''), 4000);
+  };
+
+  const showError = (msg) => {
+    setErrorMessage(msg);
+    setSuccessMessage('');
+    setTimeout(() => setErrorMessage(''), 5000);
+  };
+
+  const startEditing = () => {
+    if (!isOwnProfile || isEditing) return;
+    setSnapshot({ profileInfo, qualifications, academicDetail, bankDetail, documents });
+    setIsEditing(true);
+    setSuccessMessage('');
+    setErrorMessage('');
+  };
+
+  const cancelEditing = () => {
+    if (snapshot) {
+      setProfileInfo(snapshot.profileInfo);
+      setQualifications(snapshot.qualifications);
+      setAcademicDetail(snapshot.academicDetail);
+      setBankDetail(snapshot.bankDetail);
+      setDocuments(snapshot.documents);
+    }
+    setIsEditing(false);
+    setSaving(false);
+    setErrorMessage('');
+  };
+
+  const buildProfilePayload = () => {
+    const monthNum = String(MONTHS.indexOf(profileInfo.dobMonth) + 1).padStart(2, '0');
+    const dayNum = String(profileInfo.dobDay).padStart(2, '0');
+    const telephone = [profileInfo.resTelephoneStd, profileInfo.resTelephoneNum]
+      .map((s) => String(s || '').trim())
+      .filter(Boolean)
+      .join('-');
+    return {
+      display_name: String(profileInfo.facultyName || '').trim(),
+      department: profileInfo.department,
+      designation: profileInfo.designation,
+      mobile: String(profileInfo.mobile || '').trim(),
+      personal_email: String(profileInfo.email || '').trim(),
+      official_email: String(profileInfo.officialEmail || '').trim(),
+      residential_telephone: telephone,
+      date_of_joining: profileInfo.dateOfAppointment || undefined,
+      personal: {
+        date_of_birth: `${profileInfo.dobYear}-${monthNum}-${dayNum}`,
+        gender: String(profileInfo.gender || '').toUpperCase(),
+        nationality: profileInfo.nationality,
+        domicile_state: profileInfo.domicileState,
+        constitutional_category: profileInfo.category,
+      },
+      permanent_address: {
+        address_line_1: profileInfo.permanentAddress.address,
+        district: profileInfo.permanentAddress.district,
+        state: profileInfo.permanentAddress.state,
+        pincode: profileInfo.permanentAddress.pincode,
+      },
+      correspondence_address: {
+        address_line_1: profileInfo.correspondenceAddress.address,
+        district: profileInfo.correspondenceAddress.district,
+        state: profileInfo.correspondenceAddress.state,
+        pincode: profileInfo.correspondenceAddress.pincode,
+      },
+    };
+  };
+
+  const buildBankPayload = () => {
+    const payload = buildProfilePayload();
+    payload.bank = {
+      account_holder_name: String(profileInfo.facultyName || '').trim(),
+      bank_name: bankDetail.bankName,
+      branch_name: bankDetail.branchName,
+      ifsc_code: String(bankDetail.ifscCode || '').toUpperCase(),
+      // Never send the masked display value back as a new account number.
+      ...(!String(bankDetail.accountNo || '').includes('X') && bankDetail.accountNo
+        ? { account_number: String(bankDetail.accountNo).trim() }
+        : {}),
+    };
+    return payload;
+  };
+
+  const persistAndLock = async (payload, tabName) => {
+    if (!isOwnProfile || !isEditing || saving) return;
+    setSaving(true);
+    try {
+      const res = await facultyApi.updateMyProfile(payload);
+      const changed = res.data?.changed?.length ? `: ${res.data.changed.join(', ')}` : '';
+      showSuccess(`${tabName} updated successfully${changed}.`);
+      setIsEditing(false);
+      setSnapshot(null);
+      await loadFacultyData();
+    } catch (err) {
+      const data = err.response?.data;
+      const msg =
+        data?.detail ||
+        (data && typeof data === 'object'
+          ? Object.entries(data)
+              .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(' ') : v}`)
+              .join(' ')
+          : null) ||
+        'Failed to save profile. Check highlighted values and try again.';
+      showError(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSave = async (tabName) => {
+    if (!isEditing) {
+      showError('Click Edit Profile first to make changes.');
+      return;
+    }
+    if (tabName === 'Bank Details') {
+      await persistAndLock(buildBankPayload(), tabName);
+      return;
+    }
+    if (tabName === 'Profile Information') {
+      await persistAndLock(buildProfilePayload(), tabName);
+      return;
+    }
+    // Qualification / Academic / Documents sections have no write API yet
+    // (no upload/verification endpoints) — lock the form again so the
+    // Edit → Save → locked cycle is consistent, without pretending persistence.
+    showSuccess(
+      `${tabName} locked. Note: this section is not yet persisted to the server (no backend write API) — Profile Information and Bank Details are saved.`
+    );
+    setIsEditing(false);
+    setSnapshot(null);
   };
 
   const handleSameAsPermanentToggle = (checked) => {
+    if (!isEditing) return;
     setSameAsPermanent(checked);
     if (checked) {
       setProfileInfo((prev) => ({
@@ -308,6 +479,10 @@ export default function FacultyProfilePage() {
   // Class Teacher, HOD, Accountant, Admin Head and Sysadmin, since all of
   // them render through ProfileDispatcher → FacultyProfilePage.
   const isOwnProfile = !id;
+  // Edit-lock: directory views are always read-only; own profile starts
+  // locked and only unlocks after Edit is clicked.
+  const canEdit = isOwnProfile;
+  const fieldsLocked = !isEditing;
   const visibleTabs = isOwnProfile
     ? [...tabs, { id: 'security', label: 'Security', icon: Lock }]
     : tabs;
@@ -322,20 +497,55 @@ export default function FacultyProfilePage() {
         ]}
         title="Faculty Profile"
         actions={
-          id && (
-            <button
-              className="edvana-btn edvana-btn-secondary"
-              onClick={() => navigate(-1)}
-              style={{
-                backgroundColor: 'rgba(255, 255, 255, 0.18)',
-                color: '#ffffff',
-                borderColor: 'rgba(255, 255, 255, 0.35)',
-              }}
-            >
-              <ArrowLeft size={16} />
-              <span>Back to Directory</span>
-            </button>
-          )
+          <div style={{ display: 'flex', gap: '0.625rem', flexWrap: 'wrap' }}>
+            {canEdit && !isEditing && (
+              <button
+                className="edvana-btn edvana-btn-primary"
+                onClick={startEditing}
+                style={{ backgroundColor: '#ffffff', color: '#1d4ed8', borderColor: '#ffffff', fontWeight: 700 }}
+                title="Unlock all fields for editing"
+              >
+                <span>Edit Profile</span>
+              </button>
+            )}
+            {canEdit && isEditing && (
+              <>
+                <button
+                  className="edvana-btn edvana-btn-primary"
+                  onClick={cancelEditing}
+                  disabled={saving}
+                  style={{ backgroundColor: 'rgba(255,255,255,0.18)', color: '#ffffff', borderColor: 'rgba(255,255,255,0.35)' }}
+                  title="Discard changes and lock again"
+                >
+                  <span>Cancel</span>
+                </button>
+                <button
+                  className="edvana-btn edvana-btn-primary"
+                  onClick={() => handleSave(activeTab === 'profile-info' ? 'Profile Information' : activeTab === 'bank-detail' ? 'Bank Details' : activeTab === 'qualification-detail' ? 'Qualification Details' : activeTab === 'academic-detail' ? 'Academic Details' : 'Documents')}
+                  disabled={saving}
+                  style={{ backgroundColor: '#ffffff', color: '#1d4ed8', borderColor: '#ffffff', fontWeight: 700 }}
+                  title="Save changes and lock the profile"
+                >
+                  <CheckCircle2 size={16} />
+                  <span>{saving ? 'Saving…' : 'Save Changes'}</span>
+                </button>
+              </>
+            )}
+            {id && (
+              <button
+                className="edvana-btn edvana-btn-secondary"
+                onClick={() => navigate(-1)}
+                style={{
+                  backgroundColor: 'rgba(255, 255, 255, 0.18)',
+                  color: '#ffffff',
+                  borderColor: 'rgba(255, 255, 255, 0.35)',
+                }}
+              >
+                <ArrowLeft size={16} />
+                <span>Back to Directory</span>
+              </button>
+            )}
+          </div>
         }
       />
 
@@ -361,6 +571,32 @@ export default function FacultyProfilePage() {
           })}
         </div>
 
+        {/* Lock-state banner */}
+        <div
+          style={{
+            backgroundColor: isEditing ? '#eff6ff' : '#f8fafc',
+            border: `1px solid ${isEditing ? '#bfdbfe' : '#e2e8f0'}`,
+            borderRadius: '8px',
+            padding: '0.75rem 1rem',
+            color: isEditing ? '#1e40af' : '#475569',
+            fontSize: '0.8125rem',
+            fontWeight: 500,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            marginTop: '1rem',
+          }}
+        >
+          <Info size={18} style={{ color: isEditing ? '#2563eb' : '#64748b', flexShrink: 0 }} />
+          <span>
+            {id
+              ? 'Read-only view. This faculty record can only be edited by its owner from their own profile.'
+              : isEditing
+                ? 'Editing unlocked. Change any field, then press Save Changes to finalize and lock the profile again.'
+                : 'Profile is locked. Click Edit Profile to start editing.'}
+          </span>
+        </div>
+
         {/* Success Toast */}
         {successMessage && (
           <div
@@ -383,9 +619,32 @@ export default function FacultyProfilePage() {
           </div>
         )}
 
+        {/* Error Toast */}
+        {errorMessage && (
+          <div
+            style={{
+              backgroundColor: '#FEF2F2',
+              border: '1px solid #FCA5A5',
+              color: '#991B1B',
+              padding: '0.875rem 1.25rem',
+              borderRadius: '8px',
+              marginTop: '1rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.75rem',
+              fontWeight: 500,
+              fontSize: '0.875rem',
+            }}
+          >
+            <AlertCircle size={18} color="#DC2626" />
+            <span>{errorMessage}</span>
+          </div>
+        )}
+
         {/* Tab 1: Profile Information */}
         {activeTab === 'profile-info' && (
           <div style={{ marginTop: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+            <fieldset disabled={fieldsLocked || saving} style={{ border: 'none', padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
             {/* Card 1: Department & Designation */}
             <div className="profile-section-card">
               <h2 className="profile-section-title">Department & Designation</h2>
@@ -902,13 +1161,18 @@ export default function FacultyProfilePage() {
               </div>
             </div>
 
+            </fieldset>
+
             {/* Bottom Save Changes Button */}
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: '0.5rem' }}>
               <button
                 className="profile-action-btn"
                 onClick={() => handleSave('Profile Information')}
+                disabled={fieldsLocked || saving}
+                style={{ opacity: fieldsLocked ? 0.55 : 1 }}
+                title={fieldsLocked ? 'Click Edit Profile first' : 'Save changes and lock the profile'}
               >
-                Save Changes
+                {saving ? 'Saving…' : 'Save Changes'}
               </button>
             </div>
           </div>
@@ -917,6 +1181,7 @@ export default function FacultyProfilePage() {
         {/* Tab 2: Qualification Detail */}
         {activeTab === 'qualification-detail' && (
           <div style={{ marginTop: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+            <fieldset disabled={fieldsLocked || saving} style={{ border: 'none', padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
             {/* Card 1: Graduation Degree detail */}
             <div className="profile-section-card">
               <h2 className="profile-section-title">Graduation Degree detail</h2>
@@ -1291,13 +1556,18 @@ export default function FacultyProfilePage() {
               </div>
             </div>
 
+            </fieldset>
+
             {/* Bottom Save Changes Button */}
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: '0.5rem' }}>
               <button
                 className="profile-action-btn"
                 onClick={() => handleSave('Qualification Details')}
+                disabled={fieldsLocked || saving}
+                style={{ opacity: fieldsLocked ? 0.55 : 1 }}
+                title={fieldsLocked ? 'Click Edit Profile first' : 'Save changes and lock the profile'}
               >
-                Save Changes
+                {saving ? 'Saving…' : 'Save Changes'}
               </button>
             </div>
           </div>
@@ -1306,6 +1576,7 @@ export default function FacultyProfilePage() {
         {/* Tab 3: Academic Detail */}
         {activeTab === 'academic-detail' && (
           <div style={{ marginTop: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+            <fieldset disabled={fieldsLocked || saving} style={{ border: 'none', padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
             {/* Card 1: Papers Published */}
             <div className="profile-section-card">
               <h2 className="profile-section-title">Papers Published</h2>
@@ -1448,13 +1719,18 @@ export default function FacultyProfilePage() {
               </div>
             </div>
 
+            </fieldset>
+
             {/* Bottom Save Changes Button */}
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: '0.5rem' }}>
               <button
                 className="profile-action-btn"
                 onClick={() => handleSave('Academic Details')}
+                disabled={fieldsLocked || saving}
+                style={{ opacity: fieldsLocked ? 0.55 : 1 }}
+                title={fieldsLocked ? 'Click Edit Profile first' : 'Save changes and lock the profile'}
               >
-                Save Changes
+                {saving ? 'Saving…' : 'Save Changes'}
               </button>
             </div>
           </div>
@@ -1463,6 +1739,7 @@ export default function FacultyProfilePage() {
         {/* Tab 4: Bank Detail */}
         {activeTab === 'bank-detail' && (
           <div style={{ marginTop: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+            <fieldset disabled={fieldsLocked || saving} style={{ border: 'none', padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
             <div className="profile-section-card">
               <h2 className="profile-section-title">Update your bank details</h2>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1.25rem' }}>
@@ -1516,13 +1793,18 @@ export default function FacultyProfilePage() {
               </div>
             </div>
 
+            </fieldset>
+
             {/* Bottom Save Changes Button */}
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: '0.5rem' }}>
               <button
                 className="profile-action-btn"
                 onClick={() => handleSave('Bank Details')}
+                disabled={fieldsLocked || saving}
+                style={{ opacity: fieldsLocked ? 0.55 : 1 }}
+                title={fieldsLocked ? 'Click Edit Profile first' : 'Save changes and lock the profile'}
               >
-                Save Changes
+                {saving ? 'Saving…' : 'Save Changes'}
               </button>
             </div>
           </div>
@@ -1531,6 +1813,7 @@ export default function FacultyProfilePage() {
         {/* Tab 5: Documents */}
         {activeTab === 'documents' && (
           <div style={{ marginTop: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+            <fieldset disabled={fieldsLocked || saving} style={{ border: 'none', padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
             {/* Instructions for upload Photo */}
             <div className="profile-instruction-box">
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 600, fontSize: '0.9rem', marginBottom: '0.5rem' }}>
@@ -1711,13 +1994,18 @@ export default function FacultyProfilePage() {
               </div>
             </div>
 
+            </fieldset>
+
             {/* Bottom Upload Documents Button */}
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: '0.5rem' }}>
               <button
                 className="profile-action-btn"
                 onClick={() => handleSave('Documents')}
+                disabled={fieldsLocked || saving}
+                style={{ opacity: fieldsLocked ? 0.55 : 1 }}
+                title={fieldsLocked ? 'Click Edit Profile first' : 'Save changes and lock the profile'}
               >
-                Upload Documents
+                {saving ? 'Saving…' : 'Upload Documents'}
               </button>
             </div>
           </div>
@@ -1871,6 +2159,24 @@ export default function FacultyProfilePage() {
         .profile-action-btn:hover {
           background-color: #2563EB;
           transform: translateY(-1px);
+        }
+
+        .profile-action-btn:disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
+          transform: none;
+        }
+
+        fieldset:disabled .profile-field-input,
+        fieldset:disabled .profile-field-select,
+        fieldset:disabled .profile-field-textarea {
+          background-color: #F8FAFC;
+          color: #64748B;
+          cursor: not-allowed;
+        }
+
+        fieldset {
+          min-width: 0;
         }
 
         .profile-instruction-box {

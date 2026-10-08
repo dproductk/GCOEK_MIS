@@ -48,7 +48,7 @@ export default function FeeHeadConfigPage() {
     description: '',
     academic_year: '',
     display_order: 1,
-    allowed_amounts_str: '0, 15000, 30000, 60000',
+    allowed_amounts_str: '',
     is_active: true,
   });
 
@@ -74,21 +74,13 @@ export default function FeeHeadConfigPage() {
         academicApi.getAcademicYears()
       ]);
 
-      // 1. Process Academic Years
+      // 1. Process Academic Years (backend only — never invented).
       let years = [];
       if (yearsResult.status === 'fulfilled') {
         const rawYears = yearsResult.value.data?.results || yearsResult.value.data || [];
         years = Array.isArray(rawYears) ? rawYears : [];
       } else {
-        console.warn('Could not fetch academic years, using fallback', yearsResult.reason);
-      }
-
-      // If no academic years found from API, provide standard default
-      if (years.length === 0) {
-        years = [
-          { id: 'curr-year', code: '2026-27', is_current: true },
-          { id: 'prev-year', code: '2025-26', is_current: false }
-        ];
+        setError('Could not load academic years. Fee-head configuration needs them — please retry.');
       }
       setAcademicYears(years);
 
@@ -128,7 +120,7 @@ export default function FeeHeadConfigPage() {
       description: '',
       academic_year: defaultYear,
       display_order: nextOrder,
-      allowed_amounts_str: '0, 5000, 10000, 20000',
+      allowed_amounts_str: '',
       is_active: true,
     });
     setShowModal(true);
@@ -140,14 +132,14 @@ export default function FeeHeadConfigPage() {
     setEditingHeadId(head.id);
     const amountsList = Array.isArray(head.allowed_amounts) && head.allowed_amounts.length > 0
       ? head.allowed_amounts
-      : (head.amount ? [0, parseFloat(head.amount)] : [0]);
+      : (head.amount ? [parseFloat(head.amount)] : []);
 
     setFormData({
       name: head.name || '',
       code: head.code || '',
-      tag: head.tag || (head.code ? head.code.slice(0, 5) : 'TF'),
+      tag: head.tag || '',
       description: head.description || '',
-      academic_year: head.academic_year || academicYears.find(y => y.is_current)?.id || academicYears[0]?.id || '',
+      academic_year: head.academic_year || '',
       display_order: head.display_order || 1,
       allowed_amounts_str: amountsList.join(', '),
       is_active: head.is_active !== undefined ? head.is_active : true,
@@ -159,6 +151,20 @@ export default function FeeHeadConfigPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError(null);
+
+    // No invented values: every business fact is required from the user.
+    if (!formData.name.trim()) {
+      setError('Fee head name is required.');
+      return;
+    }
+    if (!formData.code.trim()) {
+      setError('Fee head code is required (e.g. TF).');
+      return;
+    }
+    if (!formData.academic_year || !academicYears.some(y => String(y.id) === String(formData.academic_year))) {
+      setError('Select a valid academic year from the configured list.');
+      return;
+    }
     setSubmitting(true);
 
     // Parse allowed amounts
@@ -171,27 +177,22 @@ export default function FeeHeadConfigPage() {
 
     // Ensure sorted ascending and unique
     const uniqueAmounts = Array.from(new Set(parsedAmounts)).sort((a, b) => a - b);
-    const maxAmount = uniqueAmounts.length > 0 ? Math.max(...uniqueAmounts) : 0;
-
-    const autoTag = (formData.tag || formData.code || formData.name.split(' ').map(w => w[0]).join('') || 'FH').toUpperCase();
-    const autoCode = (formData.code || autoTag).toUpperCase();
-
-    // Use selected academic year or current one
-    let targetYearId = formData.academic_year;
-    if (!targetYearId || targetYearId === 'curr-year') {
-      const match = academicYears.find(y => y.is_current) || academicYears[0];
-      targetYearId = match ? match.id : undefined;
+    if (uniqueAmounts.length === 0) {
+      setError('Enter at least one allowed amount (comma separated).');
+      setSubmitting(false);
+      return;
     }
+    const maxAmount = Math.max(...uniqueAmounts);
 
     const payload = {
       name: formData.name.trim(),
-      code: autoCode,
-      tag: autoTag,
+      code: formData.code.trim().toUpperCase(),
+      tag: (formData.tag || formData.code).trim().toUpperCase(),
       description: formData.description.trim(),
       display_order: parseInt(formData.display_order, 10) || 1,
       allowed_amounts: uniqueAmounts,
       amount: maxAmount,
-      academic_year: targetYearId,
+      academic_year: formData.academic_year,
       is_active: formData.is_active,
     };
 

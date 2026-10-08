@@ -92,6 +92,26 @@ class Student(BaseModel):
         default=0,
         help_text='Times the student repeated a year (detention); placement itself lives on enrollments.',
     )
+
+    class ScholarshipType(models.TextChoices):
+        NONE = 'NONE', 'None'
+        EBC = 'EBC', 'EBC (Economically Backward Class)'
+        OBC_FREESHIP = 'OBC_FREESHIP', 'OBC Freeship'
+        SC = 'SC', 'SC Scholarship'
+        ST = 'ST', 'ST Scholarship'
+        NT_C = 'NT_C', 'NT-C'
+        MINORITY = 'MINORITY', 'Minority Scholarship'
+
+    scholarship_applied = models.BooleanField(
+        default=False,
+        help_text='Whether the student has applied for a scholarship.',
+    )
+    scholarship_type = models.CharField(
+        max_length=20,
+        choices=ScholarshipType.choices,
+        default=ScholarshipType.NONE,
+        help_text='Scholarship scheme applied for (NONE when not applied).',
+    )
     is_active = models.BooleanField(default=True)
 
     class Meta:

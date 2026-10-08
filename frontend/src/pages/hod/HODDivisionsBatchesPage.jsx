@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import academicApi from '../../api/academicApi';
+import admissionsApi from '../../api/admissionsApi';
 import studentApi from '../../api/studentApi';
 import facultyApi from '../../api/facultyApi';
 import curriculumApi from '../../api/curriculumApi';
@@ -17,6 +18,7 @@ import {
   Check,
   Search,
   BookOpen,
+  Trash2,
 } from 'lucide-react';
 
 function divisionLetter(i) {
@@ -32,10 +34,59 @@ function semLabel(semesters, semNumber) {
   return `${yearName ? `${yearName} ` : ''}Sem ${semNumber} (${term})`;
 }
 
+function extractErrorMessage(err, fallback = 'An error occurred.') {
+  if (!err) return fallback;
+  const data = err.response?.data;
+  if (!data) return err.message || fallback;
+  if (typeof data === 'string') return data;
+  if (data.detail && typeof data.detail === 'string') return data.detail;
+  if (typeof data === 'object') {
+    const messages = [];
+    for (const [key, val] of Object.entries(data)) {
+      const valStr = Array.isArray(val) ? val.join(' ') : String(val);
+      if (key === 'non_field_errors' || key === 'detail') {
+        messages.push(valStr);
+      } else {
+        const fieldName = key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+        messages.push(`${fieldName}: ${valStr}`);
+      }
+    }
+    if (messages.length > 0) return messages.join(' | ');
+  }
+  return fallback;
+}
+
 // One teacher cell used by every row of the teachers popup: assigned shows
 // just "✓ name" + pencil; unassigned (or editing) shows the faculty dropdown
 // directly and saves on pick — no intermediate Set button.
-function TeacherCell({ holderLabel, editing, value, faculties, saving, placeholder, onEdit, onPick }) {
+function TeacherCell({
+  holderLabel,
+  editing,
+  value,
+  faculties,
+  saving,
+  placeholder,
+  currentSubjectCode,
+  assignedHolders = [],
+  onEdit,
+  onCancelEdit,
+  onPick,
+}) {
+  const busyTeacherMap = useMemo(() => {
+    const map = new Map();
+    for (const a of (assignedHolders || [])) {
+      if (
+        a.is_active &&
+        a.role !== 'LAB_INSTRUCTOR' &&
+        currentSubjectCode &&
+        (a.subject_code || '').toUpperCase() !== currentSubjectCode.toUpperCase()
+      ) {
+        map.set(String(a.faculty), a.subject_code);
+      }
+    }
+    return map;
+  }, [assignedHolders, currentSubjectCode]);
+
   if (holderLabel && !editing) {
     return (
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -64,21 +115,51 @@ function TeacherCell({ holderLabel, editing, value, faculties, saving, placehold
     );
   }
   return (
-    <select
-      className="edvana-input"
-      value={value || ''}
-      disabled={!!saving}
-      onChange={(e) => { if (e.target.value) onPick(e.target.value); }}
-      style={{ height: '32px', fontSize: '0.78rem', minWidth: '190px' }}
-      title={placeholder}
-    >
-      <option value="">{saving ? 'Saving…' : placeholder}</option>
-      {faculties.map((f) => (
-        <option key={f.id} value={f.id}>
-          {f.display_name || f.name || f.username || f.employee_code}
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+      <select
+        className="edvana-select"
+        value={value || ''}
+        disabled={!!saving}
+        onChange={(e) => onPick(e.target.value)}
+        style={{
+          height: '32px',
+          fontSize: '0.78rem',
+          minWidth: '200px',
+          borderColor: saving ? '#3b82f6' : undefined,
+        }}
+        title={placeholder}
+      >
+        <option value="">
+          {saving ? 'Saving…' : (holderLabel ? '— Unassign teacher —' : placeholder)}
         </option>
-      ))}
-    </select>
+        {faculties.map((f) => {
+          const busySubject = busyTeacherMap.get(String(f.id));
+          return (
+            <option key={f.id} value={f.id} disabled={!!busySubject}>
+              {f.display_name || f.name || f.username || f.employee_code}
+              {busySubject ? ` (teaching ${busySubject})` : ''}
+            </option>
+          );
+        })}
+      </select>
+      {editing && onCancelEdit && !saving && (
+        <button
+          type="button"
+          onClick={onCancelEdit}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: '#64748b',
+            cursor: 'pointer',
+            fontSize: '0.75rem',
+            textDecoration: 'underline',
+            padding: '0 0.25rem',
+          }}
+        >
+          Cancel
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -98,6 +179,7 @@ export default function HODDivisionsBatchesPage() {
   const [students, setStudents] = useState([]);
   const [faculties, setFaculties] = useState([]);
   const [schemes, setSchemes] = useState([]);
+  const [intakes, setIntakes] = useState(null); // null = not loaded / forbidden -> fallback grouping
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [actionMsg, setActionMsg] = useState(null);
@@ -111,6 +193,7 @@ export default function HODDivisionsBatchesPage() {
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [slotEdit, setSlotEdit] = useState({}); // { [subjectId]: facultyId } edit mode
   const [savingSlot, setSavingSlot] = useState(null);
+  const [slotError, setSlotError] = useState(null); // popup-level save error (page banner hides behind modal)
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createForm, setCreateForm] = useState({
     academic_year: '', semester: '', name: 'A', seat_capacity: 60, class_teacher: '', intakeKey: '', scheme: '',
@@ -123,16 +206,20 @@ export default function HODDivisionsBatchesPage() {
   const [addSelected, setAddSelected] = useState([]);
   const [addSearch, setAddSearch] = useState('');
   const [merging, setMerging] = useState(false);
+  // Place a pending batch slice into an EXISTING class (no new division).
+  const [placeTargetKey, setPlaceTargetKey] = useState(null);
+  const [placeDivId, setPlaceDivId] = useState('');
+  const [placing, setPlacing] = useState(false);
 
   useEffect(() => {
     loadAll();
   }, []);
 
-  const loadAll = async () => {
+  const loadAll = async (showLoading = true) => {
     try {
-      setLoading(true);
+      if (showLoading) setLoading(true);
       setError(null);
-      const [deptRes, yearRes, semRes, divRes, stuRes, facRes, schemeRes] = await Promise.allSettled([
+      const [deptRes, yearRes, semRes, divRes, stuRes, facRes, schemeRes, intakeRes] = await Promise.allSettled([
         academicApi.getDepartments(),
         academicApi.getAcademicYears(),
         academicApi.getSemesters(),
@@ -140,6 +227,7 @@ export default function HODDivisionsBatchesPage() {
         studentApi.getStudents({ page_size: 500 }),
         facultyApi.getFacultyList({ page_size: 500 }),
         curriculumApi.getSchemes({ page_size: 100 }),
+        admissionsApi.getPendingIntakes(),
       ]);
       const deptList = deptRes.status === 'fulfilled' ? deptRes.value.data?.results || deptRes.value.data || [] : [];
       const yearList = yearRes.status === 'fulfilled' ? yearRes.value.data?.results || yearRes.value.data || [] : [];
@@ -148,6 +236,7 @@ export default function HODDivisionsBatchesPage() {
       const stuList = stuRes.status === 'fulfilled' ? stuRes.value.data?.results || stuRes.value.data || [] : [];
       const facList = facRes.status === 'fulfilled' ? facRes.value.data?.results || facRes.value.data || [] : [];
       const schemeList = schemeRes.status === 'fulfilled' ? schemeRes.value.data?.results || schemeRes.value.data || [] : [];
+      const intakeList = intakeRes.status === 'fulfilled' ? (intakeRes.value.data?.results || intakeRes.value.data || []) : null;
 
       let finalDepts = deptList;
       let initialDept = selectedDept;
@@ -156,10 +245,11 @@ export default function HODDivisionsBatchesPage() {
         finalDepts = deptList.filter((d) => String(d.id) === String(hodDeptId));
         initialDept = hodDeptId;
       } else if (isHOD && deptList.length > 0 && !hodDeptId) {
-        // Fallback for HOD with CSE default
-        const cse = deptList.find((d) => d.code === 'CSE') || deptList[0];
-        finalDepts = [cse];
-        initialDept = cse.id;
+        // HOD without a mapped department: scope to nothing rather than
+        // silently showing another department's data. Sysadmin must map
+        // the HOD's department via role assignment.
+        finalDepts = [];
+        initialDept = '';
       } else if (!initialDept && deptList.length > 0) {
         initialDept = deptList[0].id;
       }
@@ -172,6 +262,7 @@ export default function HODDivisionsBatchesPage() {
       setStudents(stuList);
       setFaculties(facList);
       setSchemes(schemeList);
+      setIntakes(Array.isArray(intakeList) ? intakeList : null);
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to load divisions & batches.');
     } finally {
@@ -184,10 +275,39 @@ export default function HODDivisionsBatchesPage() {
     return d?.code || '';
   }, [departments, selectedDept]);
 
-  // ---- Pending imports: unconfirmed students grouped by (admission year, stream, sem).
-  // This is the HOD-visible "import session" list — derived from enrollments,
-  // no ImportBatch permission needed (batches stay admin-only).
+  // ---- Pending imports: true single-use batch cards from /pending-intakes/.
+  // Each card is one (file batch x dept x stream x sem) slice with its own
+  // pending count. A card disappears once pending hits 0, so a batch slice
+  // can never be reused. Falls back to the legacy derived grouping when the
+  // endpoint is unavailable (seeds without ImportRow links, tests).
   const pendingGroups = useMemo(() => {
+    if (Array.isArray(intakes)) {
+      const byId = new Map(students.map((s) => [String(s.id), s]));
+      return intakes
+        .filter((t) => (deptCode ? String(t.department_code) === String(deptCode) : true))
+        .filter((t) => (t.pending || 0) > 0)
+        .map((t) => {
+          const pendingStudents = (t.pending_student_ids || []).map((id) => byId.get(String(id))).filter(Boolean);
+          // Defensive: backend is truth, but if the student list page hasn't
+          // loaded a row yet, still show the card with the raw count.
+          const shown = pendingStudents.length > 0 ? pendingStudents : [];
+          return {
+            key: `${t.batch_id}__${t.department_id || deptCode}__${t.stream}__${t.semester_number}`,
+            batchId: t.batch_id,
+            fileName: t.file_name,
+            admissionYear: t.academic_year_code || '—',
+            stream: t.stream,
+            sem: t.semester_number,
+            students: shown.length > 0 ? shown : (t.pending_student_ids || []).map((id) => ({ id })),
+            pending: t.pending,
+            total: t.total,
+            placed: t.placed,
+          };
+        })
+        .sort((a, b) =>
+          String(a.admissionYear).localeCompare(String(b.admissionYear)) || Number(a.sem) - Number(b.sem)
+        );
+    }
     const map = new Map();
     students
       .filter((s) => !s.placement_finalized)
@@ -197,42 +317,67 @@ export default function HODDivisionsBatchesPage() {
         if (!map.has(key)) {
           map.set(key, {
             key,
+            batchId: null,
+            fileName: null,
             admissionYear: s.admission_year_code || '—',
             stream: s.is_direct_second_year ? 'DSE' : 'FY',
             sem: s.semester_number,
             students: [],
+            pending: 0,
+            total: 0,
+            placed: 0,
           });
         }
         map.get(key).students.push(s);
       });
-    return [...map.values()].sort((a, b) =>
+    return [...map.values()].map((g) => ({ ...g, pending: g.students.length, total: g.students.length })).sort((a, b) =>
       String(a.admissionYear).localeCompare(String(b.admissionYear)) || Number(a.sem) - Number(b.sem)
     );
-  }, [students, deptCode]);
+  }, [students, deptCode, intakes]);
 
   const deptDivisions = useMemo(() => {
     if (!selectedDept) return divisions;
     return divisions.filter((d) => String(d.department) === String(selectedDept) || String(d.department_id) === String(selectedDept));
   }, [divisions, selectedDept]);
 
-  const rosterOf = (divId) => students.filter((s) => String(s.division_id) === String(divId));
+  const studentsByDivision = useMemo(() => {
+    const map = new Map();
+    for (const s of students) {
+      if (s.division_id) {
+        const k = String(s.division_id);
+        if (!map.has(k)) map.set(k, []);
+        map.get(k).push(s);
+      }
+    }
+    return map;
+  }, [students]);
+
+  const rosterOf = (divId) => studentsByDivision.get(String(divId)) || [];
+
+  const unplacedStudentsBySem = useMemo(() => {
+    const map = new Map();
+    for (const s of students) {
+      if (!s.placement_finalized && (!deptCode || s.department_code === deptCode)) {
+        const sem = Number(s.semester_number);
+        if (!map.has(sem)) map.set(sem, []);
+        map.get(sem).push(s);
+      }
+    }
+    return map;
+  }, [students, deptCode]);
 
   // Candidates for "Add students": same dept + same sem, not yet confirmed,
   // sitting outside this division (covers later DSE imports merged into an FY class).
   const addCandidates = (div) => {
     const divSem = Number(div.semester_number ?? div.semester);
-    return students.filter((s) =>
-      !s.placement_finalized &&
-      String(s.division_id) !== String(div.id) &&
-      Number(s.semester_number) === Number(divSem || s.semester_number) &&
-      (deptCode ? s.department_code === deptCode : true)
-    );
+    const candidates = unplacedStudentsBySem.get(divSem) || [];
+    return candidates.filter((s) => String(s.division_id) !== String(div.id));
   };
 
   const facultyName = (fid) => {
     if (!fid) return '';
     const f = faculties.find((x) => String(x.id) === String(fid) || String(x.user) === String(fid) || String(x.user_id) === String(fid));
-    return f?.display_name || f?.name || f?.username || 'Assigned';
+    return f?.display_name || f?.name || f?.username || '—';
   };
 
   // ---- Create Division (form + intake select, then finalize intake into it)
@@ -305,8 +450,14 @@ export default function HODDivisionsBatchesPage() {
       const newId = created.data?.id;
       const group = pendingGroups.find((g) => g.key === createForm.intakeKey);
       if (group && newId) {
-        const res = await academicApi.assignStudents(newId, { student_ids: group.students.map((s) => s.id) });
-        setActionMsg(`Division ${createForm.name.trim().toUpperCase()} created — ${res.data?.moved?.length ?? group.students.length} student(s) placed.`);
+        const payload = { student_ids: group.students.map((s) => s.id) };
+        if (group.batchId) payload.source_batch_id = group.batchId;
+        const res = await academicApi.assignStudents(newId, payload);
+        const movedCount = res.data?.moved?.length ?? group.students.length;
+        const skippedCount = res.data?.skipped?.length || 0;
+        setActionMsg(
+          `Division ${createForm.name.trim().toUpperCase()} created — ${movedCount} student(s) placed${group.fileName ? ` from ${group.fileName}` : ''}.${skippedCount ? ` ${skippedCount} skipped (already placed elsewhere).` : ''} This import slice is now consumed.`
+        );
       } else {
         setActionMsg(`Division ${createForm.name.trim().toUpperCase()} created.`);
       }
@@ -348,6 +499,40 @@ export default function HODDivisionsBatchesPage() {
     }
   };
 
+  // ---- Place a pending batch slice into an EXISTING class (no new division).
+  // Same merge endpoint as Add students, plus the batch id so the audit
+  // trail records which import slice was consumed.
+  const sameSemDivisions = (sem) => deptDivisions.filter(
+    (d) => Number(d.semester_number ?? d.semester) === Number(sem)
+  );
+  const openPlaceModal = (group) => {
+    const options = sameSemDivisions(group.sem);
+    setPlaceTargetKey(group.key);
+    setPlaceDivId(options[0]?.id || '');
+    setShowAddModal(false);
+  };
+  const handlePlaceIntoExisting = async () => {
+    const group = pendingGroups.find((g) => g.key === placeTargetKey);
+    if (!group || !placeDivId || placing) return;
+    if (!window.confirm(`Place ${group.pending ?? group.students.length} student(s) from ${group.fileName || 'this import'} into the selected class?`)) return;
+    setPlacing(true);
+    try {
+      const payload = { student_ids: group.students.map((s) => s.id) };
+      if (group.batchId) payload.source_batch_id = group.batchId;
+      const res = await academicApi.assignStudents(placeDivId, payload);
+      const skipped = res.data?.skipped?.length || 0;
+      setActionMsg(`${res.data?.detail || 'Students placed.'}${skipped ? ` ${skipped} skipped (already placed elsewhere).` : ''}`);
+      setActionError(null);
+      setPlaceTargetKey(null);
+      setPlaceDivId('');
+      await loadAll();
+    } catch (err) {
+      setActionError(err.response?.data?.detail || 'Failed to place students.');
+    } finally {
+      setPlacing(false);
+    }
+  };
+
   // ---- Move one student to another class (same single-student endpoint)
   const handleMoveStudent = async (studentId, divisionId) => {
     if (!divisionId) return;
@@ -367,19 +552,23 @@ export default function HODDivisionsBatchesPage() {
     }
   };
 
-  // ---- Delete an empty class (backend also blocks non-empty)
+  // ---- Delete an empty class (backend also blocks seated/history classes)
+  const [deletingDivId, setDeletingDivId] = useState(null);
   const handleDeleteDivision = async (div) => {
     const rosterCount = rosterOf(div.id).length;
     if (rosterCount > 0) return;
     if (!window.confirm(`Delete empty Division ${div.name} (Sem ${div.semester_number ?? ''})? This is recorded in the audit trail.`)) return;
     try {
+      setDeletingDivId(div.id);
       setActionMsg(null);
       setActionError(null);
       await academicApi.deleteDivision(div.id);
       setActionMsg(`Division ${div.name} deleted.`);
-      await loadAll();
+      await loadAll(false);
     } catch (err) {
-      setActionError(err.response?.data?.detail || 'Failed to delete division.');
+      setActionError(extractErrorMessage(err, 'Failed to delete division.'));
+    } finally {
+      setDeletingDivId(null);
     }
   };
 
@@ -388,33 +577,52 @@ export default function HODDivisionsBatchesPage() {
     try {
       setActionMsg(null);
       setActionError(null);
-      await academicApi.updateDivision(div.id, { class_teacher: teacherId || null });
+      setSlotError(null);
+      const res = await academicApi.updateDivision(div.id, { class_teacher: teacherId || null });
+      const updated = res.data;
+      setDivisions((prev) =>
+        prev.map((d) => (String(d.id) === String(div.id) ? { ...d, ...updated } : d))
+      );
       setActionMsg('Class teacher updated.');
-      await loadAll();
     } catch (err) {
-      setActionError(err.response?.data?.detail || 'Failed to update class teacher.');
+      const msg = extractErrorMessage(err, 'Failed to update class teacher.');
+      setActionError(msg);
+      setSlotError(msg);
+      throw err;
     }
   };
 
-  // ---- Expand card: roster is local; subjects + holders load lazily (same APIs as dashboard)
-  const ensureDivDetail = async (divId) => {
-    if (divDetail[divId]) return;
+  // ---- Expand card: roster is local; subjects + holders load lazily (same APIs as dashboard).
+  // The two calls are independent: an assignments failure must never wipe
+  // out good subjects (that once masqueraded as "no scheme published").
+  // A failed subjects load is marked loaded:false + loadError so the popup
+  // shows Retry instead of a permanently stale empty state.
+  const ensureDivDetail = async (divId, force = false) => {
+    if (divDetail[divId]?.loaded && !force) return;
     setLoadingDetail(true);
     try {
-      const [subRes, asgRes] = await Promise.all([
+      const [subRes, asgRes] = await Promise.allSettled([
         academicApi.getDivisionSubjects(divId),
         facultyApi.getAssignments({ division_id: divId, is_active: true }),
       ]);
+      if (subRes.status === 'rejected') {
+        throw subRes.reason;
+      }
+      const asgOk = asgRes.status === 'fulfilled';
       setDivDetail((prev) => ({
         ...prev,
         [divId]: {
-          subjects: subRes.data?.subjects || [],
-          assignments: asgRes.data?.results || asgRes.data || [],
-          scheme: subRes.data?.scheme || null,
+          subjects: subRes.value.data?.subjects || [],
+          // Keep previously known holders when the assignments refetch
+          // fails — wiping them would un-paint saved teachers.
+          assignments: asgOk ? (asgRes.value.data?.results || asgRes.value.data || []) : (prev[divId]?.assignments || []),
+          scheme: subRes.value.data?.scheme || null,
+          loaded: true,
+          assignError: asgOk ? null : 'Teacher assignments failed to load.',
         },
       }));
     } catch {
-      setDivDetail((prev) => ({ ...prev, [divId]: { subjects: [], assignments: [], scheme: null } }));
+      setDivDetail((prev) => ({ ...prev, [divId]: { subjects: [], assignments: [], scheme: null, loaded: false, loadError: 'Failed to load subjects.' } }));
     } finally {
       setLoadingDetail(false);
     }
@@ -431,9 +639,12 @@ export default function HODDivisionsBatchesPage() {
 
   // Subject-teacher table lives in its own popup (opened by Set button);
   // class-teacher setting lives there too as the first row.
+  // Always refetch on open so newly published schemes/subjects appear
+  // immediately instead of showing a stale cached empty state.
   const openTeachersModal = async (div) => {
     setTeachersDivId(div.id);
-    await ensureDivDetail(div.id);
+    setSlotError(null);
+    await ensureDivDetail(div.id, true);
   };
 
   const holderOf = (divId, subject) => {
@@ -445,8 +656,49 @@ export default function HODDivisionsBatchesPage() {
 
   const handleSaveSlot = async (divId, subject, facultyIdOverride) => {
     const facultyId = facultyIdOverride ?? slotEdit[subject.id];
-    if (!facultyId) return;
     const holder = holderOf(divId, subject);
+
+    // Unassign case: user selected empty string
+    if (!facultyId) {
+      if (!holder) {
+        setSlotEdit((prev) => {
+          const next = { ...prev };
+          delete next[subject.id];
+          return next;
+        });
+        return;
+      }
+      setSavingSlot(subject.id);
+      setSlotError(null);
+      try {
+        await facultyApi.deactivateAssignment(holder.id, 'HOD unassigned subject teacher');
+        setDivDetail((prev) => {
+          const cur = prev[divId] || { subjects: [], assignments: [], scheme: null };
+          return {
+            ...prev,
+            [divId]: {
+              ...cur,
+              assignments: (cur.assignments || []).filter((a) => String(a.id) !== String(holder.id)),
+            },
+          };
+        });
+        setActionMsg(`${subject.course_code} teacher unassigned.`);
+        setActionError(null);
+        setSlotEdit((prev) => {
+          const next = { ...prev };
+          delete next[subject.id];
+          return next;
+        });
+      } catch (err) {
+        const msg = extractErrorMessage(err, 'Failed to unassign teacher.');
+        setSlotError(msg);
+        setActionError(msg);
+      } finally {
+        setSavingSlot(null);
+      }
+      return;
+    }
+
     if (holder && String(holder.faculty) === String(facultyId)) {
       setSlotEdit((prev) => {
         const next = { ...prev };
@@ -456,15 +708,36 @@ export default function HODDivisionsBatchesPage() {
       return;
     }
     setSavingSlot(subject.id);
+    setSlotError(null);
     try {
+      let deactivatedId = null;
       if (holder) {
         await facultyApi.deactivateAssignment(holder.id, 'HOD replaced subject teacher');
+        deactivatedId = holder.id;
       }
-      await facultyApi.createAssignment({
+      const created = await facultyApi.createAssignment({
         faculty: facultyId,
         division: divId,
         scheme_subject: subject.id,
         role: 'PRIMARY_FACULTY',
+      });
+      const row = created.data || {};
+      // Optimistic paint: merge the new holder instantly so the name shows
+      // immediately, then reconcile with the server below.
+      setDivDetail((prev) => {
+        const cur = prev[divId] || { subjects: [], assignments: [], scheme: null };
+        const list = (cur.assignments || []).filter(
+          (a) => String(a.id) !== String(deactivatedId) &&
+            !(a.is_active && String(a.scheme_subject) === String(subject.id) &&
+              a.role !== 'LAB_INSTRUCTOR' && String(a.id) !== String(row.id))
+        );
+        return {
+          ...prev,
+          [divId]: {
+            ...cur, loaded: true, assignError: null,
+            assignments: [...list, ...(row.id ? [{ ...row, is_active: true }] : [])],
+          },
+        };
       });
       setActionMsg(`${subject.course_code} teacher saved.`);
       setActionError(null);
@@ -473,27 +746,20 @@ export default function HODDivisionsBatchesPage() {
         delete next[subject.id];
         return next;
       });
-      const [subRes, asgRes] = await Promise.all([
-        academicApi.getDivisionSubjects(divId),
-        facultyApi.getAssignments({ division_id: divId, is_active: true }),
-      ]);
-      setDivDetail((prev) => ({
-        ...prev,
-        [divId]: {
-          subjects: subRes.data?.subjects || [],
-          assignments: asgRes.data?.results || asgRes.data || [],
-          scheme: subRes.data?.scheme || null,
-        },
-      }));
+      // Reconcile with server truth (independent calls; never wipes holders).
+      await ensureDivDetail(divId, true);
     } catch (err) {
-      const data = err.response?.data;
-      setActionError(data?.detail || (data && typeof data === 'object' ? Object.values(data).flat().join(' ') : null) || 'Failed to save teacher.');
+      const msg = extractErrorMessage(err, 'Failed to save teacher.');
+      // Modal-level error: the page banner sits behind the open popup and
+      // the user would otherwise never see why the name didn't appear.
+      setSlotError(msg);
+      setActionError(msg);
     } finally {
       setSavingSlot(null);
     }
   };
 
-  if (loading) {
+  if (loading && divisions.length === 0) {
     return (
       <div style={{ padding: '2rem' }}>
         <LoadingState message="Loading divisions & batches..." />
@@ -579,7 +845,7 @@ export default function HODDivisionsBatchesPage() {
             <div>
               <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>Imports Pending Division Creation</h3>
               <p style={{ margin: '0.25rem 0 0', fontSize: '0.8125rem', color: '#64748b' }}>
-                Imported batches whose students are not placed in a class yet. Create a division to place them.
+                Each file batch is single-use: once its students are placed the card disappears and cannot be reused.
               </p>
             </div>
             {canManage && pendingGroups.length > 0 && (
@@ -597,23 +863,44 @@ export default function HODDivisionsBatchesPage() {
               <table className="edvana-table" style={{ margin: 0 }}>
                 <thead>
                   <tr>
+                    <th>Import File</th>
                     <th>Academic Year</th>
                     <th>Program / Stream</th>
                     <th>Year - Sem</th>
-                    <th style={{ textAlign: 'center' }}>Total Students</th>
+                    <th style={{ textAlign: 'center' }}>Pending / Total</th>
+                    <th style={{ textAlign: 'center' }}>Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {pendingGroups.map((g) => (
+                  {pendingGroups.map((g) => {
+                    const targets = sameSemDivisions(g.sem);
+                    return (
                     <tr key={g.key}>
+                      <td style={{ fontFamily: 'monospace', fontSize: '0.76rem' }}>{g.fileName || '—'}</td>
                       <td style={{ fontWeight: 700 }}>{g.admissionYear}</td>
                       <td>
                         {deptCode} ({g.stream === 'DSE' ? 'DSY Lateral' : 'Regular'})
                       </td>
                       <td>{semLabel(semesters, g.sem)}</td>
-                      <td style={{ textAlign: 'center', fontWeight: 700 }}>{g.students.length}</td>
+                      <td style={{ textAlign: 'center', fontWeight: 700 }}>{g.pending ?? g.students.length}{g.total ? ` / ${g.total}` : ''}</td>
+                      <td style={{ textAlign: 'center' }}>
+                        {canManage && targets.length > 0 ? (
+                          <button
+                            type="button"
+                            className="edvana-btn edvana-btn-secondary"
+                            onClick={() => openPlaceModal(g)}
+                            title={`Place into existing ${semLabel(semesters, g.sem)} class instead of creating a new division`}
+                            style={{ height: '32px', fontSize: '0.78rem', whiteSpace: 'nowrap' }}
+                          >
+                            <Plus size={13} /> Add to existing class
+                          </button>
+                        ) : (
+                          <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Create a division first</span>
+                        )}
+                      </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -643,9 +930,11 @@ export default function HODDivisionsBatchesPage() {
                 const mergeable = addCandidates(d);
                 return (
                   <div key={d.id} style={{ border: '1px solid #e2e8f0', borderRadius: '18px', background: '#ffffff', boxShadow: '0 1px 3px rgba(15, 23, 42, 0.05)' }}>
-                    <button
-                      type="button"
+                    <div
+                      role="button"
+                      tabIndex={0}
                       onClick={() => toggleExpand(d)}
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(d); } }}
                       style={{
                         width: '100%', display: 'flex', alignItems: 'center', gap: '0.75rem',
                         padding: '0.9rem 1.1rem', background: 'transparent', border: 'none',
@@ -674,7 +963,22 @@ export default function HODDivisionsBatchesPage() {
                       <span style={{ marginLeft: 'auto', fontSize: '0.8125rem', color: '#475569', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
                         <Users size={14} /> {strength}
                       </span>
-                    </button>
+                      {strength === 0 && canManage && (
+                        <button
+                          type="button"
+                          title="Delete empty class"
+                          disabled={String(deletingDivId) === String(d.id)}
+                          onClick={(e) => { e.stopPropagation(); handleDeleteDivision(d); }}
+                          style={{
+                            background: '#fff', border: '1px solid #fecaca', borderRadius: '8px',
+                            padding: '0.35rem', cursor: 'pointer', display: 'inline-flex',
+                            color: '#b91c1c', opacity: String(deletingDivId) === String(d.id) ? 0.5 : 1,
+                          }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      )}
+                    </div>
 
                     {isOpen && (
                       <div style={{ borderTop: '1px solid #f1f5f9', padding: '1rem 1.2rem 1.2rem' }} onClick={(e) => e.stopPropagation()}>
@@ -754,7 +1058,7 @@ export default function HODDivisionsBatchesPage() {
                                     <td style={{ textAlign: 'center' }}>{s.is_direct_second_year ? 'DSY' : 'Regular'}</td>
                                     <td style={{ textAlign: 'center' }}>
                                       <select
-                                        className="edvana-input"
+                                        className="edvana-select"
                                         value={s.division_id || ''}
                                         onChange={(e) => { if (e.target.value && String(e.target.value) !== String(d.id)) handleMoveStudent(s.id, e.target.value); }}
                                         style={{ height: '30px', fontSize: '0.75rem', minWidth: '110px' }}
@@ -802,7 +1106,7 @@ export default function HODDivisionsBatchesPage() {
                 fontSize: '0.85rem',
               }}
             >
-              <span>{departments[0]?.name || 'Department'} ({departments[0]?.code || 'CSE'})</span>
+              <span>{departments[0] ? `${departments[0].name} (${departments[0].code})` : 'No department mapped'}</span>
               <span
                 style={{
                   fontSize: '0.72rem',
@@ -850,7 +1154,11 @@ export default function HODDivisionsBatchesPage() {
                 <div style={{ padding: '1.5rem', textAlign: 'center', color: '#64748b', fontSize: '0.85rem' }}>Loading subjects…</div>
               ) : (
                 <>
-                <div style={{ overflowX: 'auto', border: '1px solid #e8eef6', borderRadius: '14px' }}>
+                {slotError && (
+                  <div style={{ marginBottom: '0.75rem', padding: '0.7rem 0.9rem', fontSize: '0.8rem', color: '#991b1b', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '12px' }}>
+                    {slotError}
+                  </div>
+                )}                <div style={{ overflowX: 'auto', border: '1px solid #e8eef6', borderRadius: '14px' }}>
                   <table className="edvana-table" style={{ margin: 0, fontSize: '0.82rem' }}>
                     <thead>
                       <tr>
@@ -865,18 +1173,30 @@ export default function HODDivisionsBatchesPage() {
                           <TeacherCell
                             holderLabel={div.class_teacher_name || ''}
                             editing={ctEditing}
-                            value={slotEdit[ctKey] || ''}
+                            value={slotEdit[ctKey] !== undefined ? slotEdit[ctKey] : (div.class_teacher_faculty_id || div.class_teacher || '')}
                             faculties={faculties}
-                            saving={false}
+                            saving={savingSlot === ctKey}
                             placeholder={div.class_teacher_name ? 'Change teacher…' : 'Assign teacher…'}
-                            onEdit={() => setSlotEdit((prev) => ({ ...prev, [ctKey]: '' }))}
+                            onEdit={() => setSlotEdit((prev) => ({ ...prev, [ctKey]: div.class_teacher_faculty_id || div.class_teacher || '' }))}
+                            onCancelEdit={() => setSlotEdit((prev) => {
+                              const next = { ...prev };
+                              delete next[ctKey];
+                              return next;
+                            })}
                             onPick={async (fid) => {
-                              await handleSetClassTeacher(div, fid);
-                              setSlotEdit((prev) => {
-                                const next = { ...prev };
-                                delete next[ctKey];
-                                return next;
-                              });
+                              setSavingSlot(ctKey);
+                              try {
+                                await handleSetClassTeacher(div, fid);
+                                setSlotEdit((prev) => {
+                                  const next = { ...prev };
+                                  delete next[ctKey];
+                                  return next;
+                                });
+                              } catch {
+                                // Error already set in handleSetClassTeacher
+                              } finally {
+                                setSavingSlot(null);
+                              }
                             }}
                           />
                         </td>
@@ -892,13 +1212,20 @@ export default function HODDivisionsBatchesPage() {
                             </td>
                             <td>
                               <TeacherCell
-                                holderLabel={holder ? facultyName(holder.faculty) : ''}
+                                holderLabel={holder ? (holder.faculty_name || facultyName(holder.faculty)) : ''}
                                 editing={editing}
-                                value={slotEdit[sub.id] || ''}
+                                value={slotEdit[sub.id] !== undefined ? slotEdit[sub.id] : (holder ? String(holder.faculty) : '')}
                                 faculties={faculties}
                                 saving={savingSlot === sub.id}
                                 placeholder="Assign teacher…"
-                                onEdit={() => setSlotEdit((prev) => ({ ...prev, [sub.id]: String(holder.faculty || '') }))}
+                                currentSubjectCode={sub.course_code}
+                                assignedHolders={detail?.assignments || []}
+                                onEdit={() => setSlotEdit((prev) => ({ ...prev, [sub.id]: holder ? String(holder.faculty) : '' }))}
+                                onCancelEdit={() => setSlotEdit((prev) => {
+                                  const next = { ...prev };
+                                  delete next[sub.id];
+                                  return next;
+                                })}
                                 onPick={(fid) => handleSaveSlot(div.id, sub, fid)}
                               />
                             </td>
@@ -908,57 +1235,26 @@ export default function HODDivisionsBatchesPage() {
                     </tbody>
                   </table>
                 </div>
-                {(!detail || detail.subjects.length === 0) && (
-                  <div style={{ marginTop: '0.9rem', border: '1px dashed #cbd5e1', borderRadius: '12px', padding: '0.85rem 1rem', background: '#f8fafc' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.6rem' }}>
-                      <span style={{ fontSize: '0.68rem', fontWeight: 800, background: '#e2e8f0', color: '#475569', borderRadius: '4px', padding: '0.1rem 0.4rem', letterSpacing: '0.04em' }}>
-                        SAMPLE PREVIEW
+                {!loadingDetail && detail?.assignError && (
+                  <div style={{ marginTop: '0.9rem', padding: '0.85rem 1rem', fontSize: '0.8rem', color: '#b45309', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '12px' }}>
+                    {detail.assignError} Existing holders may be missing —{' '}
+                    <button type="button" onClick={() => ensureDivDetail(div.id, true)} style={{ background: 'none', border: 'none', padding: 0, color: '#1E60DC', fontWeight: 700, cursor: 'pointer', fontSize: '0.8rem' }}>
+                      Retry
+                    </button>
+                  </div>
+                )}
+                {!loadingDetail && (!detail?.loaded || detail.subjects.length === 0) && (
+                  <div style={{ marginTop: '0.9rem', padding: '0.85rem 1rem', fontSize: '0.8rem', color: '#64748b', background: '#f8fafc', border: '1px solid #e8eef6', borderRadius: '12px' }}>
+                    {detail?.loadError ? (
+                      <span>
+                        {detail.loadError} Check your connection and{' '}
+                        <button type="button" onClick={() => ensureDivDetail(div.id, true)} style={{ background: 'none', border: 'none', padding: 0, color: '#1E60DC', fontWeight: 700, cursor: 'pointer', fontSize: '0.8rem' }}>
+                          Retry
+                        </button>
                       </span>
-                      <span style={{ fontSize: '0.76rem', color: '#64748b' }}>
-                        No scheme subjects published yet — subject rows will look like this:
-                      </span>
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', fontSize: '0.8rem' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', background: '#fff', border: '1px solid #e8eef6', borderRadius: '10px', padding: '0.5rem 0.75rem' }}>
-                        <span style={{ fontFamily: 'monospace', fontWeight: 700 }}>CS101</span>
-                        <span style={{ color: '#64748b' }}>— Engineering Mathematics I</span>
-                        <span style={{ marginLeft: 'auto' }}>
-                          <span
-                            style={{
-                              display: 'inline-flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem',
-                              fontSize: '0.78rem', color: '#94a3b8', border: '1px solid #e2e8f0', borderRadius: '6px',
-                              padding: '0.3rem 0.6rem', minWidth: '190px', background: '#fff',
-                            }}
-                          >
-                            Assign teacher… <span style={{ fontSize: '0.65rem' }}>▾</span>
-                          </span>
-                        </span>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', background: '#fff', border: '1px solid #e8eef6', borderRadius: '10px', padding: '0.5rem 0.75rem' }}>
-                        <span style={{ fontFamily: 'monospace', fontWeight: 700 }}>CS102</span>
-                        <span style={{ color: '#64748b' }}>— Engineering Physics</span>
-                        <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
-                          <span
-                            style={{
-                              display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
-                              background: '#f0fdf4', color: '#15803d', border: '1px solid #bbf7d0',
-                              borderRadius: '9999px', padding: '0.2rem 0.65rem',
-                              fontSize: '0.75rem', fontWeight: 700,
-                            }}
-                          >
-                            <Check size={12} /> {faculties[0]?.display_name || 'Prof. Priya Deshmukh'}
-                          </span>
-                          <span
-                            style={{
-                              background: '#fff', border: '1px solid #e2e8f0', borderRadius: '6px',
-                              padding: '0.25rem', display: 'inline-flex', color: '#475569',
-                            }}
-                          >
-                            <Pencil size={13} />
-                          </span>
-                        </span>
-                      </div>
-                    </div>
+                    ) : detail?.scheme
+                      ? `Scheme ${detail.scheme.code} v${detail.scheme.version} is published, but it has no subjects for Sem ${div.semester_number ?? ''} yet — ask Sysadmin to add the Sem ${div.semester_number ?? ''} subjects under Schemes & Subjects.`
+                      : 'No scheme subjects published for this semester yet — publish the scheme to assign subject teachers.'}
                   </div>
                 )}
                 </>
@@ -987,7 +1283,7 @@ export default function HODDivisionsBatchesPage() {
           : '';
         const cIntake = pendingGroups.find((g) => g.key === createForm.intakeKey);
         const req = <span style={{ color: '#dc2626' }}> *</span>;
-        const inputStyle = { width: '100%', height: '42px', marginTop: '0.3rem', borderRadius: '10px' };
+        const inputStyle = { width: '100%', maxWidth: '100%', minHeight: '42px', marginTop: '0.3rem', borderRadius: '10px', boxSizing: 'border-box' };
         const labelStyle = { fontSize: '0.8rem', fontWeight: 600, color: '#0f172a' };
         return (
           <Modal
@@ -1008,11 +1304,11 @@ export default function HODDivisionsBatchesPage() {
             style={{ borderRadius: '20px' }}
           >
             <form onSubmit={handleCreateDivision} style={{ padding: '0.25rem 0 0' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.9rem 1rem', marginBottom: '0.9rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '0.9rem 1rem', marginBottom: '0.9rem' }}>
                 <div>
                   <label style={labelStyle}>Academic Year{req}</label>
                   <select
-                    className="edvana-input"
+                    className="edvana-select"
                     value={createForm.academic_year}
                     onChange={(e) => {
                       const v = e.target.value;
@@ -1031,7 +1327,7 @@ export default function HODDivisionsBatchesPage() {
                     Scheme <span style={{ color: '#94a3b8', cursor: 'help' }}>ⓘ</span>
                   </label>
                   <select
-                    className="edvana-input"
+                    className="edvana-select"
                     value={createForm.scheme}
                     onChange={(e) => setCreateForm((p) => ({ ...p, scheme: e.target.value }))}
                     style={inputStyle}
@@ -1050,7 +1346,7 @@ export default function HODDivisionsBatchesPage() {
                 <div>
                   <label style={labelStyle} title="Odd/even term of the semester">Semester{req} <span style={{ color: '#94a3b8', cursor: 'help' }}>ⓘ</span></label>
                   <select
-                    className="edvana-input"
+                    className="edvana-select"
                     value={createForm.semester}
                     onChange={(e) => {
                       const v = e.target.value;
@@ -1068,9 +1364,10 @@ export default function HODDivisionsBatchesPage() {
                   <label style={labelStyle}>Division{req}</label>
                   <input
                     className="edvana-input"
+                    maxLength={5}
                     value={createForm.name}
-                    onChange={(e) => setCreateForm((p) => ({ ...p, name: e.target.value.toUpperCase().slice(0, 2) }))}
-                    placeholder="e.g. A, B, C"
+                    onChange={(e) => setCreateForm((p) => ({ ...p, name: e.target.value.toUpperCase().slice(0, 5) }))}
+                    placeholder="e.g. A, B, R"
                     style={inputStyle}
                   />
                 </div>
@@ -1081,7 +1378,7 @@ export default function HODDivisionsBatchesPage() {
                 <div>
                   <label style={labelStyle}>Class Teacher</label>
                   <select
-                    className="edvana-input"
+                    className="edvana-select"
                     value={createForm.class_teacher}
                     onChange={(e) => setCreateForm((p) => ({ ...p, class_teacher: e.target.value }))}
                     style={inputStyle}
@@ -1106,9 +1403,9 @@ export default function HODDivisionsBatchesPage() {
                 </div>
               </div>
               <div style={{ marginBottom: '1rem' }}>
-                <label style={labelStyle}>Import to place <span style={{ fontWeight: 400, color: '#64748b' }}>(latest first)</span></label>
+                <label style={labelStyle}>Import to place <span style={{ fontWeight: 400, color: '#64748b' }}>(single-use — consumed on create)</span></label>
                 <select
-                  className="edvana-input"
+                  className="edvana-select"
                   value={createForm.intakeKey}
                   onChange={(e) => setCreateForm((p) => ({ ...p, intakeKey: e.target.value }))}
                   style={inputStyle}
@@ -1116,7 +1413,7 @@ export default function HODDivisionsBatchesPage() {
                   <option value="">— Create empty, place later —</option>
                   {pendingGroups.map((g) => (
                     <option key={g.key} value={g.key}>
-                      {g.admissionYear} • {g.stream === 'DSE' ? 'DSY' : 'Regular'} • Sem {g.sem} • {g.students.length} students
+                      {g.fileName ? `${g.fileName} • ` : ''}{g.admissionYear} • {g.stream === 'DSE' ? 'DSY' : 'Regular'} • Sem {g.sem} • {g.pending ?? g.students.length} pending{g.total ? `/${g.total}` : ''}
                     </option>
                   ))}
                 </select>
@@ -1128,7 +1425,7 @@ export default function HODDivisionsBatchesPage() {
                     <strong>This will create:</strong><br />
                     {cYearName || '—'} – Semester {cSemNo || '—'} ({cTerm}) – Division {createForm.name.trim().toUpperCase() || '—'} for Academic Year {cYearCode || '—'}
                     {cCode ? ` (${cCode})` : ''}. Students can be assigned to this class after creation.
-                    {cIntake ? ` ${cIntake.students.length} student(s) from the selected import will be placed.` : ''}
+                    {cIntake ? ` ${cIntake.pending ?? cIntake.students.length} student(s) from ${cIntake.fileName || 'the selected import'} will be placed (single-use).` : ''}
                   </span>
                 </div>
               )}
@@ -1226,6 +1523,47 @@ export default function HODDivisionsBatchesPage() {
           </div>
         </Modal>
       )}
+
+      {/* Place pending batch slice into an existing class (no new division) */}
+      {placeTargetKey && (() => {
+        const group = pendingGroups.find((g) => g.key === placeTargetKey);
+        if (!group) return null;
+        const options = sameSemDivisions(group.sem);
+        const count = group.pending ?? group.students.length;
+        return (
+          <Modal isOpen onClose={() => { setPlaceTargetKey(null); setPlaceDivId(''); }} title={`Add to existing class — Sem ${group.sem}`} maxWidth="520px">
+            <div style={{ padding: '0.5rem 0' }}>
+              <div style={{ fontSize: '0.85rem', color: '#334155', marginBottom: '0.75rem', lineHeight: 1.55 }}>
+                Place <strong>{count} student(s)</strong> from{' '}
+                <span style={{ fontFamily: 'monospace', fontSize: '0.78rem' }}>{group.fileName || 'this import'}</span>{' '}
+                into an existing {semLabel(semesters, group.sem)} class. No new division is created; the batch slice is consumed.
+              </div>
+              <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#0f172a' }}>Existing class</label>
+              <select
+                className="edvana-select"
+                value={placeDivId}
+                onChange={(e) => setPlaceDivId(e.target.value)}
+                style={{ width: '100%', minHeight: '42px', marginTop: '0.3rem', borderRadius: '10px' }}
+              >
+                <option value="">Select class…</option>
+                {options.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    Div {d.name} ({d.academic_year_code || ''}) — {d.enrolled_count ?? rosterOf(d.id).length} seated{d.class_teacher_name ? ` — ${d.class_teacher_name}` : ' — no teacher'}
+                  </option>
+                ))}
+              </select>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', marginTop: '1rem', borderTop: '1px solid #f1f5f9', paddingTop: '1rem' }}>
+                <button type="button" className="edvana-btn edvana-btn-secondary" onClick={() => { setPlaceTargetKey(null); setPlaceDivId(''); }}>
+                  Cancel
+                </button>
+                <button type="button" className="edvana-btn edvana-btn-primary" disabled={placing || !placeDivId} onClick={handlePlaceIntoExisting}>
+                  {placing ? 'Placing…' : `Confirm (${count})`}
+                </button>
+              </div>
+            </div>
+          </Modal>
+        );
+      })()}
     </>
   );
 }

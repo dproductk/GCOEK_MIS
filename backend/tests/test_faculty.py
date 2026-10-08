@@ -266,3 +266,57 @@ class TestSubjectTeacherRules:
         hod, div, f1, f2 = self._setup()
         assert self._assign(api_client, hod, div, f1, 'CS101', 'PRIMARY_FACULTY').status_code == status.HTTP_201_CREATED
         assert self._assign(api_client, hod, div, f2, 'CS101', 'LAB_INSTRUCTOR').status_code == status.HTTP_201_CREATED
+
+    def test_boolean_query_params_never_500(self, api_client):
+        """Browsers send lowercase 'true'/'false' — the list must coerce, not crash.
+
+        Regression: ?is_active=true (lowercase, as axios serializes JS booleans)
+        once raised ValidationError → HTTP 500, which wiped the subject-teacher
+        popup on every HOD page (Promise.all discarded good subjects).
+        """
+        hod, div, f1, f2 = self._setup()
+        assert self._assign(api_client, hod, div, f1, 'CS101').status_code == status.HTTP_201_CREATED
+        api_client.force_authenticate(user=hod)
+        base = f'/api/v1/faculty/assignments/?division_id={div.id}'
+        active = api_client.get(base + '&is_active=true')
+        assert active.status_code == status.HTTP_200_OK, active.data
+        assert active.data['count'] == 1
+        inactive = api_client.get(base + '&is_active=false')
+        assert inactive.status_code == status.HTTP_200_OK, inactive.data
+        assert inactive.data['count'] == 0
+        garbage = api_client.get(base + '&is_active=maybe&semester=abc')
+        assert garbage.status_code == status.HTTP_200_OK, garbage.data
+        assert garbage.data['count'] == 1
+
+    def test_scheme_subject_autofills_code(self, api_client):
+        """The HOD popup sends only scheme_subject — code/name must auto-fill.
+
+        Regression: subject_code was a required serializer field, so DRF's
+        required check fired before validate() could fill it from the scheme
+        slot → every popup assignment failed with 400.
+        """
+        from apps.curriculum.models import Scheme, SchemeSubject, Subject
+        hod, div, f1, f2 = self._setup()
+        subj = Subject.objects.create(
+            code='AUTO101', title='Auto Subject', course_category='PCC',
+            lecture_hours=3, ca_max_marks=20, mse_max_marks=20,
+            ese_max_marks=60, credits=3)
+        scheme = Scheme.objects.create(
+            code='TS', name='Test Scheme', version=1,
+            effective_from_year=div.academic_year)
+        ss = SchemeSubject.objects.create(
+            scheme=scheme, subject=subj, semester_number=21,
+            course_code='AUTO101', credits=3, total_marks=100)
+        api_client.force_authenticate(user=hod)
+        res = api_client.post('/api/v1/faculty/assignments/', {
+            'faculty': str(f1.id), 'division': str(div.id),
+            'scheme_subject': str(ss.id), 'role': 'PRIMARY_FACULTY',
+        }, format='json')
+        assert res.status_code == status.HTTP_201_CREATED, res.data
+        assert res.data['subject_code'] == 'AUTO101'
+        # No code and no scheme slot is still rejected, not silently blank.
+        res2 = api_client.post('/api/v1/faculty/assignments/', {
+            'faculty': str(f2.id), 'division': str(div.id),
+            'role': 'PRIMARY_FACULTY',
+        }, format='json')
+        assert res2.status_code == status.HTTP_400_BAD_REQUEST

@@ -11,27 +11,20 @@ import PageHeader from '../../components/common/PageHeader';
 import Modal from '../../components/common/Modal';
 import { LoadingState } from '../../components/common/StateDisplays';
 
-const DEFAULT_FEE_HEADS = [
-  { id: 'tf', name: 'Tuition Fee', code: 'TF', allowed_amounts: [0, 15000, 30000, 60000], display_order: 1 },
-  { id: 'df', name: 'Development Fee', code: 'DF', allowed_amounts: [0, 3000, 6000, 10000], display_order: 2 },
-  { id: 'other', name: 'Other Fee', code: 'OTHER', allowed_amounts: [0, 500, 1000, 1500], display_order: 4 },
-];
-
 export default function CandidateFeeSetPage() {
   const { studentId } = useParams();
   const navigate = useNavigate();
 
   const [student, setStudent] = useState(null);
-  const [feeHeads, setFeeHeads] = useState(DEFAULT_FEE_HEADS);
-  const [academicYears, setAcademicYears] = useState([{ id: 'curr', code: '2026-27', is_current: true }]);
-  const [currentYear, setCurrentYear] = useState({ id: 'curr', code: '2026-27', is_current: true });
+  // No local defaults: fee heads and academic years come only from the backend.
+  const [feeHeads, setFeeHeads] = useState([]);
+  const [academicYears, setAcademicYears] = useState([]);
+  const [currentYear, setCurrentYear] = useState(null);
+  const [headsFailed, setHeadsFailed] = useState(false);
+  const [yearsFailed, setYearsFailed] = useState(false);
 
   // Selected fee amounts map: { [feeHeadName]: selectedAmount }
-  const [feeAmounts, setFeeAmounts] = useState({
-    'Tuition Fee': 0,
-    'Development Fee': 0,
-    'Other Fee': 0
-  });
+  const [feeAmounts, setFeeAmounts] = useState({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -55,46 +48,37 @@ export default function CandidateFeeSetPage() {
     setLoading(true);
     setError(null);
 
-    // 1. Fetch Student Profile with fallback
+    // 1. Fetch Student Profile (no mock fallback — missing data shows as '—')
     try {
       const studentRes = await studentApi.getStudentProfile(studentId);
       if (studentRes?.data) {
         setStudent(studentRes.data);
+      } else {
+        setError('Student profile not found.');
       }
     } catch (err) {
-      console.warn('Could not load student profile from API, using fallback data', err);
-      setStudent(prev => prev || {
-        id: studentId,
-        display_name: 'LABADE DIPTI RAGHUNATH',
-        enrollment_no: '191227',
-        application_id: 'EN26400284',
-        department_name: '01 - CIVIL ENGINEERING',
-        middle_name: 'RAGHUNATH',
-        gender: 'Female',
-        date_of_birth: '5-November-2002',
-        mobile: '7709826168'
-      });
+      console.warn('Could not load student profile from API', err);
+      setError(err.response?.data?.detail || 'Failed to load student profile.');
     }
 
-    // 2. Fetch Fee Heads & Academic Years
-    let heads = [...DEFAULT_FEE_HEADS];
+    // 2. Fee heads come only from the backend — never invented locally.
+    let heads = [];
     try {
       const headsRes = await financeApi.getFeeHeads();
       const raw = headsRes?.data?.results || headsRes?.data;
-      if (Array.isArray(raw) && raw.length > 0) {
-        const active = raw.filter(h => h.is_active);
-        if (active.length > 0) {
-          heads = active;
-        }
+      if (Array.isArray(raw)) {
+        heads = raw.filter(h => h.is_active);
       }
+      setHeadsFailed(false);
     } catch (err) {
-      console.warn('Could not load fee heads from API, using 3 standard heads', err);
+      setHeadsFailed(true);
+      setError('Could not load fee heads. Fee cannot be set until they load — please retry.');
     }
     heads.sort((a, b) => (a.display_order || 99) - (b.display_order || 99));
     setFeeHeads(heads);
 
-    // 3. Academic Years
-    let resolvedYear = currentYear;
+    // 3. Academic years come only from the backend.
+    let resolvedYear = null;
     try {
       const yearsRes = await academicApi.getAcademicYears();
       const rawYears = yearsRes?.data?.results || yearsRes?.data;
@@ -104,8 +88,12 @@ export default function CandidateFeeSetPage() {
         resolvedYear = activeY;
         setCurrentYear(activeY);
       }
+      setYearsFailed(false);
     } catch (e) {
-      console.warn('Using default academic year', e);
+      setYearsFailed(true);
+      setAcademicYears([]);
+      setCurrentYear(null);
+      setError('Could not load academic years. Fee cannot be set until they load — please retry.');
     }
 
     // 4. Load existing fee assessment from the backend ledger.
@@ -125,7 +113,13 @@ export default function CandidateFeeSetPage() {
 
       heads.forEach(h => {
         if (initialAmounts[h.name] === undefined) {
-          initialAmounts[h.name] = 0;
+          // Default to the first configured preset so an untouched form is
+          // always backend-valid. A blind 0 breaks heads whose presets
+          // exclude 0 (e.g. ID card fee [50, 100]) and fails the whole save.
+          const presets = Array.isArray(h.allowed_amounts) && h.allowed_amounts.length > 0
+            ? h.allowed_amounts
+            : null;
+          initialAmounts[h.name] = presets ? presets[0] : 0;
         }
       });
       setFeeAmounts(initialAmounts);
@@ -149,6 +143,14 @@ export default function CandidateFeeSetPage() {
   // Save fee assessment to the backend ledger and return to student list.
   const handleSaveFee = async (e) => {
     e.preventDefault();
+    if (feeHeads.length === 0) {
+      setError('No fee heads are configured. Ask the sysadmin to configure fee heads first.');
+      return;
+    }
+    if (!currentYear?.id) {
+      setError('No academic year is configured. Ask the sysadmin to create one first.');
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -204,18 +206,72 @@ export default function CandidateFeeSetPage() {
     }
   };
 
-  const handleResetAllotmentLetter = () => {
-    setResetMsg('Allotment letter reset request triggered. Candidate must re-upload the valid CAP allotment letter.');
-    setTimeout(() => setResetMsg(''), 4000);
+  const allotmentDocs = (student?.documents || []).filter((d) => d.document_type === 'ALLOTMENT_LETTER').sort((a, b) => (b.version || 0) - (a.version || 0));
+  const latestAllotment = allotmentDocs[0] || null;
+
+  const handleDownloadAllotment = async () => {
+    if (!latestAllotment) return;
+    try {
+      const res = await studentApi.downloadStudentDocument(studentId, latestAllotment.id);
+      const blob = new Blob([res.data], { type: latestAllotment.mime_type || 'application/octet-stream' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ALLOTMENT_LETTER_v${latestAllotment.version}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      setError('Failed to download allotment letter. File may be missing on server.');
+    }
+  };
+
+  const handleResetAllotmentLetter = async () => {
+    if (!latestAllotment) {
+      setResetMsg('No allotment letter on file to reset.');
+      setTimeout(() => setResetMsg(''), 4000);
+      return;
+    }
+    if (!window.confirm('Delete the current allotment letter? Candidate must re-upload the valid CAP letter (max 200 KB).')) return;
+    try {
+      await studentApi.deleteStudentDocument(studentId, latestAllotment.id);
+      setResetMsg('Allotment letter deleted. Candidate must re-upload the valid CAP allotment letter (max 200 KB).');
+      const refreshed = await studentApi.getStudentProfile(studentId);
+      if (refreshed?.data) setStudent(refreshed.data);
+    } catch (err) {
+      setResetMsg(err.response?.data?.detail || 'Failed to reset allotment letter.');
+    }
+    setTimeout(() => setResetMsg(''), 5000);
   };
 
   // Helper values extracted safely from student object matching Image 2
   const p = student?.personal_details || {};
-  const gFather = (student?.guardians || []).find(g => g.relationship === 'FATHER' || g.is_primary) || {};
-  const gMother = (student?.guardians || []).find(g => g.relationship === 'MOTHER') || {};
-  const enrollment = (student?.enrollments || []).find(e => e.is_current) || (student?.enrollments || [])[0] || {};
-  const admission = (student?.admissions || [])[0] || {};
-  const aadhaar = student?.aadhaar_details?.aadhaar_number_masked || '996182065445';
+  const guardians = student?.guardians || [];
+  const gFather = guardians.find(g => g.relationship === 'FATHER')
+    || guardians.find(g => g.is_primary)
+    || guardians.find(g => (g.mobile || '').trim())
+    || {};
+  const gMother = guardians.find(g => g.relationship === 'MOTHER') || {};
+  // Backend StudentProfileSerializer exposes `current_enrollment` (object) +
+  // `enrollment_history` (array) — NOT `enrollments`. Support all shapes so
+  // assigned + verified candidates always resolve their sem/program.
+  const enrollmentHistory = student?.enrollment_history || student?.enrollments || [];
+  const enrollment = student?.current_enrollment
+    || enrollmentHistory.find(e => e.is_current)
+    || enrollmentHistory[0]
+    || {};
+  const parentMobile = (gFather.mobile || '').trim()
+    || (guardians.find(g => g.is_primary)?.mobile || '').trim()
+    || (guardians.find(g => (g.mobile || '').trim())?.mobile || '').trim()
+    || '—';
+  const programLabel = enrollment.program_name
+    ? `${enrollment.program_code || enrollment.department_code || ''}${enrollment.program_code || enrollment.department_code ? ' — ' : ''}${enrollment.program_name}`
+    : (enrollment.department_code || enrollment.department_name || '—');
+  // Backend StudentProfileSerializer exposes `admission_details` (object), not `admissions` array.
+  // Fall back to legacy `admissions[0]` shape for robustness.
+  const admission = student?.admission_details || (student?.admissions || [])[0] || {};
+  const aadhaar = student?.aadhaar_details?.aadhaar_number_masked || '—';
 
   return (
     <>
@@ -321,59 +377,59 @@ export default function CandidateFeeSetPage() {
                   {/* Row 1 */}
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Enrollment No.</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{student?.enrollment_no || '191227'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{student?.enrollment_no || '—'}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>DEN</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{student?.application_id ? `DEN${student.application_id.replace(/\D/g, '')}` : 'DEN19157700'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{student?.application_id ? `DEN${student.application_id.replace(/\D/g, '')}` : '—'}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Student Name</div>
-                    <div style={{ fontSize: '0.875rem', color: '#0f172a', fontWeight: 600 }}>{student?.display_name || 'LABADE DIPTI RAGHUNATH'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#0f172a', fontWeight: 600 }}>{student?.display_name || '—'}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Father's Name</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{gFather.name || student?.middle_name || 'RAGHUNATH'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{gFather.name || student?.middle_name || '—'}</div>
                   </div>
 
                   {/* Row 2 */}
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Mother's Name</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{gMother.name || 'SAVITA'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{gMother.name || '—'}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Gender</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{p.gender || 'Female'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{p.gender || '—'}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Date of Birth</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{p.date_of_birth || '5-November-2002'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{p.date_of_birth || '—'}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Student Mobile No.</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{p.student_mobile || '7709826168'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{p.student_mobile || '—'}</div>
                   </div>
 
                   {/* Row 3 */}
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Parent Mobile No.</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{gFather.mobile || '9373424577'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{parentMobile}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Program Code & Name</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{enrollment.program_name || '01 - CIVIL ENGINEERING'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{programLabel}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Semester</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>Semester {enrollment.semester_number || 6}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{enrollment.semester_number ? `Semester ${enrollment.semester_number}` : '—'}</div>
                   </div>
 
                   <div>
@@ -384,82 +440,86 @@ export default function CandidateFeeSetPage() {
                   {/* Row 4 */}
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Religion</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{p.religion || 'Muslim'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{p.religion || '—'}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Caste</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{admission.seat_type || 'OPEN'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{p.caste || admission.seat_type || admission.category || '—'}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Admission Category</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{admission.candidature_type || 'NA'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{admission.category || admission.candidature_type || '—'}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Reservation Type</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>NA</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{admission.category || admission.seat_type || '—'}</div>
                   </div>
 
                   {/* Row 5 */}
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Admission Date</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{admission.admission_date || '30/07/2019'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{admission.admission_date || '—'}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>DSA</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>Yes</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{student?.is_direct_second_year ? 'Yes' : 'No'}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Admission Type</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{admission.admission_type || 'Against CAP'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{admission.admission_type || '—'}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Allotted Seat Type</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{admission.allotted_seat_type || 'OPEN'}</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{admission.allotted_seat_type || admission.seat_type || '—'}</div>
                   </div>
 
                   {/* Row 6 */}
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Scholarship Applied</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>No</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>—</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Scholarship Type</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>NA</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>—</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Income Range</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>0 to 50000</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{gFather.annual_income ? `₹ ${Number(gFather.annual_income).toLocaleString('en-IN')}` : '—'}</div>
                   </div>
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Institute Allotment Letter</div>
-                    <button
-                      type="button"
-                      onClick={() => alert('Opening Institute Allotment Letter preview...')}
-                      style={{
-                        background: '#ffffff',
-                        border: '1px solid #cbd5e1',
-                        borderRadius: '20px',
-                        padding: '0.3rem 0.85rem',
-                        fontSize: '0.75rem',
-                        color: '#334155',
-                        cursor: 'pointer',
-                        fontWeight: 500,
-                        transition: 'all 0.15s ease'
-                      }}
-                      onMouseEnter={(e) => e.currentTarget.style.borderColor = '#2563eb'}
-                      onMouseLeave={(e) => e.currentTarget.style.borderColor = '#cbd5e1'}
-                    >
-                      View/Download Existing Letter PDF
-                    </button>
+                    {latestAllotment ? (
+                      <button
+                        type="button"
+                        onClick={handleDownloadAllotment}
+                        style={{
+                          background: '#ffffff',
+                          border: '1px solid #cbd5e1',
+                          borderRadius: '20px',
+                          padding: '0.3rem 0.85rem',
+                          fontSize: '0.75rem',
+                          color: '#334155',
+                          cursor: 'pointer',
+                          fontWeight: 500,
+                          transition: 'all 0.15s ease'
+                        }}
+                        onMouseEnter={(e) => e.currentTarget.style.borderColor = '#2563eb'}
+                        onMouseLeave={(e) => e.currentTarget.style.borderColor = '#cbd5e1'}
+                      >
+                        View/Download v{latestAllotment.version} ({(latestAllotment.file_size / 1024).toFixed(1)} KB)
+                      </button>
+                    ) : (
+                      <div style={{ fontSize: '0.78rem', color: '#64748b' }}>No allotment letter uploaded (max 200 KB).</div>
+                    )}
                   </div>
                 </div>
 
@@ -507,7 +567,7 @@ export default function CandidateFeeSetPage() {
                   fontWeight: 500,
                   color: '#1e293b'
                 }}>
-                  Admission Fee Details for FY ({currentYear?.code || '2026-27'})
+                  Admission Fee Details{currentYear?.code ? ` for ${currentYear.code}` : ''}
                 </div>
 
                 <button
@@ -553,10 +613,17 @@ export default function CandidateFeeSetPage() {
                         </tr>
                       </thead>
                       <tbody>
+                        {(headsFailed || yearsFailed) && feeHeads.length === 0 ? (
+                          <tr>
+                            <td colSpan={3} style={{ padding: '2rem 1.25rem', textAlign: 'center', fontSize: '0.85rem', color: '#991b1b' }}>
+                              Fee configuration could not be loaded. Please retry loading this page — amounts are never assumed.
+                            </td>
+                          </tr>
+                        ) : null}
                         {feeHeads.map((head, idx) => {
                           const allowed = Array.isArray(head.allowed_amounts) && head.allowed_amounts.length > 0
                             ? head.allowed_amounts
-                            : [0, 5000, 10000, 15000];
+                            : null;
 
                           const currentVal = feeAmounts[head.name] !== undefined ? feeAmounts[head.name] : 0;
 
@@ -572,32 +639,55 @@ export default function CandidateFeeSetPage() {
                                 {head.name} <span style={{ color: '#ef4444' }}>*</span>
                               </td>
 
-                              {/* Dropdown with allowed amounts */}
+                              {/* Allowed amounts from backend; free numeric entry when none configured */}
                               <td style={{ padding: '0.85rem 1.25rem', textAlign: 'center' }}>
-                                <select
-                                  value={currentVal}
-                                  onChange={(e) => handleAmountChange(head.name, e.target.value)}
-                                  className="edvana-input"
-                                  style={{
-                                    width: '100%',
-                                    maxWidth: '240px',
-                                    height: '38px',
-                                    margin: '0 auto',
-                                    padding: '0 0.85rem',
-                                    fontSize: '0.85rem',
-                                    fontWeight: 400,
-                                    color: '#0f172a',
-                                    borderRadius: '8px',
-                                    borderColor: '#cbd5e1',
-                                    textAlign: 'center'
-                                  }}
-                                >
-                                  {allowed.map((amt) => (
-                                    <option key={amt} value={amt}>
-                                      {amt === 0 ? '0' : amt.toLocaleString('en-IN')}
-                                    </option>
-                                  ))}
-                                </select>
+                                {allowed ? (
+                                  <select
+                                    value={currentVal}
+                                    onChange={(e) => handleAmountChange(head.name, e.target.value)}
+                                    className="edvana-input"
+                                    style={{
+                                      width: '100%',
+                                      maxWidth: '240px',
+                                      height: '38px',
+                                      margin: '0 auto',
+                                      padding: '0 0.85rem',
+                                      fontSize: '0.85rem',
+                                      fontWeight: 400,
+                                      color: '#0f172a',
+                                      borderRadius: '8px',
+                                      borderColor: '#cbd5e1',
+                                      textAlign: 'center'
+                                    }}
+                                  >
+                                    {allowed.map((amt) => (
+                                      <option key={amt} value={amt}>
+                                        {amt === 0 ? '0' : Number(amt).toLocaleString('en-IN')}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={currentVal}
+                                    onChange={(e) => handleAmountChange(head.name, e.target.value)}
+                                    className="edvana-input"
+                                    style={{
+                                      width: '100%',
+                                      maxWidth: '240px',
+                                      height: '38px',
+                                      margin: '0 auto',
+                                      padding: '0 0.85rem',
+                                      fontSize: '0.85rem',
+                                      color: '#0f172a',
+                                      borderRadius: '8px',
+                                      borderColor: '#cbd5e1',
+                                      textAlign: 'center'
+                                    }}
+                                  />
+                                )}
                               </td>
                             </tr>
                           );

@@ -161,9 +161,37 @@ USE_TZ = True
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-# Media files (uploaded documents)
+# Media files (uploaded documents: allotment letters, photos, marksheets)
+# Local dev: MEDIA_ROOT. Production hosting: set AWS_STORAGE_BUCKET_NAME +
+# credentials below to store via S3 (requires django-storages[boto3]).
+# Daily backup (infra): DB dump + media sync — see runbook in final message.
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+if os.getenv('AWS_STORAGE_BUCKET_NAME'):
+    try:
+        STORAGES = {
+            'default': {
+                'BACKEND': 'storages.backends.s3.S3Storage',
+                'OPTIONS': {
+                    'bucket_name': os.getenv('AWS_STORAGE_BUCKET_NAME'),
+                    'region_name': os.getenv('AWS_S3_REGION_NAME', 'ap-south-1'),
+                    'custom_domain': os.getenv('AWS_S3_CUSTOM_DOMAIN', ''),
+                    'default_acl': 'private',
+                    'file_overwrite': False,
+                    'querystring_auth': True,
+                    'querystring_expire': int(os.getenv('AWS_S3_URL_EXPIRE_SECS', '3600')),
+                },
+            },
+            'staticfiles': {
+                'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+            },
+        }
+        AWS_S3_ACCESS_KEY_ID = os.getenv('AWS_S3_ACCESS_KEY_ID', '')
+        AWS_S3_SECRET_ACCESS_KEY = os.getenv('AWS_S3_SECRET_ACCESS_KEY', '')
+        AWS_STORAGE_BUCKET_NAME = os.getenv('AWS_STORAGE_BUCKET_NAME')
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Default primary key field type

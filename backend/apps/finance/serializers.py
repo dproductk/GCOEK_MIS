@@ -53,6 +53,7 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
     enrollment_no = serializers.CharField(source='student.enrollment_no', read_only=True)
     academic_year_code = serializers.CharField(source='academic_year.code', read_only=True)
     collected_by_name = serializers.CharField(source='collected_by.username', read_only=True, default='')
+    fee_breakdown = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentLedger
@@ -67,6 +68,7 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
             'total_fee_due',
             'amount_paid',
             'balance_due',
+            'fee_breakdown',
             'payment_mode',
             'payment_mode_display',
             'transaction_ref',
@@ -85,6 +87,21 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
             'status': {'read_only': True},
             'balance_due': {'read_only': True},
         }
+
+    def get_fee_breakdown(self, obj):
+        # Pay-head breakup for the detailed bill: resolved from the matching
+        # StudentFeeAssessment (same student + academic year). Read-only and
+        # additive — old receipts without an assessment yield {}.
+        try:
+            assessment = StudentFeeAssessment.objects.filter(
+                student_id=obj.student_id,
+                academic_year_id=obj.academic_year_id,
+            ).order_by('-updated_at').first()
+            if assessment and isinstance(assessment.fee_breakdown, dict):
+                return assessment.fee_breakdown
+        except Exception:
+            pass
+        return {}
 
     def validate(self, attrs):
         # University rule: full payment only. Reject half payments early

@@ -409,6 +409,14 @@ body.edvana-body,
   box-shadow: 0 0 0 2px var(--edvana-brand-soft);
 }
 
+/* Native <select> popups are OS-rendered and never paint the CSS focus halo,
+   so a halo on the closed box makes it look ~4px wider than its own dropdown
+   list. Keep the blue border affordance on selects, but drop the outer ring
+   so the closed box lines up exactly with the opened list. */
+.edvana-select:focus {
+  box-shadow: none;
+}
+
 /* ==========================================================================
    8. STAT KPI CARDS
    ========================================================================== */

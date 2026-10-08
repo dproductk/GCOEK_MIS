@@ -173,21 +173,30 @@ class TeachingAssignmentSerializer(serializers.ModelSerializer):
     semester_number = serializers.IntegerField(source='semester.number', read_only=True)
     division_name = serializers.CharField(source='division.name', default='', read_only=True)
     role_display = serializers.CharField(source='get_role_display', read_only=True)
+    faculty_name = serializers.CharField(source='faculty.display_name', read_only=True)
 
     class Meta:
         model = TeachingAssignment
         fields = [
             'id',
+            'faculty',
+            'faculty_name',
+            'division',
+            'scheme_subject',
             'subject_name',
             'subject_code',
+            'department',
             'department_code',
+            'academic_year',
             'academic_year_code',
+            'semester',
             'semester_number',
             'division_name',
             'role',
             'role_display',
             'is_active',
         ]
+        read_only_fields = ['id', 'is_active']
 
 
 class FacultyCreateSerializer(serializers.Serializer):
@@ -282,14 +291,26 @@ class TeachingAssignmentWriteSerializer(serializers.ModelSerializer):
             'division', 'scheme_subject', 'subject_name', 'subject_code',
             'role', 'is_active',
         ]
-        read_only_fields = ['id']
+        read_only_fields = ['id', 'is_active']
         extra_kwargs = {
             # Derived from division in validate(); never typed by hand.
             'academic_year': {'required': False},
             'department': {'required': False},
             'semester': {'required': False},
             'subject_name': {'required': False, 'allow_blank': True},
+            # Auto-filled from scheme_subject in validate() below; kept
+            # required=False so the fill runs before DRF's required check.
+            # validate() still rejects a missing code unconditionally.
+            'subject_code': {'required': False, 'allow_blank': True},
+            'is_active': {'required': False, 'default': True},
         }
+        # NOTE: auto UniqueTogetherValidator disabled on purpose.
+        # DRF >= 3.15 forces an implied 'required' on every unique-together
+        # member (division, subject_code, role), which re-requires the
+        # auto-filled subject_code before validate() fills it from
+        # scheme_subject. Uniqueness is enforced manually in validate()
+        # below + perform_create() under lock + DB constraint.
+        validators = []
 
     @staticmethod
     def _is_lab(role):
@@ -310,13 +331,16 @@ class TeachingAssignmentWriteSerializer(serializers.ModelSerializer):
             attrs.setdefault('semester', division.semester)
             if scheme_subject and scheme_subject.semester_number != division.semester.number:
                 raise serializers.ValidationError(
-                    {'scheme_subject': 'Subject belongs to Sem %s, division is Sem %s.' % (
-                        scheme_subject.semester_number, division.semester.number)})
+                    {'scheme_subject': f'Subject belongs to Sem {scheme_subject.semester_number}, but division is currently in Sem {division.semester.number}. Please refresh the page.'})
         faculty = attrs.get('faculty') or (self.instance.faculty if self.instance else None)
+        if not faculty:
+            raise serializers.ValidationError({'faculty': 'A teacher is required.'})
         code = (attrs.get('subject_code') or (self.instance.subject_code if self.instance else '') or '').strip().upper()
         role = attrs.get('role') or (self.instance.role if self.instance else TeachingAssignment.Role.PRIMARY_FACULTY)
         if not code:
             raise serializers.ValidationError({'subject_code': 'Subject is required.'})
+        attrs['is_active'] = True
+        attrs['role'] = role
         if division is not None:
             qs = TeachingAssignment.objects.filter(division=division, is_active=True)
             if self.instance:
@@ -325,8 +349,7 @@ class TeachingAssignmentWriteSerializer(serializers.ModelSerializer):
             other = qs.filter(faculty=faculty).exclude(subject_code__iexact=code).first()
             if faculty is not None and other:
                 raise serializers.ValidationError(
-                    '%s already teaches %s in this division (one subject per teacher per class).' % (
-                        other.faculty.display_name, other.subject_code))
+                    f'{other.faculty.display_name} already teaches {other.subject_code} in this division (one subject per teacher per class).')
             # Rule 2: this slot has no other active teacher.
             holder = qs.filter(subject_code__iexact=code)
             holder = holder.filter(
@@ -335,14 +358,14 @@ class TeachingAssignmentWriteSerializer(serializers.ModelSerializer):
             holder = holder.exclude(faculty=faculty).first()
             if holder:
                 raise serializers.ValidationError(
-                    '%s is already taken by %s. Deactivate it first to replace.' % (
-                        code, holder.faculty.display_name))
+                    f'{code} is already taken by {holder.faculty.display_name}. Deactivate it first to replace.')
         return attrs
 
 
 class FacultyListSerializer(serializers.ModelSerializer):
     """Compact serializer for faculty directory search."""
 
+    user_id = serializers.UUIDField(source='user.id', read_only=True)
     department_name = serializers.CharField(source='department.name', read_only=True)
     department_code = serializers.CharField(source='department.code', read_only=True)
     designation_display = serializers.CharField(source='get_designation_display', read_only=True)
@@ -351,6 +374,7 @@ class FacultyListSerializer(serializers.ModelSerializer):
         model = Faculty
         fields = [
             'id',
+            'user_id',
             'employee_code',
             'first_name',
             'last_name',

@@ -20,12 +20,7 @@ import {
   Unlock,
 } from 'lucide-react';
 
-/**
- * ELIGIBILITY_THRESHOLD — minimum percentage of credits earned
- * vs registered to be considered "Pass" for that semester.
- * Standard college / sysadmin eligibility criteria (80%).
- */
-const ELIGIBILITY_THRESHOLD = 80;
+
 
 /**
  * DBATU NEP 2020 — Passing Rules:
@@ -189,7 +184,14 @@ export default function ResultHistoryPage() {
 
       // Check eligibility workflow state for target semester
       const targetSemEligibility = eligibilityRecords.find(e => e.target_semester_number === sem + 1);
-      const isVerificationStarted = Boolean(targetSemEligibility);
+      // Backlog rows (older than the current class) ride the open class
+      // window: a senior catching up on Sem 2 must not wait on a stale
+      // Sem-3 cycle. Badge inputs below intentionally keep the row's own
+      // cycle; only the upload gate uses the window.
+      const windowEligibility = !isCurrent
+        ? eligibilityRecords.find(e => e.target_semester_number === currentSemNumber + 1)
+        : null;
+      const isVerificationStarted = Boolean(targetSemEligibility || windowEligibility);
       const isFlaggedByTeacher = targetSemEligibility?.class_teacher_status === 'FLAGGED';
       const isConfirmedByTeacher = targetSemEligibility?.class_teacher_status === 'APPROVED';
       const isFinalEligible = targetSemEligibility?.final_eligible === true;
@@ -201,6 +203,8 @@ export default function ResultHistoryPage() {
       const isEvenSem = sem % 2 === 0;
       const isUploadAllowed = !isCurrent || !isEvenSem || isVerificationStarted;
 
+      // Semester outcome mirrors the authoritative backend result_status
+      // (PASS / ATKT / FAIL from backlog counts), never a local heuristic.
       let eligibility = 'pending';
       if (isFinalEligible) {
         eligibility = 'final_eligible';
@@ -208,11 +212,10 @@ export default function ResultHistoryPage() {
         eligibility = 'teacher_approved';
       } else if (isFlaggedByTeacher) {
         eligibility = 'teacher_flagged';
-      } else if (result && result.result_status !== 'NOT_YET_HELD') {
-        const earned = Number(result.total_credits_earned) || 0;
-        const registered = Number(result.total_credits_registered) || 1;
-        const pct = (earned / registered) * 100;
-        eligibility = pct >= ELIGIBILITY_THRESHOLD ? 'pass' : 'fail';
+      } else if (result && result.result_status && result.result_status !== 'NOT_YET_HELD') {
+        if (result.result_status === 'PASS') eligibility = 'pass';
+        else if (result.result_status === 'ATKT') eligibility = 'atkt';
+        else eligibility = 'fail';
       }
 
       rows.push({
@@ -224,7 +227,7 @@ export default function ResultHistoryPage() {
         isFlaggedByTeacher,
         teacherRemarks,
         isFinalEligible,
-        examSession: result?.exam_session || (isCurrent ? 'In Progress' : '—'),
+        examSession: result?.exam_session || (isCurrent ? 'Result Awaited' : '—'),
         totalCredits: result?.total_credits_registered ?? '—',
         creditsEarned: result?.total_credits_earned ?? '—',
         sgpa: result?.sgpa ?? '—',
@@ -365,10 +368,13 @@ export default function ResultHistoryPage() {
       setSaving(true);
       setFormError('');
 
+      // Exam session follows the academic calendar: Jul–Dec = Winter, Jan–Jun = Summer.
+      const now = new Date();
+      const examSession = now.getMonth() >= 6 ? `Winter ${now.getFullYear()}` : `Summer ${now.getFullYear()}`;
       // Submit marks to authoritative backend results API (no browser cache).
       const res = await resultsApi.submitMarks({
         semester_number: fillSemester,
-        exam_session: 'Winter 2026',
+        exam_session: examSession,
         subjects: formSubjects.map(s => ({
           course_code: s.code,
           course_name: s.name,
@@ -441,6 +447,13 @@ export default function ResultHistoryPage() {
             <span>Pass</span>
           </Badge>
         );
+      case 'atkt':
+        return (
+          <Badge variant="warning">
+            <AlertCircle size={12} />
+            <span>ATKT — Backlog</span>
+          </Badge>
+        );
       case 'fail':
         return (
           <Badge variant="danger">
@@ -477,6 +490,13 @@ export default function ResultHistoryPage() {
   }
 
   const semesterRows = buildSemesterRows();
+  // A teacher flag opens correction everywhere: the remark may point at any
+  // semester (e.g. "sem 2 result" on the Sem-6 cycle), so every row with a
+  // result gets a Correct Marks button while flagged. The backend agrees —
+  // flagged cycles are unlocked for student edits and any resubmit sends
+  // the cycle back to PENDING for re-review.
+  const anyCorrectionOpen = semesterRows.some((r) => r.isFlaggedByTeacher);
+  const flaggedRow = anyCorrectionOpen ? semesterRows.find((r) => r.isFlaggedByTeacher) : null;
   const formTotalCredits = formSubjects.reduce((sum, s) => sum + (Number(s.credits) || 0), 0);
 
   /* ──────────────── Main Render ──────────────── */
@@ -514,7 +534,7 @@ export default function ResultHistoryPage() {
           <AlertCircle size={18} style={{ flexShrink: 0, marginTop: '1px' }} />
           <span>
             <strong>Passing Criteria:</strong> Minimum <strong>20/60</strong> marks in Theory exam and <strong>40/100</strong> total marks per subject.
-            Students must earn at least <strong>{ELIGIBILITY_THRESHOLD}%</strong> of registered semester credits to qualify as <strong>Pass</strong>.
+            Clear all subjects to earn <strong>Pass</strong>; backlogs within the scheme ATKT limit keep the term (<strong>ATKT</strong>), beyond it <strong>Fail</strong>.
           </span>
         </div>
 
@@ -571,7 +591,7 @@ export default function ResultHistoryPage() {
                 Semester Results Overview
               </h2>
               <p style={{ fontSize: '0.8125rem', color: '#64748b', margin: '0.25rem 0 0 0', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                <span>{profile?.display_name || 'Student'} — {profile?.current_enrollment?.department_name || 'Department'} — Semester {profile?.current_enrollment?.semester_number || '—'}</span>
+                <span>{profile?.display_name || '—'} — {profile?.current_enrollment?.department_name || '—'} — Semester {profile?.current_enrollment?.semester_number || '—'}</span>
                 {profile?.is_direct_second_year && (
                   <span
                     style={{
@@ -593,7 +613,7 @@ export default function ResultHistoryPage() {
           </div>
 
           {/* Flagged Remarks Alert Banner */}
-          {semesterRows.some(r => r.isFlaggedByTeacher) && (
+          {anyCorrectionOpen && (
             <div
               style={{
                 margin: '1rem 1.5rem 0.5rem 1.5rem',
@@ -612,13 +632,19 @@ export default function ResultHistoryPage() {
                   Action Required: Result Flagged by Class Teacher
                 </div>
                 <div style={{ fontSize: '0.84rem', color: '#b91c1c', marginTop: '0.25rem', lineHeight: 1.5 }}>
-                  <strong>Teacher Remark:</strong> "{semesterRows.find(r => r.isFlaggedByTeacher)?.teacherRemarks || 'Discrepancy noted in your entered marks. Please correct and re-submit.'}"
+                  {flaggedRow?.teacherRemarks ? (
+                    <><strong>Teacher Remark:</strong> "{flaggedRow.teacherRemarks}"</>
+                  ) : (
+                    <>Flagged by teacher — no remark recorded. Please correct and re-submit.</>
+                  )}
+                  <div style={{ marginTop: '0.25rem', color: '#991b1b' }}>
+                    While flagged, you can correct marks for any semester below — re-submitting sends it back for teacher review.
+                  </div>
                 </div>
                 <div style={{ marginTop: '0.65rem' }}>
                   <button
                     type="button"
                     onClick={() => {
-                      const flaggedRow = semesterRows.find(r => r.isFlaggedByTeacher);
                       if (flaggedRow) {
                         openFillForm(flaggedRow.semester, true);
                       }
@@ -702,7 +728,7 @@ export default function ResultHistoryPage() {
                         {row.isCurrent && !row.result ? (
                           <Badge variant="info">
                             <Clock size={11} />
-                            <span>In Progress</span>
+                            <span>Result Awaited</span>
                           </Badge>
                         ) : (
                           row.examSession
@@ -735,12 +761,11 @@ export default function ResultHistoryPage() {
                           <span style={{ color: '#94a3b8', fontWeight: 600, fontSize: '0.875rem' }}>—</span>
                         ) : (
                           <div style={{ display: 'inline-flex', gap: '0.4rem', justifyContent: 'center' }}>
-                            {row.isFlaggedByTeacher && (
+                            {(row.isFlaggedByTeacher || (anyCorrectionOpen && row.result && !row.isExemptedDSY)) && (
                               <button
                                 onClick={() => {
                                   openFillForm(row.semester, true);
-                                }}
-                                style={{
+                                }}                                style={{
                                   display: 'inline-flex',
                                   alignItems: 'center',
                                   gap: '0.35rem',
@@ -1303,6 +1328,11 @@ export default function ResultHistoryPage() {
                 <tbody>
                   {(viewResult.subjects || []).map((s) => {
                     if (s.mid1_marks !== undefined) {
+                      // Backend never sends `is_passed` — derive it from the
+                      // stored backlog flag, else the DBATU rule (th>=20, tot>=40).
+                      const passed = s.is_passed ?? (s.is_backlog === false
+                        || (Number(s.total_marks) >= PASSING_RULES.MIN_TOTAL
+                          && Number(s.theory_marks) >= PASSING_RULES.MIN_THEORY));
                       return (
                         <tr key={s.id || s.course_code}>
                           <td style={{ fontFamily: 'var(--edvana-font-mono)', fontWeight: 700, color: '#0f172a', fontSize: '0.775rem' }}>
@@ -1315,8 +1345,8 @@ export default function ResultHistoryPage() {
                           <td style={{ textAlign: 'center', fontWeight: 700, color: '#0f172a', fontFamily: 'var(--edvana-font-mono)' }}>{s.total_marks}</td>
                           <td style={{ textAlign: 'center', fontWeight: 700, color: '#0f172a', fontFamily: 'var(--edvana-font-mono)' }}>{s.credits}</td>
                           <td style={{ textAlign: 'center' }}>
-                            <Badge variant={s.is_passed ? 'success' : 'danger'}>
-                              {s.is_passed ? 'Pass' : 'Fail'}
+                            <Badge variant={passed ? 'success' : 'danger'}>
+                              {passed ? 'Pass' : 'Fail'}
                             </Badge>
                           </td>
                         </tr>

@@ -214,6 +214,77 @@ class AcademicYearViewSet(viewsets.ModelViewSet):
         )
 
     def perform_destroy(self, instance):
+        from rest_framework.exceptions import ValidationError
+
+        if instance.is_current:
+            raise ValidationError(
+                f"Cannot delete the current academic year '{instance.code}'. "
+                'Set another year as current first.'
+            )
+
+        # Block deletion while operational/academic records still point here.
+        # (PROTECT would raise a raw IntegrityError; this gives a clean 400.)
+        in_use = []
+        checks = [
+            ('divisions', instance.divisions.count(), 'class division(s)'),
+            ('contexts', instance.contexts.count(), 'academic term context(s)'),
+        ]
+        try:
+            from apps.students.models import StudentEnrollment
+            n = StudentEnrollment.objects.filter(academic_year=instance).count()
+            checks.append(('enrollments', n, 'student enrollment(s)'))
+        except Exception:
+            pass
+        try:
+            from apps.admissions.models import ImportBatch, StudentAdmission
+            n = ImportBatch.objects.filter(academic_year=instance).count()
+            checks.append(('import batches', n, 'admission import batch(es)'))
+            n = StudentAdmission.objects.filter(academic_year=instance).count()
+            checks.append(('admissions', n, 'student admission(s)'))
+        except Exception:
+            pass
+        try:
+            from apps.finance.models import PaymentLedger
+            n = PaymentLedger.objects.filter(academic_year=instance).count()
+            checks.append(('fee records', n, 'fee ledger record(s)'))
+        except Exception:
+            pass
+        try:
+            from apps.results.models import EligibilityVerification, SemesterResult
+            n = EligibilityVerification.objects.filter(academic_year=instance).count()
+            checks.append(('eligibility records', n, 'eligibility verification(s)'))
+            n = SemesterResult.objects.filter(academic_year=instance).count()
+            checks.append(('results', n, 'semester result(s)'))
+        except Exception:
+            pass
+        try:
+            from apps.faculty.models import TeachingAssignment
+            n = TeachingAssignment.objects.filter(academic_year=instance).count()
+            checks.append(('teaching assignments', n, 'teaching assignment(s)'))
+        except Exception:
+            pass
+        try:
+            from apps.curriculum.models import Scheme
+            n = Scheme.objects.filter(
+                effective_from_year=instance
+            ).count() + Scheme.objects.filter(
+                effective_to_year=instance
+            ).count()
+            checks.append(('schemes', n, 'curriculum scheme reference(s)'))
+        except Exception:
+            pass
+
+        for _key, count, label in checks:
+            if count:
+                in_use.append(f'{count} {label}')
+
+        if in_use:
+            raise ValidationError(
+                f"Cannot delete academic year '{instance.code}': "
+                + ', '.join(in_use) + ' still reference it. '
+                'Deactivate it instead (is_active=false) to keep history intact.'
+            )
+
         code, yid = instance.code, str(instance.id)
         instance.delete()
         audit_log(
@@ -473,6 +544,11 @@ class DivisionViewSet(viewsets.ModelViewSet):
         from apps.authentication.models import User
         from apps.faculty.models import Faculty
         from rest_framework.exceptions import ValidationError
+        import uuid as _uuid
+        try:
+            _uuid.UUID(str(teacher_val))
+        except (ValueError, AttributeError, TypeError):
+            raise ValidationError({'class_teacher': 'Selected teacher is not a valid identifier.'})
         if User.objects.filter(id=teacher_val).exists():
             return
         faculty = Faculty.objects.filter(id=teacher_val).first()
@@ -537,6 +613,16 @@ class DivisionViewSet(viewsets.ModelViewSet):
                     raise PermissionDenied('HOD may only update divisions for their own department.')
             else:
                 raise PermissionDenied('You do not have permission to update divisions.')
+        # Semester change blocked when actively seated students exist
+        new_semester = serializer.validated_data.get('semester')
+        if new_semester and new_semester != serializer.instance.semester:
+            from rest_framework.exceptions import ValidationError
+            from apps.students.models import StudentEnrollment
+            if StudentEnrollment.objects.filter(division=serializer.instance, is_current=True).exists():
+                raise ValidationError(
+                    'Cannot change semester of a division with actively seated students. Use class promotion instead.'
+                )
+
         # Class-teacher changes go through the single-owner sync service so
         # Division.class_teacher and the RoleAssignment never drift apart.
         _sentinel = object()
@@ -584,11 +670,20 @@ class DivisionViewSet(viewsets.ModelViewSet):
     def assign_students(self, request, pk=None):
         """Bulk-finalize a batch of students into this division.
 
-        Body: {student_ids: [...], semester_id?: optional correction}.
+        Body: {student_ids: [...], semester_id?: optional correction,
+               source_batch_id?: optional import batch for single-use create}.
         HOD own-dept only. Sets division (+semester), marks
         placement_confirmed, and applies the repeat rule: finalizing at a
         same/lower semester than the student's current one bumps
         repeat_count (detention with juniors).
+
+        Single-use rule (production): when source_batch_id is supplied
+        (division-create flow), only unplaced students belonging to that
+        batch are moved; already-placed students and off-batch ids are
+        reported in `skipped` instead of being silently re-seated. Without
+        source_batch_id (Add/Move flows) the legacy move-any-unplaced
+        behaviour is preserved. Retries against the same division are
+        idempotent.
         """
         from django.db import transaction
         from apps.authentication.permissions import get_user_scopes, user_has_permission, user_has_role
@@ -616,27 +711,88 @@ class DivisionViewSet(viewsets.ModelViewSet):
                 semester_obj = Semester.objects.get(id=request.data.get('semester_id'))
             except (Semester.DoesNotExist, ValueError):
                 return Response({'detail': 'Semester not found.'}, status=status.HTTP_400_BAD_REQUEST)
+            # A semester correction must land the student IN this division:
+            # the correction target and the division's semester must agree.
+            if semester_obj.id != division.semester_id:
+                return Response(
+                    {'detail': (
+                        f"Division '{division.name}' is a Semester {division.semester.number} class, "
+                        f"but semester correction asked for Semester {semester_obj.number}. "
+                        'Correct into a division of the target semester instead.'
+                    )},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Optional single-use batch guard: resolve the batch's student set once.
+        source_batch_id = request.data.get('source_batch_id') or None
+        batch_member_ids = None
+        batch_file_name = ''
+        if source_batch_id:
+            from apps.admissions.models import ImportBatch, ImportRow
+            try:
+                batch = ImportBatch.objects.filter(id=source_batch_id).first()
+            except (ValueError, TypeError):
+                batch = None
+            if batch is None:
+                return Response({'detail': 'Import batch not found.'}, status=status.HTTP_400_BAD_REQUEST)
+            batch_file_name = batch.file_name
+            batch_member_ids = set(
+                str(sid) for sid in ImportRow.objects.filter(
+                    batch=batch,
+                    validation_status=ImportRow.ValidationStatus.IMPORTED,
+                    student__isnull=False,
+                ).values_list('student_id', flat=True)
+            )
 
         moved, repeated, skipped = [], [], []
         with transaction.atomic():
+            # Lock the division row so concurrent placements serialize.
+            Division.objects.select_for_update().filter(id=division.id).first()
             for sid in student_ids:
-                student = Student.objects.filter(id=sid).first()
+                student = Student.objects.select_for_update().filter(id=sid).first()
                 if not student:
                     skipped.append({'id': str(sid), 'reason': 'Student not found.'})
                     continue
-                enr = student.enrollments.filter(is_current=True).select_related('semester').first()
+                if batch_member_ids is not None and str(student.id) not in batch_member_ids:
+                    skipped.append({'id': str(sid), 'reason': 'Not part of the selected import batch.'})
+                    continue
+                enr = StudentEnrollment.objects.select_for_update().filter(
+                    student=student, is_current=True
+                ).select_related('semester').first()
                 if not enr:
                     skipped.append({'id': str(sid), 'reason': 'No active enrollment.'})
                     continue
                 if enr.department_id != division.department_id:
                     skipped.append({'id': str(sid), 'reason': 'Different department.'})
                     continue
+                # Idempotent retry: already seated here -> skip, don't double-count/repeat.
+                if enr.division_id == division.id and enr.placement_confirmed:
+                    skipped.append({'id': str(sid), 'reason': 'Already in this class.'})
+                    continue
+                # Strict single-use for the create flow: never steal an
+                # already-placed student from another class via batch create.
+                # (Use Add/Move without source_batch_id for intentional moves.)
+                if batch_member_ids is not None and enr.placement_confirmed:
+                    current_div = str(enr.division_id) if enr.division_id else 'unassigned'
+                    skipped.append({'id': str(sid), 'reason': f'Already placed (Div {current_div}). Use Move to relocate.'})
+                    continue
                 prev_sem = enr.semester.number if enr.semester else 0
                 new_sem = semester_obj.number if semester_obj else division.semester.number
+                # Never seat across semesters: a Sem N student in a Sem M
+                # division corrupts rosters, verification queues and result
+                # rows. Skip with a reason instead of writing a bad row.
+                resulting_sem_id = semester_obj.id if semester_obj else enr.semester_id
+                if resulting_sem_id != division.semester_id:
+                    skipped.append({'id': str(sid), 'reason': (
+                        f"Student is in Semester {enr.semester.number if enr.semester else '?'} "
+                        f"but Division '{division.name}' is Semester {division.semester.number}. "
+                        'Seat into a same-semester division.'
+                    )})
+                    continue
                 if semester_obj:
                     # A (student, year, sem) row may already exist from history:
                     # make it current instead of colliding.
-                    clash = StudentEnrollment.objects.filter(
+                    clash = StudentEnrollment.objects.select_for_update().filter(
                         student=student, academic_year=enr.academic_year,
                         semester=semester_obj).exclude(id=enr.id).first()
                     if clash:
@@ -658,6 +814,7 @@ class DivisionViewSet(viewsets.ModelViewSet):
                     repeated.append(str(student.id))
                 moved.append(str(student.id))
 
+        batch_suffix = f" from batch '{batch_file_name}'" if batch_file_name else ''
         audit_log(
             request=request,
             action=AuditLog.Action.UPDATE,
@@ -665,7 +822,7 @@ class DivisionViewSet(viewsets.ModelViewSet):
             target_id=str(division.id),
             target_display=str(division),
             description=(
-                f"Bulk finalized {len(moved)} student(s) into {division} "
+                f"Bulk finalized {len(moved)} student(s) into {division}{batch_suffix} "
                 f"({len(repeated)} repeat(s), {len(skipped)} skipped)."
             ),
         )
@@ -673,6 +830,322 @@ class DivisionViewSet(viewsets.ModelViewSet):
             {'detail': f'{len(moved)} student(s) placed in Division {division.name}.',
              'moved': moved, 'repeated': repeated, 'skipped': skipped},
             status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='promote-class')
+    def promote_class(self, request, pk=None):
+        """Promote a year-change class (Sem 2/4/6) into the next semester.
+
+        Runs individual promotion for every ready student (HOD-approved
+        eligibility + fully paid fees), supports repeater class creation for
+        failed / fee-pending students, then settles the class itself:
+
+        - FULL FLIP: 0 active students remaining in current semester -> this division
+          flips to the next semester in place (or into existing clash).
+        - PARTIAL: students not moved to repeater or promoted stay back in this division;
+          promoted students move into the successor class (or existing class).
+        """
+        from django.db import transaction
+        from apps.authentication.permissions import get_user_scopes, user_has_permission, user_has_role
+        from apps.finance.models import PaymentLedger
+        from apps.results.models import EligibilityVerification as _EV, SemesterResult as _SR
+        from apps.students.models import Student, StudentEnrollment
+        from apps.academic_structure.services import (
+            flip_class_to_next_semester, seat_traced_students_to_division, sync_class_teacher
+        )
+        from apps.audit.models import AuditLog
+        from apps.audit.services import audit_log
+        from rest_framework.exceptions import PermissionDenied
+
+        division = self.get_object()
+        user = request.user
+        if not (user.is_superuser or user_has_role(user, 'SYSADMIN') or user_has_permission(user, 'academic.manage')):
+            if user_has_role(user, 'HOD'):
+                scopes = get_user_scopes(user)
+                allowed = {str(d) for d in scopes.get('department_ids', [])}
+                if str(division.department_id) not in allowed:
+                    raise PermissionDenied('HOD may only promote classes within their own department.')
+            else:
+                raise PermissionDenied('You do not have permission to promote classes.')
+
+        sem_num = division.semester.number
+        if sem_num not in (2, 4, 6):
+            return Response(
+                {'detail': 'Only year-change classes (Sem 2, 4, 6) can be promoted this way.'},
+                status=status.HTTP_400_BAD_REQUEST)
+        target_sem = Semester.objects.filter(number=sem_num + 1).first()
+        if target_sem is None:
+            return Response({'detail': 'Target semester not configured.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        dry_run = bool(request.data.get('dry_run')) if request.data else False
+
+        def _decision(student):
+            """Classify student for class promotion.
+
+            Returns (group, reason) where group is one of:
+            - 'ready_to_move': decided eligible + fees paid.
+            - 'already_promoted': already in target_sem or higher.
+            - 'fees_pending': HOD approved eligible, but fee not paid.
+            - 'failed': marked not eligible (failed).
+            - 'blocked': verification undecided (pending review, flagged, or no result).
+            """
+            current = student.enrollments.filter(is_current=True).first()
+            if not current:
+                return 'blocked', 'No active enrollment.'
+            if current.semester_id is not None and target_sem.number <= current.semester.number:
+                return 'already_promoted', f'Already in Sem {current.semester.number}.'
+
+            ev = student.eligibility_records.filter(
+                target_semester=target_sem).order_by('-final_eligible').first()
+
+            if ev is not None and ev.final_eligible and ev.target_semester_id == target_sem.id:
+                paid = PaymentLedger.objects.filter(
+                    student=student, status=PaymentLedger.PaymentStatus.PAID).first()
+                if not paid:
+                    paid = PaymentLedger.objects.filter(
+                        student=student, total_fee_due__gt=0, balance_due__lte=0).first()
+                if not paid:
+                    return 'fees_pending', 'Fees not fully paid.'
+                return 'ready_to_move', ''
+
+            if ev is not None and ev.hod_status == _EV.StageStatus.REJECTED:
+                return 'failed', 'Marked not eligible (failed). Fees do not matter.'
+
+            has_result = _SR.objects.filter(
+                student=student, semester=division.semester,
+                is_published=True).exclude(
+                result_status=_SR.ResultStatus.NOT_YET_HELD).exists()
+            if not has_result:
+                return 'blocked', 'Result not filled.'
+            if ev is None:
+                return 'blocked', 'Teacher review pending.'
+            if (ev.class_teacher_status == _EV.StageStatus.FLAGGED
+                    or ev.hod_status == _EV.StageStatus.FLAGGED):
+                return 'blocked', 'Flagged — correction pending.'
+            if ev.class_teacher_status == _EV.StageStatus.PENDING:
+                return 'blocked', 'Teacher review pending.'
+            if ev.class_teacher_status == _EV.StageStatus.REJECTED and ev.hod_status == _EV.StageStatus.PENDING:
+                return 'blocked', 'Teacher marked fail — HOD decision pending.'
+            if ev.class_teacher_status == _EV.StageStatus.APPROVED and ev.hod_status == _EV.StageStatus.PENDING:
+                return 'blocked', 'HOD endorsement pending.'
+
+            return 'blocked', 'Teacher review pending.'
+
+        # Cohort students: currently seated active students + students promoted out in this cycle
+        active_enrollments = list(StudentEnrollment.objects.filter(
+            division=division, is_current=True).select_related('student', 'semester'))
+        promoted_enrollments = list(StudentEnrollment.objects.filter(
+            division=division, status=StudentEnrollment.Status.PROMOTED
+        ).select_related('student', 'semester'))
+
+        seen_student_ids = set()
+        cohort_students = []
+        for enr in active_enrollments + promoted_enrollments:
+            if enr.student_id not in seen_student_ids:
+                seen_student_ids.add(enr.student_id)
+                cohort_students.append(enr.student)
+
+        ready_to_move, already_promoted, fees_pending, failed, blocked = [], [], [], [], []
+        for stu in cohort_students:
+            group, reason = _decision(stu)
+            entry = {'id': str(stu.id), 'name': stu.display_name, 'reason': reason, 'prn': stu.enrollment_no or stu.application_id}
+            if group == 'ready_to_move':
+                ready_to_move.append(entry)
+            elif group == 'already_promoted':
+                already_promoted.append(entry)
+            elif group == 'fees_pending':
+                fees_pending.append(entry)
+            elif group == 'failed':
+                failed.append(entry)
+            else:
+                blocked.append(entry)
+
+        teacher_user = division.class_teacher
+        profile = getattr(teacher_user, 'faculty_profile', None) if teacher_user else None
+        t_name = profile.display_name if profile and getattr(profile, 'display_name', '') else (
+            teacher_user.get_full_name() or teacher_user.username if teacher_user else ''
+        )
+
+        default_repeater = {
+            'division_name': 'R',
+            'semester_number': sem_num,
+            'academic_year_id': str(division.academic_year_id) if division.academic_year_id else None,
+            'academic_year_code': division.academic_year.code if division.academic_year else '',
+            'class_teacher_id': str(division.class_teacher_id) if division.class_teacher_id else None,
+            'class_teacher_name': t_name,
+            'preselected_student_ids': [s['id'] for s in failed],
+            'optional_student_ids': [s['id'] for s in fees_pending],
+        }
+
+        if dry_run:
+            already_out = StudentEnrollment.objects.filter(
+                semester=target_sem, is_current=True, division__isnull=True,
+                department=division.department).count()
+            return Response({
+                'division_id': str(division.id),
+                'from_semester': sem_num,
+                'to_semester': target_sem.number,
+                'ready_to_move_count': len(ready_to_move),
+                'already_promoted_count': len(already_promoted),
+                'fees_pending_count': len(fees_pending),
+                'failed_count': len(failed),
+                'blocked_count': len(blocked),
+                'will_promote': len(ready_to_move),
+                'will_stay': len(fees_pending) + len(failed),
+                'blocked': len(blocked),
+                'already_promoted_unseated': already_out,
+                'full_flip': len(fees_pending) == 0 and len(failed) == 0 and len(blocked) == 0,
+                'ready': len(blocked) == 0,
+                'buckets': {
+                    'ready_to_move': ready_to_move,
+                    'already_promoted': already_promoted,
+                    'fees_pending': fees_pending,
+                    'failed': failed,
+                    'blocked': blocked,
+                },
+                'default_repeater': default_repeater,
+                'movers': ready_to_move,
+                'stayers': fees_pending + failed,
+                'blocked_students': blocked,
+            }, status=status.HTTP_200_OK)
+
+        if blocked:
+            return Response(
+                {'detail': (
+                    f'Complete verification for {len(blocked)} student(s) first — '
+                    'every student must be eligible or failed before the class can move.'),
+                 'blocked_students': blocked},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        repeater_student_ids = set(request.data.get('repeater_student_ids') or [])
+        repeater_teacher_id = request.data.get('repeater_teacher_id')
+        repeater_name = (request.data.get('repeater_division_name') or 'R').strip().upper()
+
+        # Validate repeater student selections: only failed or fee-pending students in this class
+        eligible_for_repeater = {s['id'] for s in failed} | {s['id'] for s in fees_pending}
+        invalid_repeaters = repeater_student_ids - eligible_for_repeater
+        if invalid_repeaters:
+            return Response(
+                {'detail': 'Only failed or fee-pending students from this class can be moved to the repeater class.'},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.students.services import check_and_promote_student
+        promoted = []
+        moved_to_repeater = []
+        with transaction.atomic():
+            # Lock division row
+            division = Division.objects.select_for_update().get(id=division.id)
+
+            # 1. Promote ready students
+            for s in ready_to_move:
+                ok, msg = check_and_promote_student(s['id'], actor=user, request=request)
+                if ok:
+                    promoted.append(s['id'])
+
+            # 2. Repeater class creation and student move
+            repeater_div = None
+            if repeater_student_ids:
+                rep_teacher = None
+                if repeater_teacher_id:
+                    from apps.authentication.models import User as _User
+                    rep_teacher = _User.objects.filter(id=repeater_teacher_id).first()
+                if not rep_teacher:
+                    rep_teacher = division.class_teacher
+
+                repeater_div, rep_created = Division.objects.get_or_create(
+                    department=division.department,
+                    academic_year=division.academic_year,
+                    semester=division.semester,
+                    name=repeater_name,
+                    defaults={
+                        'seat_capacity': division.seat_capacity,
+                        'class_teacher': rep_teacher,
+                    }
+                )
+                if rep_created and repeater_div.class_teacher:
+                    try:
+                        sync_class_teacher(repeater_div, repeater_div.class_teacher, user, request,
+                                           reason='Repeater class created')
+                    except Exception:
+                        pass
+                    audit_log(
+                        request=self.request, action=AuditLog.Action.CREATE,
+                        target_type='Division', target_id=str(repeater_div.id),
+                        target_display=str(repeater_div),
+                        description=f"Created repeater class {repeater_div} for {division} repeaters."
+                    )
+
+                for r_id in repeater_student_ids:
+                    enr = StudentEnrollment.objects.select_for_update().filter(
+                        student_id=r_id, division=division, is_current=True, semester__number=sem_num
+                    ).first()
+                    if enr:
+                        enr.division = repeater_div
+                        enr.save(update_fields=['division', 'updated_at'])
+                        moved_to_repeater.append(str(r_id))
+                        audit_log(
+                            request=self.request, action=AuditLog.Action.UPDATE,
+                            target_type='StudentEnrollment', target_id=str(enr.id),
+                            target_display=f"{enr.student.display_name} -> {repeater_div.name}",
+                            description=f"Moved student {enr.student.display_name} into repeater class {repeater_div}."
+                        )
+
+            # 3. Recalculate remaining active students in original division
+            remaining = StudentEnrollment.objects.filter(
+                division=division, is_current=True, semester__number=sem_num
+            ).count()
+
+            # 4. If 0 active students remain -> Flip to next semester!
+            if remaining == 0:
+                dest_div, flipped_in_place = flip_class_to_next_semester(
+                    division, target_sem, actor=user, request=request
+                )
+                return Response({
+                    'detail': f'Class promoted to Sem {target_sem.number} in place. {len(promoted)} student(s) moved up, {len(moved_to_repeater)} moved to repeater.',
+                    'flipped': flipped_in_place,
+                    'successor_division_id': str(dest_div.id),
+                    'repeater_division_id': str(repeater_div.id) if repeater_div else None,
+                    'promoted': promoted,
+                    'moved_to_repeater': moved_to_repeater,
+                    'staying': [s for s in fees_pending + failed if s['id'] not in repeater_student_ids],
+                }, status=status.HTTP_200_OK)
+
+            # 5. Partial split: some students remain in Sem 6 Div A
+            successor, created = Division.objects.get_or_create(
+                department=division.department, academic_year=division.academic_year,
+                semester=target_sem, name=division.name,
+                defaults={'seat_capacity': division.seat_capacity,
+                          'class_teacher': division.class_teacher},
+            )
+            if created and successor.class_teacher_id:
+                try:
+                    sync_class_teacher(successor, successor.class_teacher, user,
+                                       self.request, reason='Class teacher carried over on class split')
+                except Exception:
+                    pass
+            seated_back = seat_traced_students_to_division(successor, original_div_id=division.id)
+            audit_log(
+                request=self.request, action=AuditLog.Action.UPDATE,
+                target_type='Division', target_id=str(division.id),
+                target_display=str(division),
+                description=(
+                    f"Partial class promotion {division.department.code} Sem {sem_num} Div {division.name}: "
+                    f"{len(promoted)} moved to {successor} ({seated_back} seated), "
+                    f"{remaining} staying back under verification ({len(moved_to_repeater)} in repeater). "
+                    "Class teacher carried over to the new class."
+                ),
+            )
+            return Response({
+                'detail': (
+                    f'{len(promoted)} student(s) moved to Sem {target_sem.number}. '
+                    f'{remaining} staying back in Sem {sem_num} ({len(moved_to_repeater)} in repeater).'),
+                'flipped': False,
+                'successor_division_id': str(successor.id),
+                'successor_created': created,
+                'repeater_division_id': str(repeater_div.id) if repeater_div else None,
+                'promoted': promoted,
+                'moved_to_repeater': moved_to_repeater,
+                'staying': [s for s in fees_pending + failed if s['id'] not in repeater_student_ids],
+            }, status=status.HTTP_200_OK)
 
     def perform_destroy(self, instance):
         from apps.authentication.permissions import get_user_scopes, user_has_permission, user_has_role
@@ -688,13 +1161,20 @@ class DivisionViewSet(viewsets.ModelViewSet):
                     raise PermissionDenied('HOD may only delete divisions for their own department.')
             else:
                 raise PermissionDenied('You do not have permission to delete divisions.')
-        # Empty-only: any enrollment reference (current or historical
-        # placement) blocks deletion — move students first.
-        student_count = StudentEnrollment.objects.filter(division=instance).count()
-        if student_count > 0:
+        # Empty-only: actively seated students block deletion (move them
+        # first); even with none seated, historical placement rows keep
+        # the division as evidence and block deletion too.
+        current_count = StudentEnrollment.objects.filter(division=instance, is_current=True).count()
+        if current_count > 0:
             raise ValidationError(
-                f"Division '{instance.name}' has {student_count} student(s) assigned. "
+                f"Division '{instance.name}' has {current_count} active student(s) assigned. "
                 'Move them to another division first.'
+            )
+        history_count = StudentEnrollment.objects.filter(division=instance).count()
+        if history_count > 0:
+            raise ValidationError(
+                f"Division '{instance.name}' has student history records and cannot be deleted. "
+                'It is kept as evidence of past placements.'
             )
         name = instance.name
         div_id = str(instance.id)

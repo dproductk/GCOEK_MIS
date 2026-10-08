@@ -47,6 +47,15 @@ export default function AcademicStructurePage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [actionError, setActionError] = useState('');
 
+  // Create Academic Year (Sysadmin, Academic Calendar tab)
+  const [showAddYearModal, setShowAddYearModal] = useState(false);
+  const [newYear, setNewYear] = useState({ code: '', name: '', start_date: '', end_date: '', set_current: false });
+  const [yearFieldErrors, setYearFieldErrors] = useState({});
+  const [yearActionError, setYearActionError] = useState('');
+  const [isCreatingYear, setIsCreatingYear] = useState(false);
+  const [settingCurrentId, setSettingCurrentId] = useState(null);
+  const [yearSuccess, setYearSuccess] = useState('');
+
   const fetchData = useCallback(async () => {
     try {
       setLoading(true);
@@ -94,12 +103,144 @@ export default function AcademicStructurePage() {
     }
   };
 
-  const handleSetCurrentYear = async (yearId) => {
+  const handleSetCurrentYear = async (year) => {
+    const yearId = typeof year === 'object' ? year.id : year;
+    const code = typeof year === 'object' ? year.code : 'this year';
+    if (!window.confirm(`Set academic year ${code} as the current term? This switches the college-wide active year.`)) return;
+    setSettingCurrentId(yearId);
     try {
       await apiClient.post(`/academic/years/${yearId}/set_current/`);
-      fetchData();
-    } catch {
-      alert('Failed to update current academic year.');
+      await fetchData();
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Failed to update current academic year.');
+    } finally {
+      setSettingCurrentId(null);
+    }
+  };
+
+  const suggestNextYear = (years = academicYears) => {
+    let maxStart = null;
+    years.forEach((y) => {
+      const m = String(y.code || '').match(/^(19|20)(\d{2})-(\d{2})$/);
+      if (m) {
+        const full = parseInt(`20${m[2]}`, 10);
+        // Handle 1999-style codes conservatively: fall back to start_date year.
+        const candidate = Number.isFinite(full) ? full : null;
+        if (candidate && (maxStart === null || candidate > maxStart)) maxStart = candidate;
+      } else if (y.start_date) {
+        const sy = parseInt(String(y.start_date).slice(0, 4), 10);
+        if (Number.isFinite(sy) && (maxStart === null || sy > maxStart)) maxStart = sy;
+      }
+    });
+    const next = maxStart === null ? new Date().getFullYear() : maxStart + 1;
+    const suffix = String((next + 1) % 100).padStart(2, '0');
+    return {
+      code: `${next}-${suffix}`,
+      name: `Academic Year ${next}-${next + 1}`,
+      start_date: `${next}-07-01`,
+      end_date: `${next + 1}-06-30`,
+    };
+  };
+
+  const openAddYearModal = () => {
+    const suggestion = suggestNextYear();
+    // Don't suggest a code that already exists (e.g. after deletions/gaps).
+    const exists = new Set((academicYears || []).map((y) => String(y.code).trim()));
+    let seed = suggestion;
+    let guard = 0;
+    while (exists.has(seed.code) && guard < 10) {
+      const start = parseInt(seed.code.slice(0, 4), 10) + 1;
+      const suffix = String((start + 1) % 100).padStart(2, '0');
+      seed = {
+        code: `${start}-${suffix}`,
+        name: `Academic Year ${start}-${start + 1}`,
+        start_date: `${start}-07-01`,
+        end_date: `${start + 1}-06-30`,
+      };
+      guard += 1;
+    }
+    setNewYear({ ...seed, set_current: false });
+    setYearFieldErrors({});
+    setYearActionError('');
+    setShowAddYearModal(true);
+  };
+
+  const handleYearCodeChange = (value) => {
+    const code = value.toUpperCase().replace(/\s+/g, '');
+    setNewYear((prev) => {
+      const next = { ...prev, code };
+      // Auto-fill July->June dates + display name when the code looks like YYYY-YY.
+      const m = code.match(/^(19|20)\d{2}-\d{2}$/);
+      if (m) {
+        const startYear = parseInt(code.slice(0, 4), 10);
+        const expectedSuffix = String((startYear + 1) % 100).padStart(2, '0');
+        if (code.slice(5, 7) === expectedSuffix) {
+          if (!prev.start_date) next.start_date = `${startYear}-07-01`;
+          if (!prev.end_date) next.end_date = `${startYear + 1}-06-30`;
+          if (!prev.name) next.name = `Academic Year ${startYear}-${startYear + 1}`;
+        }
+      }
+      return next;
+    });
+  };
+
+  const parseYearErrors = (data) => {
+    if (!data || typeof data !== 'object') return {};
+    const out = {};
+    Object.entries(data).forEach(([k, v]) => {
+      out[k] = Array.isArray(v) ? v.join(' ') : String(v);
+    });
+    return out;
+  };
+
+  const handleCreateYear = async (e) => {
+    e?.preventDefault?.();
+    setYearActionError('');
+    setYearFieldErrors({});
+    const code = (newYear.code || '').trim();
+    const start_date = newYear.start_date || '';
+    const end_date = newYear.end_date || '';
+    const localErrors = {};
+    if (!code) localErrors.code = 'Year code is required (e.g. 2027-28).';
+    else if (!/^(19|20)\d{2}-\d{2}$/.test(code)) localErrors.code = 'Use format YYYY-YY, e.g. 2027-28.';
+    if (!start_date) localErrors.start_date = 'Commencement date is required.';
+    if (!end_date) localErrors.end_date = 'Conclusion date is required.';
+    if (start_date && end_date && start_date >= end_date) localErrors.end_date = 'Conclusion must be after commencement.';
+    if (Object.keys(localErrors).length) {
+      setYearFieldErrors(localErrors);
+      return;
+    }
+    setIsCreatingYear(true);
+    try {
+      const payload = {
+        code,
+        name: (newYear.name || '').trim() || `Academic Year ${code}`,
+        start_date,
+        end_date,
+        is_current: Boolean(newYear.set_current),
+      };
+      const res = await apiClient.post('/academic/years/', payload);
+      setShowAddYearModal(false);
+      setNewYear({ code: '', name: '', start_date: '', end_date: '', set_current: false });
+      setYearFieldErrors({});
+      setYearSuccess(`Academic year ${res.data?.code || code} created successfully.`);
+      setTimeout(() => setYearSuccess(''), 5000);
+      await fetchData();
+    } catch (err) {
+      const data = err.response?.data;
+      const parsed = parseYearErrors(data);
+      const fieldKeys = ['code', 'name', 'start_date', 'end_date', 'is_current', 'non_field_errors'];
+      const fields = {};
+      fieldKeys.forEach((k) => { if (parsed[k]) fields[k] = parsed[k]; });
+      if (Object.keys(fields).length) setYearFieldErrors(fields);
+      setYearActionError(
+        data?.detail
+        || parsed.non_field_errors
+        || Object.values(fields).join(' ')
+        || 'Failed to create academic year.'
+      );
+    } finally {
+      setIsCreatingYear(false);
     }
   };
 
@@ -168,24 +309,47 @@ export default function AcademicStructurePage() {
         subtitle="Autonomous degree branches, curricula schemes, class divisions, and academic calendars."
         actions={
           isSysadmin && (
-            <button
-              onClick={() => setShowAddDeptModal(true)}
-              className="edvana-btn"
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '0.45rem',
-                background: '#ffffff',
-                color: '#1d4ed8',
-                borderRadius: '8px',
-                fontWeight: 600,
-                fontSize: '0.8125rem',
-                padding: '0.5rem 1rem',
-              }}
-            >
-              <Plus size={16} />
-              <span>Add Department</span>
-            </button>
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              {activeTab === 'calendar' ? (
+                <button
+                  onClick={openAddYearModal}
+                  className="edvana-btn"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.45rem',
+                    background: '#ffffff',
+                    color: '#1d4ed8',
+                    borderRadius: '8px',
+                    fontWeight: 600,
+                    fontSize: '0.8125rem',
+                    padding: '0.5rem 1rem',
+                  }}
+                >
+                  <Plus size={16} />
+                  <span>New Academic Year</span>
+                </button>
+              ) : (
+                <button
+                  onClick={() => setShowAddDeptModal(true)}
+                  className="edvana-btn"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.45rem',
+                    background: '#ffffff',
+                    color: '#1d4ed8',
+                    borderRadius: '8px',
+                    fontWeight: 600,
+                    fontSize: '0.8125rem',
+                    padding: '0.5rem 1rem',
+                  }}
+                >
+                  <Plus size={16} />
+                  <span>Add Department</span>
+                </button>
+              )}
+            </div>
           )
         }
       />
@@ -361,48 +525,90 @@ export default function AcademicStructurePage() {
         ) : (
           /* TAB 3: ACADEMIC CALENDAR & TERMS */
           <div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1.25rem' }}>
-              {academicYears.map((year) => (
-                <div
-                  key={year.id}
-                  className="edvana-card"
-                  style={{
-                    border: year.is_current ? '2px solid var(--edvana-primary, #1d4ed8)' : '1px solid #e2e8f0',
-                    background: year.is_current ? '#f8fafc' : '#fff',
-                  }}
-                >
-                  <div className="edvana-card-body">
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                      <h3 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 700, color: '#0f172a' }}>{year.code}</h3>
-                      {year.is_current ? (
-                        <Badge variant="success">Current Term</Badge>
-                      ) : isSysadmin ? (
-                        <button
-                          onClick={() => handleSetCurrentYear(year.id)}
-                          className="edvana-btn edvana-btn-secondary"
-                          style={{ padding: '0.25rem 0.65rem', fontSize: '0.75rem' }}
-                        >
-                          Set Current
-                        </button>
-                      ) : null}
-                    </div>
-
-                    <p style={{ fontSize: '0.9rem', color: '#475569', margin: '4px 0 1rem', fontWeight: 500 }}>
-                      {year.name}
-                    </p>
-
-                    <div style={{ fontSize: '0.825rem', color: '#64748b', borderTop: '1px solid #f1f5f9', paddingTop: '0.75rem' }}>
-                      <div>
-                        <strong>Commencement:</strong> {year.start_date}
+            {yearSuccess && (
+              <div style={{ marginBottom: '1rem', padding: '0.9rem 1.1rem', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', color: '#166534', fontSize: '0.875rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <CheckCircle2 size={18} />{yearSuccess}
+              </div>
+            )}
+            <div className="edvana-card" style={{ marginBottom: '1.25rem' }}>
+              <div className="edvana-card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+                <div>
+                  <h2 className="edvana-card-title">Academic Years ({academicYears.length})</h2>
+                  <p className="edvana-card-description">
+                    College-wide academic calendar. Only one year is current at a time — new admissions, fees and contexts follow it.
+                  </p>
+                </div>
+                {isSysadmin && (
+                  <button
+                    onClick={openAddYearModal}
+                    className="edvana-btn edvana-btn-primary"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.8125rem', padding: '0.5rem 1rem' }}
+                  >
+                    <Plus size={15} />
+                    <span>New Academic Year</span>
+                  </button>
+                )}
+              </div>
+            </div>
+            {academicYears.length === 0 ? (
+              <div className="edvana-card" style={{ padding: '3rem' }}>
+                <EmptyState
+                  title="No Academic Years Yet"
+                  message={isSysadmin ? 'Create the first academic year (e.g. 2027-28, 1 July – 30 June) to start the calendar.' : 'No academic years have been configured yet.'}
+                />
+                {isSysadmin && (
+                  <div style={{ display: 'flex', justifyContent: 'center', marginTop: '1rem' }}>
+                    <button onClick={openAddYearModal} className="edvana-btn edvana-btn-primary">
+                      <Plus size={15} /> Create Academic Year
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1.25rem' }}>
+                {academicYears.map((year) => (
+                  <div
+                    key={year.id}
+                    className="edvana-card"
+                    style={{
+                      border: year.is_current ? '2px solid var(--edvana-primary, #1d4ed8)' : '1px solid #e2e8f0',
+                      background: year.is_current ? '#f8fafc' : '#fff',
+                    }}
+                  >
+                    <div className="edvana-card-body">
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                        <h3 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 700, color: '#0f172a' }}>{year.code}</h3>
+                        {year.is_current ? (
+                          <Badge variant="success">Current Term</Badge>
+                        ) : isSysadmin ? (
+                          <button
+                            onClick={() => handleSetCurrentYear(year)}
+                            disabled={settingCurrentId === year.id}
+                            className="edvana-btn edvana-btn-secondary"
+                            style={{ padding: '0.25rem 0.65rem', fontSize: '0.75rem' }}
+                          >
+                            {settingCurrentId === year.id ? 'Setting…' : 'Set Current'}
+                          </button>
+                        ) : null}
                       </div>
-                      <div style={{ marginTop: '0.25rem' }}>
-                        <strong>Conclusion:</strong> {year.end_date}
+
+                      <p style={{ fontSize: '0.9rem', color: '#475569', margin: '4px 0 1rem', fontWeight: 500 }}>
+                        {year.name}
+                      </p>
+
+                      <div style={{ fontSize: '0.825rem', color: '#64748b', borderTop: '1px solid #f1f5f9', paddingTop: '0.75rem' }}>
+                        <div>
+                          <strong>Commencement:</strong> {year.start_date}
+                        </div>
+                        <div style={{ marginTop: '0.25rem' }}>
+                          <strong>Conclusion:</strong> {year.end_date}
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -493,6 +699,112 @@ export default function AcademicStructurePage() {
               className="edvana-btn edvana-btn-primary"
             >
               {isSubmitting ? 'Creating...' : 'Create Department'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Create Academic Year Modal (Sysadmin) */}
+      <Modal
+        isOpen={showAddYearModal}
+        onClose={() => { if (!isCreatingYear) setShowAddYearModal(false); }}
+        title="Create New Academic Year"
+        maxWidth="560px"
+      >
+        {(yearActionError || yearFieldErrors.non_field_errors) && (
+          <div style={{ marginBottom: '1rem', padding: '0.75rem 1rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '6px', color: '#991b1b', fontSize: '0.85rem' }}>
+            {yearFieldErrors.non_field_errors || yearActionError}
+          </div>
+        )}
+
+        <form onSubmit={handleCreateYear}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+            <FormField label="Year Code" required error={yearFieldErrors.code} help="e.g. 2027-28">
+              <input
+                type="text"
+                className="edvana-input"
+                required
+                placeholder="2027-28"
+                value={newYear.code}
+                onChange={(e) => handleYearCodeChange(e.target.value)}
+                style={{ width: '100%', fontFamily: 'monospace' }}
+              />
+            </FormField>
+
+            <FormField label="Display Name" error={yearFieldErrors.name} help="Auto-filled if left blank">
+              <input
+                type="text"
+                className="edvana-input"
+                placeholder="Academic Year 2027-2028"
+                value={newYear.name}
+                onChange={(e) => setNewYear({ ...newYear, name: e.target.value })}
+                style={{ width: '100%' }}
+              />
+            </FormField>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
+            <FormField label="Commencement" required error={yearFieldErrors.start_date}>
+              <input
+                type="date"
+                className="edvana-input"
+                required
+                value={newYear.start_date}
+                onChange={(e) => setNewYear({ ...newYear, start_date: e.target.value })}
+                style={{ width: '100%' }}
+              />
+            </FormField>
+
+            <FormField label="Conclusion" required error={yearFieldErrors.end_date}>
+              <input
+                type="date"
+                className="edvana-input"
+                required
+                value={newYear.end_date}
+                onChange={(e) => setNewYear({ ...newYear, end_date: e.target.value })}
+                style={{ width: '100%' }}
+              />
+            </FormField>
+          </div>
+
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem', marginTop: '1rem', fontSize: '0.85rem', color: '#334155', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={Boolean(newYear.set_current)}
+              onChange={(e) => setNewYear({ ...newYear, set_current: e.target.checked })}
+              style={{ marginTop: '0.2rem' }}
+            />
+            <span>
+              <strong>Set as current academic year immediately.</strong>
+              <br />
+              <span style={{ color: '#64748b' }}>
+                Switches the college-wide active year on creation. Leave unchecked to create as a future/planning year and switch later with “Set Current”.
+              </span>
+            </span>
+          </label>
+          {yearFieldErrors.is_current && (
+            <div style={{ marginTop: '0.5rem', fontSize: '0.8rem', color: '#b91c1c' }}>{yearFieldErrors.is_current}</div>
+          )}
+
+          <p style={{ marginTop: '1rem', fontSize: '0.78rem', color: '#64748b', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '6px', padding: '0.6rem 0.8rem' }}>
+            Academic years run July → June (e.g. 2027-07-01 to 2028-06-30) and must not overlap. Codes must be consecutive (2027-28, not 2027-29).
+          </p>
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', borderTop: '1px solid #e2e8f0', paddingTop: '1.25rem', marginTop: '1.25rem' }}>
+            <button
+              type="button"
+              onClick={() => setShowAddYearModal(false)}
+              disabled={isCreatingYear}
+              className="edvana-btn edvana-btn-secondary"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={isCreatingYear}
+              className="edvana-btn edvana-btn-primary"
+            >
+              {isCreatingYear ? 'Creating...' : 'Create Academic Year'}
             </button>
           </div>
         </form>

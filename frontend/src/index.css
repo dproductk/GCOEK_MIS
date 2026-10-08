@@ -768,29 +768,31 @@ img {
 
 
 /* ============================================================
-   Responsive: Mobile Sidebar Toggle
+   Responsive: Sidebar Toggle
+   Hidden overlay below 1100px so faculty pages (verification tables,
+   stat cards) keep full width on small laptops / docked DevTools.
    ============================================================ */
-@media (max-width: 768px) {
+@media (max-width: 1100px) {
   .app-sidebar {
     top: 0;
     height: 100vh;
     transform: translateX(-100%);
   }
-  
+
   .app-sidebar.open {
     transform: translateX(0);
   }
-  
+
   .app-main {
     margin-left: 0;
   }
-  
+
   .mobile-header {
     display: flex;
   }
 }
 
-@media (min-width: 769px) {
+@media (min-width: 1101px) {
   .mobile-header {
     display: none;
   }
@@ -1096,6 +1098,56 @@ img {
   .profile-tab-btn {
     flex: 0 0 auto;
     min-width: 170px;
+  }
+}
+
+/* ============================================================
+   Print: receipt only (fee receipt modal)
+   window.print() from the receipt modal must yield a single-page
+   receipt — never the dashboard behind it. The modal renders via
+   portal as a direct <body> child, so hide #root and flatten the
+   overlay; header/buttons are suppressed with .no-print.
+   ============================================================ */
+@media print {
+  @page {
+    margin: 12mm;
+  }
+
+  body > #root {
+    display: none !important;
+  }
+
+  .edvana-modal-overlay {
+    position: static !important;
+    background: none !important;
+    backdrop-filter: none !important;
+    padding: 0 !important;
+    display: block !important;
+    animation: none !important;
+  }
+
+  .edvana-modal {
+    max-width: 100% !important;
+    max-height: none !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    animation: none !important;
+  }
+
+  .edvana-modal-body {
+    overflow: visible !important;
+    padding: 0 !important;
+  }
+
+  .edvana-modal-header,
+  .edvana-modal-footer,
+  .no-print {
+    display: none !important;
+  }
+
+  #fee-receipt-print {
+    color: #000 !important;
   }
 }
 

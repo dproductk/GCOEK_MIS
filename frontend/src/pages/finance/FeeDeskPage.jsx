@@ -45,7 +45,8 @@ export default function FeeDeskPage() {
   const [selectedDept, setSelectedDept] = useState('');
   const [selectedFeeStatus, setSelectedFeeStatus] = useState('');
   const [selectedYear, setSelectedYear] = useState('');
-  const [onlyEligible, setOnlyEligible] = useState(true);
+  // Candidate ledger is ALWAYS eligible-only (HOD + class-teacher verified).
+  // No toggle: the backend eligible_only filter is forced on every fetch.
 
   // Pagination State (20 candidates per page)
   const PAGE_SIZE = 20;
@@ -57,7 +58,7 @@ export default function FeeDeskPage() {
   // Reset to first page when any filter criteria changes
   useEffect(() => {
     setCurrentPage(1);
-  }, [search, selectedDept, selectedFeeStatus, selectedYear, onlyEligible]);
+  }, [search, selectedDept, selectedFeeStatus, selectedYear]);
 
   // Mark Fee Modal State
   const [showMarkModal, setShowMarkModal] = useState(false);
@@ -100,10 +101,12 @@ export default function FeeDeskPage() {
       // (PAGE_SIZE below) — i.e. backend gives "all 500 at once", UI shows
       // "20 on screen page 1, next 20 on screen page 2", not "100 then next 100".
       const [stuRes, deptsRes, yearsRes, ledgerRes, assessRes] = await Promise.allSettled([
+        // Eligible-only is mandatory here: HOD + class-teacher verified
+        // candidates (final_eligible) plus seated freshers with a teacher.
         studentApi.getStudents({
           search: search.trim() || undefined,
           page_size: 500,
-          eligible_only: onlyEligible ? 'true' : undefined,
+          eligible_only: 'true',
         }),
         academicApi.getDepartments(),
         academicApi.getAcademicYears(),
@@ -252,7 +255,7 @@ export default function FeeDeskPage() {
   useEffect(() => {
 
     fetchData();
-  }, [search, onlyEligible]);
+  }, [search]);
 
   // Client-side filtering across departments, academic year & fee statuses
   // NOTE: Candidates enabled for online payment gateway are routed exclusively
@@ -620,7 +623,7 @@ export default function FeeDeskPage() {
                   <input
                     type="text"
                     className="edvana-input"
-                    placeholder="Search name, enrollment no, app ID..."
+                    placeholder="Search name, PRN, app ID..."
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                     style={{
@@ -699,30 +702,27 @@ export default function FeeDeskPage() {
                   ))}
                 </select>
 
-                {/* HOD-Verified Eligible Candidates Toggle */}
-                <button
-                  type="button"
-                  onClick={() => setOnlyEligible(!onlyEligible)}
+                {/* Locked scope badge: ledger always shows HOD-verified eligible candidates */}
+                <span
                   style={{
                     height: '38px',
                     padding: '0 0.85rem',
                     fontSize: '0.8125rem',
                     fontWeight: 600,
                     borderRadius: '8px',
-                    border: onlyEligible ? '1px solid #16a34a' : '1px solid #cbd5e1',
-                    backgroundColor: onlyEligible ? '#f0fdf4' : '#ffffff',
-                    color: onlyEligible ? '#15803d' : '#64748b',
+                    border: '1px solid #16a34a',
+                    backgroundColor: '#f0fdf4',
+                    color: '#15803d',
                     display: 'inline-flex',
                     alignItems: 'center',
                     gap: '0.4rem',
-                    cursor: 'pointer',
-                    transition: 'all 0.15s ease',
+                    whiteSpace: 'nowrap',
                   }}
-                  title={onlyEligible ? 'Showing only HOD-verified eligible candidates' : 'Showing all students'}
+                  title="Locked: only HOD + class-teacher verified eligible candidates are listed here"
                 >
-                  <CheckCircle2 size={15} style={{ color: onlyEligible ? '#16a34a' : '#94a3b8' }} />
-                  <span>{onlyEligible ? 'Eligible Candidates Only' : 'All Students'}</span>
-                </button>
+                  <CheckCircle2 size={15} style={{ color: '#16a34a' }} />
+                  <span>Eligible Candidates Only</span>
+                </span>
 
                 {/* Refresh Button */}
                 <button
@@ -808,8 +808,8 @@ export default function FeeDeskPage() {
                           <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '55px' }}>
                             S.N.
                           </th>
-                          <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '130px' }}>
-                            ENROLL NO.
+                          <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '170px' }}>
+                            PRN
                           </th>
                           <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', minWidth: '220px' }}>
                             NAME
@@ -837,10 +837,11 @@ export default function FeeDeskPage() {
                           const isPaid = Boolean(feeInfo && feeInfo.isPaid);
 
                           // Never show fake sample data: missing values render as '—'.
-                          const shortPrn = stu.enrollment_no
-                            ? (stu.enrollment_no.slice(-6).replace(/\D/g, '') || stu.enrollment_no)
-                            : '—';
-                          const appNo = stu.application_id || '—';
+                          // PRN is the full university enrollment number (never truncated).
+                          const prn = stu.enrollment_no || '—';
+                          // Semester is DB truth: StudentEnrollment(is_current=True).
+                          // Promotion rewrites that row, so this updates everywhere on reload.
+                          const semLabel = stu.semester_number ? `Sem ${stu.semester_number}` : '—';
                           const genderPart = (stu.gender || '').trim();
                           const deptPart = (stu.department_code || '').trim();
                           const genderDept = [genderPart.toUpperCase(), deptPart.toUpperCase()]
@@ -861,19 +862,19 @@ export default function FeeDeskPage() {
                                 {startIndex + index + 1}
                               </td>
 
-                              {/* ENROLL NO. */}
+                              {/* PRN */}
                               <td style={{ padding: '0.85rem 1.15rem' }}>
-                                <div style={{ color: '#1E60DC', fontWeight: 700, fontSize: '0.875rem' }}>
-                                  {shortPrn}
+                                <div style={{ color: '#1E60DC', fontWeight: 700, fontSize: '0.78rem', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>
+                                  {prn}
                                 </div>
-                                <div style={{ color: '#64748b', fontSize: '0.75rem', fontFamily: 'monospace', marginTop: '0.15rem' }}>
-                                  {appNo}
+                                <div style={{ color: '#64748b', fontSize: '0.75rem', fontFamily: 'monospace', marginTop: '0.15rem', whiteSpace: 'nowrap' }}>
+                                  {semLabel}
                                 </div>
                               </td>
 
                               {/* NAME */}
                               <td style={{ padding: '0.85rem 1.15rem' }}>
-                                <div style={{ fontWeight: 700, color: '#0f172a', fontSize: '0.875rem' }}>
+                                <div style={{ fontWeight: 700, color: '#0f172a', fontSize: '0.8rem', whiteSpace: 'nowrap' }}>
                                   {stu.display_name}
                                 </div>
                                 <div style={{ color: '#64748b', fontSize: '0.75rem', fontWeight: 500, marginTop: '0.15rem', textTransform: 'uppercase' }}>
@@ -907,19 +908,6 @@ export default function FeeDeskPage() {
                                     }}>
                                       ₹{feeAmount.toLocaleString('en-IN')}
                                     </span>
-                                    {isPaid ? null : (
-                                      <span style={{
-                                        fontSize: '0.68rem',
-                                        fontWeight: 600,
-                                        color: '#b45309',
-                                        background: '#fef3c7',
-                                        padding: '0.1rem 0.5rem',
-                                        borderRadius: '9999px',
-                                        border: '1px solid #fde68a'
-                                      }}>
-                                        Manual Collection Pending
-                                      </span>
-                                    )}
                                   </div>
                                 ) : (
                                   <span style={{
@@ -1454,7 +1442,7 @@ export default function FeeDeskPage() {
                                 {row.student_name}
                               </div>
                               <div style={{ color: '#64748b', fontSize: '0.75rem', fontFamily: 'monospace', marginTop: '0.15rem' }}>
-                                PRN: {row.enrollment_no || 'Pending'} • {row.department_name || 'General'}
+                                PRN: {row.enrollment_no || '—'} • {row.department_name || '—'}
                               </div>
                             </td>
 
@@ -1742,7 +1730,7 @@ export default function FeeDeskPage() {
               <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 600 }}>CANDIDATE</div>
               <div style={{ fontSize: '1rem', fontWeight: 700, color: '#0f172a' }}>{markingStudent.display_name}</div>
               <div style={{ fontSize: '0.8rem', color: '#475569', marginTop: '0.2rem', fontFamily: 'monospace' }}>
-                PRN: {markingStudent.enrollment_no || 'Pending'} • App ID: {markingStudent.application_id || 'N/A'} • Dept: {markingStudent.department_code || 'General'}
+                PRN: {markingStudent.enrollment_no || '—'} • App ID: {markingStudent.application_id || '—'} • Dept: {markingStudent.department_code || '—'}
               </div>
             </div>
 

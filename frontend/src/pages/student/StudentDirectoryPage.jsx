@@ -192,16 +192,8 @@ export default function StudentDirectoryPage() {
     }, 1800);
   };
 
-  // Canonical departments list (ensuring modern DB codes are represented)
-  const canonicalDepartments = [
-    { code: 'AI_DS', name: 'Artificial Intelligence and Data Science' },
-    { code: 'CSE', name: 'Computer Science and Engineering' },
-    { code: 'EE', name: 'Electrical Engineering' },
-    { code: 'ETC', name: 'Electronics and Telecommunication Engineering' },
-    { code: 'MAE', name: 'Mechanical and Automation Engineering' },
-  ];
-
-  const displayedDepartments = departments.length > 0 ? departments : canonicalDepartments;
+  // Department filter options come only from the backend.
+  const displayedDepartments = departments;
 
   // Table Columns:
   // S.N. | ENROLL NO. | NAME | FATHER'S NAME | MOBILE | DIV | USERNAME / LOGIN | ACTION
@@ -219,7 +211,7 @@ export default function StudentDirectoryPage() {
     {
       header: 'ENROLL NO.',
       render: (row) => {
-        const enrollNo = row.enrollment_no || row.application_id || `EN26${row.id?.slice?.(0, 8) || '462534'}`;
+        const enrollNo = row.enrollment_no || row.application_id || '—';
         const hasOfficialEnroll = Boolean(row.enrollment_no);
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
@@ -237,7 +229,7 @@ export default function StudentDirectoryPage() {
               {enrollNo}
             </span>
             <span style={{ fontSize: '0.6875rem', color: '#94a3b8' }}>
-              {hasOfficialEnroll ? 'Verified PRN' : 'Application ID'}
+              {hasOfficialEnroll ? 'Verified PRN' : (row.application_id ? 'Application ID' : 'No ID on record')}
             </span>
           </div>
         );
@@ -246,11 +238,14 @@ export default function StudentDirectoryPage() {
     {
       header: 'NAME',
       render: (row) => {
-        const fullName = (row.display_name || `${row.first_name || ''} ${row.last_name || ''}`).trim().toUpperCase();
-        const gender = (row.gender || 'MALE').toUpperCase();
-        const dept = (row.department_code || 'AI_DS').toUpperCase();
-        const prog = (row.program_code || dept).toUpperCase();
-        const yearLevel = row.year_name || (row.semester_number ? `Sem ${row.semester_number}` : 'FY');
+        const fullName = (row.display_name || `${row.first_name || ''} ${row.last_name || ''}`.trim() || '—').toUpperCase();
+        const parts = [
+          row.gender ? row.gender.toUpperCase() : null,
+          row.department_code ? row.department_code.toUpperCase() : null,
+          row.program_code ? row.program_code.toUpperCase() : null,
+          row.year_name || (row.semester_number ? `Sem ${row.semester_number}` : null),
+        ].filter(Boolean);
+        const sub = parts.length > 0 ? parts.join(' • ') : '—';
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
@@ -275,7 +270,7 @@ export default function StudentDirectoryPage() {
               )}
             </div>
             <span style={{ fontSize: '0.6875rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.02em' }}>
-              {`${gender} • ${dept} • ${prog} • ${yearLevel}`}
+              {sub}
             </span>
           </div>
         );
@@ -284,7 +279,7 @@ export default function StudentDirectoryPage() {
     {
       header: "FATHER'S NAME",
       render: (row) => {
-        const father = (row.father_name || `${row.middle_name || ''} ${row.last_name || ''}`).trim().toUpperCase();
+        const father = (row.father_name || '').trim().toUpperCase();
         return (
           <span style={{ fontSize: '0.8125rem', color: '#334155', fontWeight: 500 }}>
             {father || '—'}
@@ -319,15 +314,15 @@ export default function StudentDirectoryPage() {
             fontSize: '0.75rem',
           }}
         >
-          {row.division_name || 'A'}
+          {row.division_name || '—'}
         </span>
       ),
     },
     {
       header: 'USERNAME / LOGIN',
       render: (row) => {
-        const uname = row.username || row.application_id || row.enrollment_no || `en${row.id?.slice?.(0, 8) || ''}`;
-        const hasLogin = row.has_login !== undefined ? row.has_login : true;
+        const uname = row.username || row.application_id || row.enrollment_no || '—';
+        const hasLogin = row.has_login === true;
         const isCopied = copiedId === (row.id || uname);
 
         return (

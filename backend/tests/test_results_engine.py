@@ -265,6 +265,43 @@ class TestEligibilityWorkflow:
         assert res3.status_code == status.HTTP_200_OK
         assert res3.json()['class_teacher_status'] == 'FLAGGED'
 
+    def test_admission_form_data_and_pdf_download(self, api_client, result_setup):
+        """
+        Tests that an eligible student can retrieve their admission verification
+        form data and download the official 1-page PDF clearance with CT/HOD timestamps.
+        """
+        student = result_setup['student']
+        sem2 = result_setup['sem2']
+
+        # 1. System calculates eligibility & teacher approves
+        ev = evaluate_student_eligibility(student, sem2)
+        api_client.force_authenticate(user=result_setup['user_ct'])
+        api_client.post(f'/api/v1/results/eligibility/{ev.id}/review-class-teacher/', {'status': 'APPROVED'})
+
+        # 2. HOD endorses
+        api_client.force_authenticate(user=result_setup['user_hod'])
+        api_client.post(f'/api/v1/results/eligibility/{ev.id}/endorse-hod/', {'status': 'APPROVED'})
+
+        # 3. Student requests their admission form data
+        api_client.force_authenticate(user=result_setup['user_stu'])
+        res_data = api_client.get('/api/v1/results/eligibility/admission-form-data/')
+        assert res_data.status_code == status.HTTP_200_OK
+        data = res_data.json()
+        assert data['full_name'] == student.display_name
+        assert data['final_eligible'] is True
+        assert data['class_teacher_verification']['is_approved'] is True
+        assert data['class_teacher_verification']['timestamp'] != '—'
+        assert data['hod_verification']['is_approved'] is True
+        assert data['hod_verification']['timestamp'] != '—'
+        assert 'Application Form for Admission' in data['form_title']
+
+        # 4. Student downloads the PDF
+        res_pdf = api_client.get('/api/v1/results/eligibility/admission-form-pdf/')
+        assert res_pdf.status_code == status.HTTP_200_OK
+        assert res_pdf['Content-Type'] == 'application/pdf'
+        assert 'attachment; filename=' in res_pdf['Content-Disposition']
+        assert len(res_pdf.content) > 1000
+
     def test_student_submit_marks_and_eligibility_integration(self, api_client, result_setup):
         """Year-change marks route to the queue; other sems record without verification."""
         api_client.force_authenticate(user=result_setup['user_stu'])
@@ -432,7 +469,10 @@ class TestEligibilityInitialize:
         teacher.set_password('TestPass12345!'); teacher.save()
         role_ct, _ = Role.objects.get_or_create(codename='CLASS_TEACHER', defaults={'name': 'CT'})
         RoleAssignment.objects.create(user=teacher, role=role_ct, department_id=dept.id,
-                                      division_id=div.id, status='ACTIVE')
+                                       division_id=div.id, status='ACTIVE')
+        # Required workflow: teacher assigned to the class before verification.
+        div.class_teacher = teacher
+        div.save(update_fields=['class_teacher'])
         student = Student.objects.create(first_name='S', last_name='T', application_id='EN26000991')
         StudentEnrollment.objects.create(
             student=student, academic_year=year, department=dept, program=prog,
@@ -503,6 +543,165 @@ class TestEligibilityInitialize:
         assert entry is not None
         assert entry.old_value['total_marks'] == '76.0'
         assert entry.new_value['total_marks'] == '81.0'
+
+
+@pytest.mark.django_db
+class TestVerificationRequiresClassTeacher:
+    """Verification cannot start for a class with no assigned teacher."""
+
+    def _setup(self):
+        import datetime
+        from apps.academic_structure.models import AcademicYear, Department, Division, Program, Semester
+        from apps.authentication.models import Role, RoleAssignment, User
+        from apps.students.models import Student, StudentEnrollment
+        year = AcademicYear.objects.create(
+            code='2040-41', name='AY 2040-41', start_date=datetime.date(2040, 7, 1),
+            end_date=datetime.date(2041, 6, 30), is_current=False)
+        dept = Department.objects.create(name='Gate Dept', code='GTE')
+        prog = Program.objects.create(department=dept, name='B.Tech G', code='BTECH_GTE')
+        sem2 = Semester.objects.create(number=2, name='S2', year_level=1, term_type='EVEN')
+        Semester.objects.create(number=3, name='S3', year_level=2, term_type='ODD')
+        div = Division.objects.create(department=dept, academic_year=year, semester=sem2, name='A')
+        hod = User.objects.create_user(username='hod_gate', password='Password123!', user_type=User.UserType.FACULTY)
+        role_hod, _ = Role.objects.get_or_create(codename='HOD', defaults={'name': 'HOD'})
+        RoleAssignment.objects.create(user=hod, role=role_hod, department_id=dept.id, status='ACTIVE')
+        student = Student.objects.create(first_name='G', last_name='S', application_id='ENGATE01')
+        StudentEnrollment.objects.create(
+            student=student, academic_year=year, department=dept, program=prog,
+            semester=sem2, division=div, status='ACTIVE', is_current=True)
+        return hod, div
+
+    def test_start_blocked_without_teacher(self, api_client):
+        hod, div = self._setup()
+        api_client.force_authenticate(user=hod)
+        res = api_client.post(
+            '/api/v1/results/eligibility/start-class-verification/',
+            {'division_id': str(div.id)}, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'class teacher' in str(res.data).lower()
+
+    def test_start_allowed_after_teacher_assigned(self, api_client):
+        from apps.authentication.models import User
+        hod, div = self._setup()
+        teacher = User.objects.create_user(username='ct_gate', password='Password123!', user_type=User.UserType.FACULTY)
+        div.class_teacher = teacher
+        div.save(update_fields=['class_teacher'])
+        api_client.force_authenticate(user=hod)
+        res = api_client.post(
+            '/api/v1/results/eligibility/start-class-verification/',
+            {'division_id': str(div.id)}, format='json')
+        assert res.status_code == status.HTTP_200_OK, res.data
+        assert res.data['created'] == 1
+
+    def test_initialize_skips_teacherless_division(self, api_client):
+        hod, div = self._setup()
+        api_client.force_authenticate(user=hod)
+        res = api_client.post('/api/v1/results/eligibility/initialize/', {}, format='json')
+        assert res.status_code == status.HTTP_200_OK, res.data
+        assert res.data['created'] == 0
+        assert res.data['skipped_no_teacher'] == 1
+
+    def test_classes_card_flags_no_teacher(self, api_client):
+        hod, div = self._setup()
+        api_client.force_authenticate(user=hod)
+        data = api_client.get('/api/v1/results/eligibility/classes/').json()
+        card = next((c for c in data if c['division_id'] == str(div.id)), None)
+        assert card is not None
+        assert card['has_class_teacher'] is False
+        assert card['can_start_verification'] is False
+
+
+@pytest.mark.django_db
+class TestBacklogSubmitUsesClassWindow:
+    """Backlog fills ride the open class window, never a stale first-year cycle.
+
+    Regression: a senior in Sem-6 Div A (verification started → EV target 7)
+    filling Sem-2 backlog was 403'd demanding an EV row targeting Sem 3.
+    """
+
+    def _setup(self):
+        import datetime
+        from apps.academic_structure.models import AcademicYear, Department, Division, Program, Semester
+        from apps.authentication.models import User
+        from apps.students.models import Student, StudentEnrollment
+        year = AcademicYear.objects.create(
+            code='2041-42', name='AY 2041-42', start_date=datetime.date(2041, 7, 1),
+            end_date=datetime.date(2042, 6, 30), is_current=False)
+        dept = Department.objects.create(name='Backlog Dept', code='BLG')
+        prog = Program.objects.create(department=dept, name='B.Tech B', code='BTECH_BLG')
+        sem2 = Semester.objects.create(number=2, name='S2', year_level=1, term_type='EVEN')
+        Semester.objects.create(number=3, name='S3', year_level=2, term_type='ODD')
+        sem6 = Semester.objects.create(number=6, name='S6', year_level=3, term_type='EVEN')
+        sem7 = Semester.objects.create(number=7, name='S7', year_level=4, term_type='ODD')
+        div6 = Division.objects.create(department=dept, academic_year=year, semester=sem6, name='A')
+        div2 = Division.objects.create(department=dept, academic_year=year, semester=sem2, name='A')
+
+        def _student(username, app_id, div, sem):
+            u = User.objects.create_user(username=username, password='Password123!', user_type=User.UserType.STUDENT)
+            s = Student.objects.create(
+                user=u, first_name='S', last_name=username, display_name=username,
+                enrollment_no='EN' + app_id, application_id=app_id)
+            StudentEnrollment.objects.create(
+                student=s, academic_year=year, department=dept, program=prog,
+                semester=sem, division=div, status='ACTIVE', is_current=True)
+            return u, s
+        return year, dept, sem7, div6, div2, _student
+
+    def _submit(self, api_client, sem_num, passed=True):
+        th, m1, m2 = (45, 15, 16) if passed else (10, 5, 5)
+        return api_client.post('/api/v1/results/semester-results/submit-marks/', {
+            'semester_number': sem_num, 'exam_session': 'Winter 2041',
+            'subjects': [{'course_code': 'BLG201', 'course_name': 'Backlog Subject',
+                          'credits': 3, 'theory_marks': th,
+                          'mid1_marks': m1, 'mid2_marks': m2}],
+        }, format='json')
+
+    def test_backlog_allowed_when_window_open_no_stale_birth(self, api_client):
+        from apps.results.services import evaluate_student_eligibility
+        from apps.results.models import EligibilityVerification
+        year, dept, sem7, div6, div2, mk = self._setup()
+        u, s = mk('senior_bl', 'ENBLO01', div6, div6.semester)
+        evaluate_student_eligibility(s, sem7)  # HOD opened the Sem-6 class window
+        api_client.force_authenticate(user=u)
+        res = self._submit(api_client, 2)
+        assert res.status_code == status.HTTP_200_OK, res.data
+        # No stale Sem-3 cycle birthed for the senior.
+        assert not EligibilityVerification.objects.filter(
+            student=s, target_semester__number=3).exists()
+        assert EligibilityVerification.objects.filter(
+            student=s, target_semester__number=7).count() == 1
+
+    def test_backlog_blocked_when_window_closed(self, api_client):
+        year, dept, sem7, div6, div2, mk = self._setup()
+        u, s = mk('senior_nb', 'ENBLO02', div6, div6.semester)
+        api_client.force_authenticate(user=u)
+        res = self._submit(api_client, 2)
+        assert res.status_code == status.HTTP_403_FORBIDDEN
+        assert 'verification' in str(res.data).lower()
+
+    def test_current_fill_still_gated(self, api_client):
+        from apps.results.services import evaluate_student_eligibility
+        from apps.academic_structure.models import Semester as _Sem
+        year, dept, sem7, div6, div2, mk = self._setup()
+        u, s = mk('junior_bl', 'ENBLO03', div2, div2.semester)
+        api_client.force_authenticate(user=u)
+        assert self._submit(api_client, 2).status_code == status.HTTP_403_FORBIDDEN
+        evaluate_student_eligibility(s, _Sem.objects.get(number=3))
+        res = self._submit(api_client, 2)
+        assert res.status_code == status.HTTP_200_OK, res.data
+
+    def test_backlog_fail_refreshes_window_counts(self, api_client):
+        from apps.results.services import evaluate_student_eligibility
+        from apps.results.models import EligibilityVerification
+        year, dept, sem7, div6, div2, mk = self._setup()
+        u, s = mk('senior_fb', 'ENBLO04', div6, div6.semester)
+        ev = evaluate_student_eligibility(s, sem7)
+        assert ev.active_backlog_count == 0
+        api_client.force_authenticate(user=u)
+        res = self._submit(api_client, 2, passed=False)
+        assert res.status_code == status.HTTP_200_OK, res.data
+        ev.refresh_from_db()
+        assert ev.active_backlog_count == 1
 
 
 @pytest.mark.django_db
@@ -724,6 +923,85 @@ class TestClassVerificationWorkflow:
             {'division_id': str(div.id)}, format='json')
         assert res_start.status_code == status.HTTP_200_OK
         assert 'created' in res_start.json()
+
+
+@pytest.mark.django_db
+class TestPromotedStudentsVisibleInRoster:
+    """A student promoted out of a class must still show in that class roster
+    (with the new semester), and staff names must be Faculty display names."""
+
+    def _setup(self):
+        import datetime
+        from apps.faculty.models import Faculty
+        year = AcademicYear.objects.create(
+            code='2026-27', name='2026-2027',
+            start_date=datetime.date(2026, 7, 1), end_date=datetime.date(2027, 6, 30),
+            is_current=True)
+        dept = Department.objects.create(name='Electronics and Telecommunication', code='ETC')
+        prog = Program.objects.create(department=dept, name='B.Tech ETC', code='BTECH_ETC')
+        sem6 = Semester.objects.create(number=66, name='S66', year_level=3, term_type='EVEN')
+        sem7 = Semester.objects.create(number=67, name='S67', year_level=4, term_type='ODD')
+        div = Division.objects.create(department=dept, academic_year=year, semester=sem6, name='A')
+        hod = User.objects.create_user(username='hod_prom', password='Password123!', user_type=User.UserType.FACULTY)
+        role_hod, _ = Role.objects.get_or_create(codename='HOD', defaults={'name': 'HOD'})
+        RoleAssignment.objects.create(user=hod, role=role_hod, department_id=dept.id, status='ACTIVE')
+        teacher = User.objects.create_user(username='faculty_prom', password='Password123!', user_type=User.UserType.FACULTY)
+        Faculty.objects.create(
+            user=teacher, employee_code='FAC_PROM_001', first_name='Sneha', last_name='Deshmukh',
+            display_name='Sneha Deshmukh', department=dept,
+            date_of_joining=datetime.date(2020, 1, 1), official_email='sneha@gceok.ac.in')
+        div.class_teacher = teacher
+        div.save(update_fields=['class_teacher'])
+        # One student stays, one gets promoted Sem 6 -> Sem 7 (no Sem 7 division).
+        stayer = Student.objects.create(
+            first_name='Stay', last_name='Er', display_name='Stay Er',
+            enrollment_no='EN66STAY01', application_id='APP66S01')
+        StudentEnrollment.objects.create(
+            student=stayer, academic_year=year, department=dept, program=prog,
+            semester=sem6, division=div, status='ACTIVE', is_current=True)
+        mover = Student.objects.create(
+            first_name='Move', last_name='Er', display_name='Move Er',
+            enrollment_no='EN66MOVE01', application_id='APP66M01')
+        old = StudentEnrollment.objects.create(
+            student=mover, academic_year=year, department=dept, program=prog,
+            semester=sem6, division=div, status='ACTIVE', is_current=True)
+        old.is_current = False
+        old.status = StudentEnrollment.Status.PROMOTED
+        old.save(update_fields=['is_current', 'status'])
+        StudentEnrollment.objects.create(
+            student=mover, academic_year=year, department=dept, program=prog,
+            semester=sem7, division=None, status='ACTIVE', is_current=True)
+        return hod, div, stayer, mover
+
+    def test_roster_lists_promoted_student_with_new_sem(self, api_client):
+        hod, div, stayer, mover = self._setup()
+        api_client.force_authenticate(user=hod)
+        res = api_client.get(f'/api/v1/results/eligibility/class-roster/?division_id={div.id}')
+        assert res.status_code == status.HTTP_200_OK, res.data
+        roster = res.json()
+        current_ids = [s['student_id'] for s in roster['students']]
+        assert str(stayer.id) in current_ids
+        assert str(mover.id) not in current_ids
+        assert roster['total_students'] == 1
+        promoted = roster['promoted_students']
+        assert len(promoted) == 1
+        row = promoted[0]
+        assert row['student_id'] == str(mover.id)
+        assert row['student_name'] == 'Move Er'
+        assert row['current_semester'] == 67
+        assert row['pipeline_stage'] == 'PROMOTED'
+        assert row['moved_up'] is True
+        assert row['can_review_teacher'] is False
+        assert row['can_endorse_hod'] is False
+
+    def test_classes_list_shows_faculty_display_name(self, api_client):
+        hod, div, stayer, mover = self._setup()
+        api_client.force_authenticate(user=hod)
+        res = api_client.get('/api/v1/results/eligibility/classes/')
+        assert res.status_code == status.HTTP_200_OK
+        cls_card = next((c for c in res.json() if c['division_id'] == str(div.id)), None)
+        assert cls_card is not None
+        assert cls_card['class_teacher_name'] == 'Sneha Deshmukh'
 
 
 

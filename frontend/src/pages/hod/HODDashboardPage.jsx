@@ -505,12 +505,33 @@ export default function HODDashboardPage() {
       });
       setAssignSuccess(`${subject.course_code} ${kind === 'lab' ? 'lab' : 'theory'} teacher saved.`);
       setTimeout(() => setAssignSuccess(null), 4000);
-      const div = divisions.find((d) => d.id === expandedDivId) || deptDivisions.find((d) => d.id === expandedDivId);
-      setExpandedDivId(null);
-      if (div) await toggleExpandDivision(div);
+      const asgRes = await facultyApi.getAssignments({ division_id: expandedDivId, is_active: true });
+      const assignments = asgRes.data?.results || asgRes.data || [];
+      setDivAssignments(assignments);
+      setSlotDrafts((prev) => {
+        const next = { ...prev };
+        if (next[subject.id]) {
+          if (kind === 'lab') {
+            next[subject.id].lab = facultyId;
+            const newHolder = assignments.find((a) => a.scheme_subject === subject.id && a.role === 'LAB_INSTRUCTOR' && a.is_active);
+            next[subject.id].labHolderId = newHolder ? newHolder.id : null;
+          } else {
+            next[subject.id].theory = facultyId;
+            const newHolder = assignments.find((a) => a.scheme_subject === subject.id && a.role !== 'LAB_INSTRUCTOR' && a.is_active);
+            next[subject.id].theoryHolderId = newHolder ? newHolder.id : null;
+          }
+        }
+        return next;
+      });
     } catch (err) {
       const data = err.response?.data;
-      alert(data?.detail || (data && typeof data === 'object' ? Object.values(data).flat().join(' ') : null) || 'Failed to save teacher.');
+      let msg = data?.detail;
+      if (!msg && data && typeof data === 'object') {
+        msg = Object.entries(data)
+          .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${Array.isArray(v) ? v.join(' ') : v}`)
+          .join(' | ');
+      }
+      alert(msg || 'Failed to save teacher.');
     } finally {
       setSavingSlot(null);
     }
@@ -569,7 +590,7 @@ export default function HODDashboardPage() {
         <div>
           <div style={{ fontWeight: 600, color: '#0f172a' }}>{s.display_name}</div>
           <div style={{ fontSize: '0.75rem', color: '#64748b', fontFamily: 'monospace' }}>
-            {s.enrollment_no || s.application_id || 'ID Pending'}
+            {s.enrollment_no || s.application_id || '—'}
           </div>
         </div>
       ),
@@ -595,7 +616,7 @@ export default function HODDashboardPage() {
       header: 'Department / Term',
       render: (s) => (
         <span style={{ fontSize: '0.8125rem' }}>
-          {s.department_code || 'Dept'} — Sem {s.semester_number || '1'}
+          {s.department_code || '—'} — Sem {s.semester_number || '—'}
         </span>
       ),
     },
@@ -2380,7 +2401,7 @@ export default function HODDashboardPage() {
           >
             <div><strong>Candidate:</strong> {studentForDivEdit?.display_name}</div>
             <div><strong>Enrollment:</strong> <span style={{ fontFamily: 'monospace' }}>{studentForDivEdit?.enrollment_no || '—'}</span></div>
-            <div><strong>Current Semester:</strong> Semester {studentForDivEdit?.semester_number || '1'}</div>
+            <div><strong>Current Semester:</strong> Semester {studentForDivEdit?.semester_number || '—'}</div>
           </div>
 
           <FormField label="Assigned Class Division" required>

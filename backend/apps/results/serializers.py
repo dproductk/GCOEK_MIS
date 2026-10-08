@@ -10,6 +10,20 @@ from apps.results.models import (
 )
 
 
+def _staff_display_name(user):
+    """Faculty profile display name for a staff User; falls back to username."""
+    if not user:
+        return ''
+    profile = getattr(user, 'faculty_profile', None)
+    if profile and getattr(profile, 'display_name', ''):
+        return profile.display_name
+    try:
+        full = user.get_full_name()
+    except Exception:
+        full = ''
+    return full or getattr(user, 'username', '')
+
+
 class SubjectResultSerializer(serializers.ModelSerializer):
     grade_letter_display = serializers.CharField(source='get_grade_letter_display', read_only=True)
     theory_marks = serializers.DecimalField(source='theory_ese_marks', max_digits=5, decimal_places=1, read_only=True)
@@ -96,8 +110,8 @@ class EligibilityVerificationSerializer(serializers.ModelSerializer):
     department_code = serializers.CharField(source='department.code', read_only=True)
     target_semester_number = serializers.IntegerField(source='target_semester.number', read_only=True)
     is_locked_for_teacher = serializers.BooleanField(read_only=True)
-    class_teacher_name = serializers.CharField(source='class_teacher.get_full_name', read_only=True)
-    hod_name = serializers.CharField(source='hod.get_full_name', read_only=True)
+    class_teacher_name = serializers.SerializerMethodField()
+    hod_name = serializers.SerializerMethodField()
     semester_results = serializers.SerializerMethodField()
 
     class Meta:
@@ -127,6 +141,12 @@ class EligibilityVerificationSerializer(serializers.ModelSerializer):
             'is_locked_for_teacher',
             'semester_results',
         ]
+
+    def get_class_teacher_name(self, obj):
+        return _staff_display_name(getattr(obj, 'class_teacher', None))
+
+    def get_hod_name(self, obj):
+        return _staff_display_name(getattr(obj, 'hod', None))
 
     def get_semester_results(self, obj):
         student = getattr(obj, 'student', None)

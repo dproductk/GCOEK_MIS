@@ -48,13 +48,11 @@ export default function AdminHeadDashboardPage() {
     );
   }
 
-  const collectedAmount = stats.financeAnalytics?.total_collected !== undefined
-    ? stats.financeAnalytics.total_collected.toLocaleString('en-IN')
-    : '1,95,000';
+  const collectedAmount = stats.financeAnalytics?.total_collected ?? 0;
+  const collectedDisplay = Number(collectedAmount).toLocaleString('en-IN');
 
-  const balanceAmount = stats.financeAnalytics?.total_balance !== undefined
-    ? stats.financeAnalytics.total_balance.toLocaleString('en-IN')
-    : '0';
+  const balanceAmount = stats.financeAnalytics?.total_balance ?? 0;
+  const balanceDisplay = Number(balanceAmount).toLocaleString('en-IN');
 
   return (
     <>
@@ -120,7 +118,7 @@ export default function AdminHeadDashboardPage() {
         >
           <StatCard
             label="Total Enrolled"
-            value={stats.totalStudents > 0 ? stats.totalStudents : 179}
+            value={stats.totalStudents || 0}
             hint="Autonomous B.Tech Students"
             icon={GraduationCap}
             color="var(--edvana-brand)"
@@ -129,7 +127,7 @@ export default function AdminHeadDashboardPage() {
 
           <StatCard
             label="Faculty Strength"
-            value={stats.totalFaculty > 0 ? stats.totalFaculty : 24}
+            value={stats.totalFaculty || 0}
             hint="Teaching & Research Cadre"
             icon={Users}
             color="var(--edvana-info)"
@@ -138,7 +136,7 @@ export default function AdminHeadDashboardPage() {
 
           <StatCard
             label="Revenue Realized"
-            value={`₹${collectedAmount}`}
+            value={`₹${collectedDisplay}`}
             hint="Tuition & Development Fees"
             icon={IndianRupee}
             color="var(--edvana-success)"
@@ -147,7 +145,7 @@ export default function AdminHeadDashboardPage() {
 
           <StatCard
             label="Outstanding Dues"
-            value={`₹${balanceAmount}`}
+            value={`₹${balanceDisplay}`}
             hint="Pending Student Dues"
             icon={TrendingUp}
             color="var(--edvana-warning)"

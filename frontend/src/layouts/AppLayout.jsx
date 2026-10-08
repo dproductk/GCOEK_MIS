@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import TopHeader from '../components/common/TopHeader';
+import studentApi from '../api/studentApi';
 import {
   LayoutDashboard,
   Users,
@@ -212,11 +213,37 @@ export default function AppLayout() {
     ? `${user.first_name} ${user.last_name || ''}`.trim().toUpperCase()
     : (activeRole?.name || user?.username || 'USER').toUpperCase();
 
-  const userEmail = user?.email || (
-    navRole === 'STUDENT'
-      ? 'student01@university.edu'
-      : `${user?.username || 'user'}@university.edu`
-  );
+  // Email: prefer student profile email (editable in View/Update Profile),
+  // fall back to auth session email. Never synthesized. Show '-' when empty.
+  const [profileEmail, setProfileEmail] = useState('');
+  useEffect(() => {
+    let ignore = false;
+    async function loadStudentEmail() {
+      if (!user) {
+        if (!ignore) setProfileEmail('');
+        return;
+      }
+      const isStudent =
+        (user.roles || []).some((r) => r.codename === 'STUDENT' && r.status === 'ACTIVE') ||
+        user.user_type === 'STUDENT';
+      if (!isStudent) {
+        if (!ignore) setProfileEmail('');
+        return;
+      }
+      try {
+        const res = await studentApi.getMyProfile();
+        if (!ignore) setProfileEmail(res.data?.personal_details?.student_email || '');
+      } catch {
+        if (!ignore) setProfileEmail('');
+      }
+    }
+    loadStudentEmail();
+    return () => {
+      ignore = true;
+    };
+  }, [user?.id, user?.email, user?.user_type]);
+
+  const userEmail = (profileEmail || user?.email || '').trim() || '-';
 
   const handleLogout = async () => {
     await logout();
@@ -253,16 +280,16 @@ export default function AppLayout() {
             <div className="app-sidebar-profile-avatar">{initials}</div>
             <div className="app-sidebar-profile-name">{displayName}</div>
             <div className="app-sidebar-profile-role">{roleName}</div>
-            <div className="app-sidebar-profile-id">ID: {user?.username || 'ENR2025COMP002'}</div>
+            <div className="app-sidebar-profile-id">ID: {user?.username || '—'}</div>
             
             <div className="app-sidebar-profile-status">
               <span className="app-sidebar-profile-status-dot" />
               <span>Active</span>
             </div>
 
-            <div className="app-sidebar-profile-email">
-              <Mail size={13} style={{ opacity: 0.7 }} />
-              <span>{userEmail}</span>
+            <div className="app-sidebar-profile-email" title={userEmail}>
+              <Mail size={13} style={{ opacity: 0.7, flexShrink: 0 }} />
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '180px' }}>{userEmail}</span>
             </div>
           </div>
 

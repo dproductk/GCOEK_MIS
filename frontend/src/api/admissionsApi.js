@@ -16,6 +16,8 @@ export const admissionsApi = {
 
   deleteBatch: (batchId, reason) =>
     client.delete(`/admissions/batches/${batchId}/delete/`, { data: { reason } }),
+
+  getPendingIntakes: () => client.get('/admissions/batches/pending-intakes/'),
 };
 
 export default admissionsApi;

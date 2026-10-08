@@ -27,7 +27,7 @@ from apps.finance.models import (
 )
 from apps.finance.services import apply_gateway_result, generate_next_receipt_no
 from apps.results.models import EligibilityVerification
-from apps.students.models import Student
+from apps.students.models import Student, StudentPersonalDetail
 
 
 @pytest.fixture
@@ -61,6 +61,12 @@ def online_payment_setup(db):
         enrollment_no='PRN-ONLINE-001',
         first_name='Aditya',
         last_name='Kulkarni',
+    )
+    # Real gateway contact: initiation must never fall back to placeholders.
+    StudentPersonalDetail.objects.create(
+        student=student,
+        student_email='aditya@gceok.ac.in',
+        student_mobile='9876543210',
     )
 
     fee_head = FeeHead.objects.create(
@@ -183,6 +189,19 @@ def test_online_payment_initiation_and_idempotency(api_client, online_payment_se
     res2 = api_client.post('/api/v1/finance/online-payment/initiate/', {}, **headers)
     assert res2.status_code == status.HTTP_200_OK
     assert res2.data['transaction_id'] == txn_id
+
+
+@pytest.mark.django_db
+def test_online_payment_initiation_requires_real_contact(api_client, online_payment_setup):
+    """No placeholder email/phone: initiation is refused when contact is missing."""
+    student = online_payment_setup['student']
+    student.personal_details.student_email = ''
+    student.personal_details.student_mobile = ''
+    student.personal_details.save()
+    api_client.force_authenticate(user=online_payment_setup['user_stu'])
+    res = api_client.post('/api/v1/finance/online-payment/initiate/', {}, **{'HTTP_IDEMPOTENCY_KEY': 'idemp_no_contact'})
+    assert res.status_code == status.HTTP_400_BAD_REQUEST
+    assert OnlinePaymentAttempt.objects.filter(student=student).count() == 0
 
 
 @pytest.mark.django_db

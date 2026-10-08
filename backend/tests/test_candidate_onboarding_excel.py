@@ -138,11 +138,12 @@ def test_onboarding_ingestion_and_profile(onboarding_setup):
     assert res.data['personal_details']['caste'] == 'MARATHA'
     assert res.data['personal_details']['abc_id'] == '605-880-265-207'
 
-    # 2. Update profile (e.g. adding mother's name, bank account, and editing caste/place of birth)
+    # 2. Update profile (e.g. adding mother's name, bank account, place of birth).
+    # Caste is admission-locked: sending the SAME value is a no-op success.
     update_payload = {
         'personal': {
             'place_of_birth': 'Kolhapur',
-            'caste': 'MARATHA 96 KULI',
+            'caste': 'MARATHA',
             'marital_status': 'Unmarried',
             'student_mobile': '9876543210',
         },
@@ -163,9 +164,17 @@ def test_onboarding_ingestion_and_profile(onboarding_setup):
     # Verify updated values in DB
     s1.refresh_from_db()
     assert s1.personal_details.place_of_birth == 'Kolhapur'
-    assert s1.personal_details.caste == 'MARATHA 96 KULI'
+    assert s1.personal_details.caste == 'MARATHA'
     assert s1.guardians.filter(relationship='MOTHER', name='SUNITA PATIL').exists()
     assert s1.bank_accounts.filter(bank_name='Bank of Maharashtra').exists()
+
+    # 3. Admission-locked fields cannot be changed via self-service.
+    locked_res = client.patch('/api/v1/students/me/update/', {'personal': {'caste': 'MARATHA 96 KULI'}}, format='json')
+    assert locked_res.status_code == status.HTTP_400_BAD_REQUEST
+    locked_res = client.patch('/api/v1/students/me/update/', {'personal': {'gender': 'FEMALE'}}, format='json')
+    assert locked_res.status_code == status.HTTP_400_BAD_REQUEST
+    s1.refresh_from_db()
+    assert s1.personal_details.caste == 'MARATHA'
 
 
 def test_senior_2023_cohort_lands_even_sem_via_formula(db):

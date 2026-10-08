@@ -2,13 +2,16 @@ import React, { useState, useEffect } from 'react';
 import {
   IndianRupee, Printer, FileText,
   AlertCircle, ShieldCheck, X, ArrowRight, ReceiptText,
+  Download, FileCheck,
 } from 'lucide-react';
 import financeApi from '../../api/financeApi';
+import resultsApi from '../../api/resultsApi';
 import clgLogo from '../../assets/icon.jpg';
 import PageHeader from '../../components/common/PageHeader';
 import Badge from '../../components/common/Badge';
 import Modal from '../../components/common/Modal';
 import { LoadingState, EmptyState } from '../../components/common/StateDisplays';
+import AdmissionVerificationFormModal from '../../components/finance/AdmissionVerificationFormModal';
 
 /* ── Small presentational bits, in EDVANA token style ─────────────── */
 
@@ -74,8 +77,14 @@ function FeeRowCard({ children }) {
 export default function StudentFeeReceiptPage() {
   const [payments, setPayments] = useState([]);
   const [onlineStatus, setOnlineStatus] = useState(null);
+  const [admissionForm, setAdmissionForm] = useState(null);
+  const [showAdmissionModal, setShowAdmissionModal] = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // True only when the ledger fetch itself failed (server down / 500).
+  // Distinct from "no records": never show the empty state on failure.
+  const [paymentsFailed, setPaymentsFailed] = useState(false);
   const [selectedReceipt, setSelectedReceipt] = useState(null);
   const [showBill, setShowBill] = useState(false);
   const [initiating, setInitiating] = useState(false);
@@ -88,24 +97,63 @@ export default function StudentFeeReceiptPage() {
   const loadFeeData = async () => {
     setLoading(true);
     setError(null);
+    setPaymentsFailed(false);
     try {
-      const [paymentsRes, statusRes] = await Promise.allSettled([
+      const [paymentsRes, statusRes, formRes] = await Promise.allSettled([
         financeApi.getMyPayments(),
         financeApi.getOnlinePaymentStatus(),
+        resultsApi.getAdmissionFormData(),
       ]);
 
       if (paymentsRes.status === 'fulfilled') {
         setPayments(paymentsRes.value.data || []);
+      } else {
+        // Ledger is the critical section: surface failure loudly instead of
+        // falling through to the "No Fee Records" empty state. The other two
+        // sections degrade silently (their cards simply stay hidden).
+        setPaymentsFailed(true);
+        const status = paymentsRes.reason?.response?.status;
+        setError(
+          status === 500
+            ? 'Fee ledger is temporarily unavailable (server error). Your records are safe — please retry.'
+            : 'Could not reach the fee ledger. Check your connection and retry.'
+        );
       }
 
       if (statusRes.status === 'fulfilled') {
         setOnlineStatus(statusRes.value.data);
+      }
+
+      if (formRes.status === 'fulfilled') {
+        setAdmissionForm(formRes.value.data);
       }
     } catch (err) {
       console.error('Failed to load fee payments:', err);
       setError('Could not retrieve fee receipts.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleDownloadAdmissionPdf = async () => {
+    setDownloadingPdf(true);
+    try {
+      const res = await resultsApi.downloadAdmissionFormPdf();
+      const blob = new Blob([res.data], { type: 'application/pdf' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const safePrn = admissionForm?.prn_number ? admissionForm.prn_number.replace(/\//g, '_') : 'STUDENT';
+      a.download = `Admission_Verification_Form_${safePrn}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err) {
+      console.error('Failed to download admission form PDF:', err);
+      alert('Could not download admission verification PDF. Please try again.');
+    } finally {
+      setDownloadingPdf(false);
     }
   };
 
@@ -141,7 +189,7 @@ export default function StudentFeeReceiptPage() {
   const termCode = onlineStatus?.academic_year?.code
     || onlineStatus?.assessment?.academic_year_code
     || payments[0]?.academic_year_code
-    || '2026-27';
+    || '—';
 
   const hasDue = balanceRemaining > 0 && onlineStatus?.assessment;
   const isPartial = hasDue && totalPaid > 0;
@@ -200,6 +248,97 @@ export default function StudentFeeReceiptPage() {
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '0.5rem', background: '#eaeef4', borderRadius: 24, padding: '0.9rem' }}>
+            {/* ── Admission Verification & Clearance Form (for Accountant) ── */}
+            {admissionForm && admissionForm.has_verification && (
+              <FeeRowCard>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }} className="fee-title-block">
+                  <div
+                    style={{
+                      width: 48, height: 48, borderRadius: 14, flexShrink: 0,
+                      background: admissionForm.final_eligible ? '#e6f7ec' : (admissionForm.verification_stage_tone === 'red' ? '#fee2e2' : '#fef3c7'),
+                      color: admissionForm.final_eligible ? '#16a34a' : (admissionForm.verification_stage_tone === 'red' ? '#dc2626' : '#d97706'),
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}
+                  >
+                    <FileCheck size={24} strokeWidth={1.8} />
+                  </div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: '0.68rem', fontWeight: 600, letterSpacing: '0.05em', color: '#64748b', textTransform: 'uppercase' }}>
+                      ADMISSION VERIFICATION & PROOF
+                    </div>
+                    <div style={{ fontSize: '1.02rem', fontWeight: 800, color: '#0f172a', marginTop: '0.1rem' }}>
+                      {admissionForm.form_title || 'Admission Application Form'}
+                    </div>
+                    <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '0.15rem' }}>
+                      {admissionForm.final_eligible
+                        ? 'Official verified copy with CT & HOD timestamps for the accountant counter'
+                        : admissionForm.verification_stage === 'HOD_PENDING'
+                        ? 'Class Teacher verified — Waiting for Head of Department endorsement'
+                        : admissionForm.verification_stage === 'TEACHER_PENDING'
+                        ? 'Verification initiated by Department — Under review by Class Teacher'
+                        : admissionForm.verification_stage === 'FLAGGED'
+                        ? `Flagged for clarification: "${admissionForm.remarks || 'Consult class teacher'}"`
+                        : 'Official admission form tracking'}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="fee-amount-block">
+                  <div style={{ fontSize: '0.75rem', color: '#64748b' }}>PRN / Candidate</div>
+                  <div style={{ fontSize: '0.98rem', fontWeight: 700, fontFamily: 'monospace', color: '#0f172a', marginTop: '0.1rem' }}>
+                    {admissionForm.prn_number}
+                  </div>
+                  <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.15rem' }}>
+                    {admissionForm.branch}
+                  </div>
+                </div>
+
+                <div className="fee-status-block">
+                  <StatusPill tone={admissionForm.verification_stage_tone || (admissionForm.final_eligible ? 'green' : 'amber')}>
+                    {admissionForm.verification_stage_label || (admissionForm.final_eligible ? 'Verified by CT & HOD' : 'Pending Verification')}
+                  </StatusPill>
+                  <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '0.35rem', lineHeight: 1.3 }}>
+                    <div>Teacher: <b>{admissionForm.class_teacher_verification?.name}</b> ({admissionForm.class_teacher_verification?.timestamp})</div>
+                    <div>HOD: <b>{admissionForm.hod_verification?.name}</b> ({admissionForm.hod_verification?.timestamp})</div>
+                  </div>
+                </div>
+
+                <div className="fee-action-block" style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    onClick={() => setShowAdmissionModal(true)}
+                    className="edvana-btn edvana-btn-secondary"
+                    style={{
+                      padding: '0.65rem 1.15rem', fontSize: '0.84rem', fontWeight: 600,
+                      display: 'inline-flex', alignItems: 'center', gap: '0.45rem',
+                      borderRadius: 12,
+                    }}
+                  >
+                    <Printer size={15} /> View & Print
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadAdmissionPdf}
+                    disabled={downloadingPdf || !admissionForm.can_download}
+                    title={!admissionForm.can_download ? 'Official PDF download unlocks once approved by HOD' : 'Download official PDF'}
+                    className="edvana-btn"
+                    style={{
+                      padding: '0.65rem 1.25rem', fontSize: '0.84rem', fontWeight: 700,
+                      display: 'inline-flex', alignItems: 'center', gap: '0.45rem',
+                      borderRadius: 12,
+                      background: admissionForm.can_download ? '#1E60DC' : '#94a3b8',
+                      color: '#ffffff',
+                      border: `1px solid ${admissionForm.can_download ? '#1E60DC' : '#94a3b8'}`,
+                      cursor: admissionForm.can_download ? 'pointer' : 'not-allowed',
+                      boxShadow: admissionForm.can_download ? '0 2px 8px rgba(30, 96, 220, 0.25)' : 'none',
+                    }}
+                  >
+                    <Download size={15} /> {downloadingPdf ? 'Downloading...' : 'Download PDF'}
+                  </button>
+                </div>
+              </FeeRowCard>
+            )}
+
             {/* ── Outstanding due card (like reference row 1) ── */}
             {hasDue && (
               <FeeRowCard>
@@ -316,8 +455,29 @@ export default function StudentFeeReceiptPage() {
               </FeeRowCard>
             ))}
 
-            {/* ── Empty state ── */}
-            {!hasDue && payments.length === 0 && (
+            {/* ── Load failure (never masquerade as "no records") ── */}
+            {!hasDue && payments.length === 0 && paymentsFailed && (
+              <div className="edvana-card" style={{ borderRadius: 20, padding: '2.5rem', textAlign: 'center' }}>
+                <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem', color: '#dc2626' }}>
+                  <AlertCircle size={36} />
+                </div>
+                <div style={{ fontSize: '1rem', fontWeight: 700, color: '#0f172a' }}>Could Not Load Fee Records</div>
+                <div style={{ fontSize: '0.85rem', color: '#64748b', marginTop: '0.4rem', maxWidth: 420, margin: '0.4rem auto 0' }}>
+                  The ledger did not respond. This does not mean your fees are unpaid — please retry in a moment.
+                </div>
+                <button
+                  type="button"
+                  onClick={loadFeeData}
+                  className="edvana-btn edvana-btn-primary"
+                  style={{ marginTop: '1.25rem', borderRadius: 12, padding: '0.6rem 1.6rem' }}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {/* ── Empty state (only when the ledger answered successfully) ── */}
+            {!hasDue && payments.length === 0 && !paymentsFailed && (
               <div className="edvana-card" style={{ borderRadius: 20, padding: '2.5rem' }}>
                 <EmptyState
                   title="No Fee Records Found"
@@ -442,7 +602,7 @@ export default function StudentFeeReceiptPage() {
         maxWidth="540px"
       >
         {selectedReceipt && (
-          <div>
+          <div id="fee-receipt-print">
             <div style={{ padding: '1rem 1.1rem', background: '#f8fafc', borderRadius: 12, border: '1px solid #e2e8f0', marginBottom: '1.25rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
                 <img
@@ -493,6 +653,40 @@ export default function StudentFeeReceiptPage() {
               </div>
             </div>
 
+            {(() => {
+              const live = selectedReceipt.fee_breakdown && Object.keys(selectedReceipt.fee_breakdown).length > 0
+                ? selectedReceipt.fee_breakdown
+                : null;
+              const assessed = onlineStatus?.assessment?.fee_breakdown || {};
+              const sameYear = String(onlineStatus?.assessment?.academic_year || onlineStatus?.assessment?.academic_year_code || '')
+                && (String(onlineStatus?.assessment?.academic_year) === String(selectedReceipt.academic_year)
+                  || onlineStatus?.assessment?.academic_year_code === selectedReceipt.academic_year_code);
+              const heads = live || (sameYear ? assessed : null);
+              const entries = heads ? Object.entries(heads) : [];
+              if (entries.length === 0) return null;
+              return (
+                <div style={{ border: '1px solid #eef2f7', borderRadius: 12, overflow: 'hidden', marginBottom: '1rem' }}>
+                  <div style={{ padding: '0.6rem 1rem', background: '#f8fafc', fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#64748b' }}>
+                    Fee Heads (Pay-Head Breakup)
+                  </div>
+                  {entries.map(([head, amt], i) => (
+                    <div
+                      key={head}
+                      style={{
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        padding: '0.7rem 1rem', fontSize: '0.875rem',
+                        background: i % 2 === 0 ? '#ffffff' : '#f8fafc',
+                        borderTop: '1px solid #f1f5f9',
+                      }}
+                    >
+                      <span style={{ color: '#334155' }}>{head}</span>
+                      <span style={{ fontWeight: 700, color: '#0f172a' }}>₹{parseFloat(amt).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem 0', borderBottom: '1px solid #e2e8f0' }}>
               <span style={{ fontWeight: 600, color: '#334155' }}>Amount Paid:</span>
               <span style={{ fontSize: '1.25rem', fontWeight: 800, color: '#166534' }}>
@@ -507,7 +701,7 @@ export default function StudentFeeReceiptPage() {
               </span>
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', paddingTop: '1.25rem', marginTop: '0.5rem' }}>
+            <div className="no-print" style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', paddingTop: '1.25rem', marginTop: '0.5rem' }}>
               <button
                 type="button"
                 onClick={() => setSelectedReceipt(null)}
@@ -527,6 +721,15 @@ export default function StudentFeeReceiptPage() {
           </div>
         )}
       </Modal>
+
+      {/* ── Admission Verification Form Modal ── */}
+      <AdmissionVerificationFormModal
+        isOpen={showAdmissionModal}
+        onClose={() => setShowAdmissionModal(false)}
+        formData={admissionForm}
+        onDownloadPdf={handleDownloadAdmissionPdf}
+        downloading={downloadingPdf}
+      />
     </>
   );
 }

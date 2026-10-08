@@ -214,19 +214,21 @@ class EligibilityVerification(BaseModel):
     @property
     def is_locked_for_teacher(self):
         """
-        Class Teacher cannot edit if already APPROVED, unless HOD has flagged it back.
+        Class Teacher cannot edit once decided (APPROVED or terminal FAIL),
+        unless HOD has flagged it back for rework.
         """
-        return (
-            self.class_teacher_status == self.StageStatus.APPROVED
-            and self.hod_status != self.StageStatus.FLAGGED
-        )
+        if self.hod_status == self.StageStatus.FLAGGED:
+            return False
+        return self.class_teacher_status in (
+            self.StageStatus.APPROVED, self.StageStatus.REJECTED)
 
     @property
     def is_locked_for_student(self):
         """
-        Student cannot edit once verified by teacher unless teacher (or HOD) flags it.
+        Student cannot edit once teacher decided (approved or failed),
+        unless teacher (or HOD) flags it back for correction.
         """
-        return (
-            self.class_teacher_status == self.StageStatus.APPROVED
-            and self.hod_status != self.StageStatus.FLAGGED
-        )
+        if self.hod_status == self.StageStatus.FLAGGED:
+            return False
+        return self.class_teacher_status in (
+            self.StageStatus.APPROVED, self.StageStatus.REJECTED)

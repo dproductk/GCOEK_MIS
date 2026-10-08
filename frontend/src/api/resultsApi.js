@@ -42,6 +42,15 @@ export const resultsApi = {
       status,
       remarks,
     }),
+
+  getAdmissionFormData: (params = {}) =>
+    client.get('/results/eligibility/admission-form-data/', { params }),
+
+  downloadAdmissionFormPdf: (params = {}) =>
+    client.get('/results/eligibility/admission-form-pdf/', {
+      params,
+      responseType: 'blob',
+    }),
 };
 
 export default resultsApi;

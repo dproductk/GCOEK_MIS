@@ -18,6 +18,33 @@ import {
   Lock,
 } from 'lucide-react';
 
+// Scholarship types mirror backend Student.ScholarshipType codes.
+// Server enforces: Applied=No -> NONE; Applied=Yes requires a real type.
+const SCHOLARSHIP_OPTIONS = [
+  { value: 'NONE', label: 'None' },
+  { value: 'EBC', label: 'EBC (Economically Backward Class)' },
+  { value: 'OBC_FREESHIP', label: 'OBC Freeship' },
+  { value: 'SC', label: 'SC Scholarship' },
+  { value: 'ST', label: 'ST Scholarship' },
+  { value: 'NT_C', label: 'NT-C' },
+  { value: 'MINORITY', label: 'Minority Scholarship' },
+];
+const SCHOLARSHIP_CODE_VALUES = new Set(SCHOLARSHIP_OPTIONS.map((o) => o.value));
+// Map legacy label values (previously stored/selected) to codes.
+const normalizeScholarshipLabel = (v) => {
+  const key = String(v || '').trim().toUpperCase();
+  const map = {
+    'NONE': 'NONE', '': 'NONE',
+    'EBC': 'EBC',
+    'OBC FREESHIP': 'OBC_FREESHIP', 'OBC_FREESHIP': 'OBC_FREESHIP',
+    'SC SCHOLARSHIP': 'SC', 'SC': 'SC',
+    'ST SCHOLARSHIP': 'ST', 'ST': 'ST',
+    'NT-C': 'NT_C', 'NT_C': 'NT_C', 'NTC': 'NT_C',
+    'MINORITY SCHOLARSHIP': 'MINORITY', 'MINORITY': 'MINORITY',
+  };
+  return map[key] || 'NONE';
+};
+
 export default function StudentProfilePage() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -38,7 +65,9 @@ export default function StudentProfilePage() {
     fullName: '',
     prn: '',
     dteAppId: '',
+    studentEmail: '',
     fatherName: '',
+    parentMobile: '',
     motherName: '',
     placeOfBirth: '',
     dobDay: '1',
@@ -46,7 +75,7 @@ export default function StudentProfilePage() {
     dobYear: '2005',
     gender: 'Male',
     caste: '',
-    maritalStatus: 'Unmarried',
+    maritalStatus: '',
     abcId: '',
     admittedYear: '',
     admissionType: 'CAP',
@@ -57,7 +86,7 @@ export default function StudentProfilePage() {
     annualIncome: '',
     address: '',
     district: '',
-    state: 'Maharashtra',
+    state: '',
     pincode: '',
     // Aadhaar
     aadhaarNo: '',
@@ -92,9 +121,19 @@ export default function StudentProfilePage() {
   // Students may edit their OWN profile (no `id` param) via PATCH /students/me/update/.
   // Identity, admission, Aadhaar number and verified marksheets stay locked for everyone.
   // Teachers/staff opening /students/:id from the directory are strictly read-only.
+  // Edit-lock: everything starts locked; owner clicks Edit to unlock, Save finalizes + re-locks.
   const isOwnProfile = !id;
   const canEdit = isOwnProfile && hasRole('STUDENT');
   const [saving, setSaving] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [snapshot, setSnapshot] = useState(null);
+  const fieldsLocked = !canEdit || !isEditing;
+
+  // Switching between own profile and directory records always re-locks.
+  useEffect(() => {
+    setIsEditing(false);
+    setSnapshot(null);
+  }, [id]);
 
   useEffect(() => {
     let ignore = false;
@@ -152,7 +191,9 @@ export default function StudentProfilePage() {
           fullName: candidateName,
           prn: data.enrollment_no || '',
           dteAppId: data.application_id || '',
+          studentEmail: p.student_email || '',
           fatherName: gFather?.name || '',
+          parentMobile: gFather?.mobile || '',
           motherName: gMother?.name || '',
           placeOfBirth: p.place_of_birth || '',
           dobDay: day,
@@ -160,16 +201,20 @@ export default function StudentProfilePage() {
           dobYear: year,
           gender: p.gender === 'FEMALE' ? 'Female' : p.gender === 'OTHER' ? 'Other' : 'Male',
           caste: p.caste || '',
-          maritalStatus: p.marital_status || 'Unmarried',
+          maritalStatus: p.marital_status || '',
           abcId: p.abc_id || '',
           admittedYear: adm.admission_year || enr.academic_year_code || '',
           admissionType: adm.admission_type || (isDSY ? 'Direct Second Year' : 'CAP'),
           category: adm.category || '',
           allottedSeatType: adm.allotted_seat_type || adm.seat_type || '',
+          scholarshipApplied: data.scholarship_applied ? 'Yes' : 'No',
+          scholarshipType: SCHOLARSHIP_CODE_VALUES.has(String(data.scholarship_type || '').toUpperCase())
+            ? String(data.scholarship_type).toUpperCase()
+            : normalizeScholarshipLabel(data.scholarship_type),
           annualIncome: gFather?.annual_income ? String(gFather.annual_income) : '',
           address: perm.address_line_1 || '',
           district: perm.district || '',
-          state: perm.state || 'Maharashtra',
+          state: perm.state || '',
           pincode: perm.pincode || '',
           aadhaarNo: adh.aadhaar_number_masked || '',
           aadhaarName: candidateName,
@@ -213,9 +258,25 @@ export default function StudentProfilePage() {
 
   const loadProfile = () => setRetryCount((c) => c + 1);
 
+  const startEditing = () => {
+    if (!canEdit || isEditing) return;
+    setSnapshot({ ...formData });
+    setIsEditing(true);
+  };
+
+  const cancelEditing = () => {
+    if (snapshot) setFormData(snapshot);
+    setIsEditing(false);
+    setSnapshot(null);
+  };
+
   const handleInputChange = (field, value) => {
     if (!canEdit) {
       showFeedback('Read-only view. Only the student can edit their own profile.');
+      return;
+    }
+    if (!isEditing) {
+      showFeedback('Profile is locked. Click Edit Profile to start editing.');
       return;
     }
     setFormData((prev) => ({ ...prev, [field]: value }));
@@ -226,17 +287,75 @@ export default function StudentProfilePage() {
     setTimeout(() => setStatusMessage(''), 3500);
   };
 
-  const handlePhotoUpload = (e) => {
-    // Photo/signature document upload has no backend endpoint yet — keep disabled.
-    showFeedback('Document upload is not available yet. Contact Admin Head.');
-    return;
+  // ─── Student document uploads ───
+  // Policy: ALLOTMENT_LETTER max 200 KB, all other images/documents max 150 KB.
+  const [uploadingDoc, setUploadingDoc] = useState(null);
+  const docs = student?.documents || [];
+  const latestDocOf = (type) =>
+    docs.filter((d) => d.document_type === type).sort((a, b) => (b.version || 0) - (a.version || 0))[0] || null;
+  const allotmentDoc = latestDocOf('ALLOTMENT_LETTER');
+
+  const validateDocFile = (file, docType) => {
+    const limit = docType === 'ALLOTMENT_LETTER' ? 200 * 1024 : 150 * 1024;
+    if (file.size > limit) {
+      showFeedback(`${docType} exceeds ${(limit / 1024).toFixed(0)} KB (selected ${(file.size / 1024).toFixed(1)} KB). Please compress and retry.`);
+      return false;
+    }
+    return true;
   };
 
-  const handleSignatureUpload = (e) => {
-    // Photo/signature document upload has no backend endpoint yet — keep disabled.
-    showFeedback('Document upload is not available yet. Contact Admin Head.');
-    return;
+  const handleDocumentUpload = async (e, docType) => {
+    const file = e.target?.files?.[0];
+    if (!file) return;
+    if (!validateDocFile(file, docType)) {
+      e.target.value = '';
+      return;
+    }
+    if (!canEdit) {
+      showFeedback('Read-only view. Only the student can upload to their own profile.');
+      e.target.value = '';
+      return;
+    }
+    try {
+      setUploadingDoc(docType);
+      if (id) {
+        await studentApi.uploadStudentDocument(id, file, docType, `${docType} upload`);
+      } else {
+        await studentApi.uploadMyDocument(file, docType, `${docType} upload`);
+      }
+      showFeedback(`${docType} uploaded successfully.`);
+      setRetryCount((c) => c + 1);
+    } catch (err) {
+      const data = err.response?.data;
+      showFeedback(data?.file?.join?.(' ') || data?.detail || data?.document_type?.join?.(' ') || 'Upload failed. Check file size/type.');
+    } finally {
+      setUploadingDoc(null);
+      if (e.target) e.target.value = '';
+    }
   };
+
+  const handleDownloadDoc = async (doc) => {
+    if (!doc) return;
+    try {
+      const res = id
+        ? await studentApi.downloadStudentDocument(id, doc.id)
+        : await studentApi.downloadMyDocument(doc.id);
+      const blob = new Blob([res.data], { type: doc.mime_type || 'application/octet-stream' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${doc.document_type}.${(doc.mime_type || '').includes('pdf') ? 'pdf' : 'jpg'}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      showFeedback('Download failed. File may be missing on server.');
+    }
+  };
+
+  const handlePhotoUpload = (e) => handleDocumentUpload(e, 'PHOTO');
+  const handleSignatureUpload = (e) => handleDocumentUpload(e, 'SIGNATURE');
 
   const MONTHS = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -245,22 +364,57 @@ export default function StudentProfilePage() {
 
   const handleSaveProfile = async () => {
     if (!canEdit || saving) return;
+    if (!isEditing) {
+      showFeedback('Click Edit Profile first to make changes.');
+      return;
+    }
     setSaving(true);
     try {
+      const parentMobile = String(formData.parentMobile || '').trim().replace(/[\s-]/g, '');
+      if (parentMobile && !/^\+?\d{10,15}$/.test(parentMobile)) {
+        showFeedback('Enter a valid 10-digit Parent Mobile No.');
+        setSaving(false);
+        return;
+      }
       const monthNum = String(MONTHS.indexOf(formData.dobMonth) + 1).padStart(2, '0');
       const dayNum = String(formData.dobDay).padStart(2, '0');
+      const scholarshipYes = formData.scholarshipApplied === 'Yes';
+      if (scholarshipYes && !SCHOLARSHIP_CODE_VALUES.has(formData.scholarshipType)) {
+        showFeedback('Select a Scholarship Type when Scholarship Applied is Yes.');
+        setSaving(false);
+        return;
+      }
+      const annualIncomeRaw = String(formData.annualIncome || '').replace(/[,₹\s]/g, '');
+      if (annualIncomeRaw && !/^\d+$/.test(annualIncomeRaw)) {
+        showFeedback('Enter Parent Annual Income as a number.');
+        setSaving(false);
+        return;
+      }
+      const studentEmailRaw = String(formData.studentEmail || '').trim();
+      if (studentEmailRaw && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(studentEmailRaw)) {
+        showFeedback('Enter a valid Student Email address.');
+        setSaving(false);
+        return;
+      }
       const payload = {
         personal: {
           place_of_birth: formData.placeOfBirth,
-          gender: String(formData.gender || '').toUpperCase(),
           date_of_birth: `${formData.dobYear}-${monthNum}-${dayNum}`,
           student_mobile: formData.aadhaarMobile,
-          caste: formData.caste,
-          marital_status: formData.maritalStatus,
+          student_email: studentEmailRaw,
+          // Never overwrite a stored value with an untouched blank select.
+          ...(formData.maritalStatus ? { marital_status: formData.maritalStatus } : {}),
           abc_id: formData.abcId,
         },
+        scholarship_applied: scholarshipYes,
+        scholarship_type: scholarshipYes ? formData.scholarshipType : 'NONE',
         guardians: [
-          ...(formData.fatherName ? [{ relationship: 'FATHER', name: formData.fatherName }] : []),
+          ...(formData.fatherName || parentMobile || annualIncomeRaw ? [{
+            relationship: 'FATHER',
+            name: formData.fatherName || undefined,
+            mobile: parentMobile || undefined,
+            ...(annualIncomeRaw ? { annual_income: annualIncomeRaw } : {}),
+          }] : []),
           ...(formData.motherName ? [{ relationship: 'MOTHER', name: formData.motherName }] : []),
         ],
         ...(formData.address ? {
@@ -284,7 +438,9 @@ export default function StudentProfilePage() {
       };
       const res = await studentApi.updateMyProfile(payload);
       const changed = res.data?.changed?.length ? `: ${res.data.changed.join(', ')}` : '';
-      showFeedback(`Profile updated successfully${changed}.`);
+      showFeedback(`Profile updated successfully${changed}. Profile locked.`);
+      setIsEditing(false);
+      setSnapshot(null);
       setRetryCount((c) => c + 1);
     } catch (err) {
       const data = err.response?.data;
@@ -353,22 +509,52 @@ export default function StudentProfilePage() {
         title="Student Profile"
         actions={
           <div style={{ display: 'flex', gap: '0.625rem', flexWrap: 'wrap' }}>
-            {canEdit && (
+            {canEdit && !isEditing && (
               <button
                 className="edvana-btn edvana-btn-primary"
-                onClick={handleSaveProfile}
-                disabled={saving}
+                onClick={startEditing}
                 style={{
                   backgroundColor: '#ffffff',
                   color: '#1d4ed8',
                   borderColor: '#ffffff',
                   fontWeight: 700,
                 }}
-                title="Save your contact, address, guardian and bank changes"
+                title="Unlock editable fields"
               >
-                <CheckCircle2 size={16} />
-                <span>{saving ? 'Saving…' : 'Save Changes'}</span>
+                <span>Edit Profile</span>
               </button>
+            )}
+            {canEdit && isEditing && (
+              <>
+                <button
+                  className="edvana-btn edvana-btn-secondary"
+                  onClick={cancelEditing}
+                  disabled={saving}
+                  style={{
+                    backgroundColor: 'rgba(255, 255, 255, 0.18)',
+                    color: '#ffffff',
+                    borderColor: 'rgba(255, 255, 255, 0.35)',
+                  }}
+                  title="Discard changes and lock again"
+                >
+                  <span>Cancel</span>
+                </button>
+                <button
+                  className="edvana-btn edvana-btn-primary"
+                  onClick={handleSaveProfile}
+                  disabled={saving}
+                  style={{
+                    backgroundColor: '#ffffff',
+                    color: '#1d4ed8',
+                    borderColor: '#ffffff',
+                    fontWeight: 700,
+                  }}
+                  title="Save your contact, address, guardian and bank changes and lock"
+                >
+                  <CheckCircle2 size={16} />
+                  <span>{saving ? 'Saving…' : 'Save Changes'}</span>
+                </button>
+              </>
             )}
             {id && (
               <button
@@ -412,11 +598,11 @@ export default function StudentProfilePage() {
         {canEdit ? (
           <div
             style={{
-              backgroundColor: '#eff6ff',
-              border: '1px solid #bfdbfe',
+              backgroundColor: isEditing ? '#eff6ff' : '#f8fafc',
+              border: `1px solid ${isEditing ? '#bfdbfe' : '#e2e8f0'}`,
               borderRadius: '8px',
               padding: '0.75rem 1rem',
-              color: '#1e40af',
+              color: isEditing ? '#1e40af' : '#475569',
               fontSize: '0.8125rem',
               fontWeight: 500,
               display: 'flex',
@@ -425,8 +611,12 @@ export default function StudentProfilePage() {
               marginBottom: '1.25rem',
             }}
           >
-            <Info size={18} style={{ color: '#2563eb', flexShrink: 0 }} />
-            <span>You can update your contact, address, guardian and bank details, then press Save Changes. Name, enrollment, admission and marksheet fields are locked.</span>
+            <Info size={18} style={{ color: isEditing ? '#2563eb' : '#64748b', flexShrink: 0 }} />
+            <span>
+              {isEditing
+                ? 'Editing unlocked. Update your contact, address, guardian and bank details, then press Save Changes to finalize and lock. Name, enrollment, admission and marksheet fields stay locked.'
+                : 'Profile is locked. Click Edit Profile to start editing.'}
+            </span>
           </div>
         ) : (
           <div
@@ -510,7 +700,7 @@ export default function StudentProfilePage() {
                         color: '#1e293b',
                       }}
                     >
-                      {student.enrollment_no || 'ENR2025COMP002'}
+                      {student.enrollment_no || '—'}
                     </span>
                   </div>
                 </div>
@@ -593,16 +783,82 @@ export default function StudentProfilePage() {
                         marginBottom: '0.375rem',
                       }}
                     >
+                      Student Email
+                    </label>
+                    <input
+                      type="email"
+                      className="edvana-input"
+                      disabled={fieldsLocked}
+                      placeholder="e.g. student@example.com"
+                      value={formData.studentEmail}
+                      onChange={(e) => handleInputChange('studentEmail', e.target.value)}
+                    />
+                    <span
+                      style={{
+                        fontSize: '0.75rem',
+                        color: '#64748b',
+                        marginTop: '0.25rem',
+                        display: 'block',
+                      }}
+                    >
+                      Shown in the sidebar next to the mail icon. Leave blank to show –.
+                    </span>
+                  </div>
+
+                  <div>
+                    <label
+                      style={{
+                        display: 'block',
+                        fontSize: '0.8125rem',
+                        fontWeight: 600,
+                        color: '#334155',
+                        marginBottom: '0.375rem',
+                      }}
+                    >
                       Father's Name
                     </label>
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled={!canEdit}
+                      disabled={fieldsLocked}
                       placeholder="Father's full name"
                       value={formData.fatherName}
                       onChange={(e) => handleInputChange('fatherName', e.target.value)}
                     />
+                  </div>
+
+                  <div>
+                    <label
+                      style={{
+                        display: 'block',
+                        fontSize: '0.8125rem',
+                        fontWeight: 600,
+                        color: '#334155',
+                        marginBottom: '0.375rem',
+                      }}
+                    >
+                      Parent Mobile No.
+                    </label>
+                    <input
+                      type="tel"
+                      className="edvana-input"
+                      disabled={fieldsLocked}
+                      placeholder="10-digit parent mobile"
+                      inputMode="numeric"
+                      maxLength={15}
+                      value={formData.parentMobile}
+                      onChange={(e) => handleInputChange('parentMobile', e.target.value.replace(/[^\d+]/g, '').slice(0, 15))}
+                    />
+                    <span
+                      style={{
+                        fontSize: '0.75rem',
+                        color: '#64748b',
+                        marginTop: '0.25rem',
+                        display: 'block',
+                      }}
+                    >
+                      Shown on the fee-desk Candidate Details card.
+                    </span>
                   </div>
 
                   <div>
@@ -620,7 +876,7 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled={!canEdit}
+                      disabled={fieldsLocked}
                       placeholder="Mother's name"
                       value={formData.motherName}
                       onChange={(e) => handleInputChange('motherName', e.target.value)}
@@ -642,7 +898,8 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled={!canEdit}
+                      disabled
+                      title="Locked: sub-caste from your admission record. Contact Admin Head for corrections."
                       placeholder="e.g. Maratha, Kunbi, Sutar"
                       value={formData.caste}
                       onChange={(e) => handleInputChange('caste', e.target.value)}
@@ -663,10 +920,11 @@ export default function StudentProfilePage() {
                     </label>
                     <select
                       className="edvana-select"
-                      disabled={!canEdit}
+                      disabled={fieldsLocked}
                       value={formData.maritalStatus}
                       onChange={(e) => handleInputChange('maritalStatus', e.target.value)}
                     >
+                      <option value="">Select marital status</option>
                       <option value="Unmarried">Unmarried</option>
                       <option value="Married">Married</option>
                     </select>
@@ -687,7 +945,7 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled={!canEdit}
+                      disabled={fieldsLocked}
                       placeholder="e.g. 123-456-789-012"
                       value={formData.abcId}
                       onChange={(e) => handleInputChange('abcId', e.target.value)}
@@ -719,7 +977,7 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled={!canEdit}
+                      disabled={fieldsLocked}
                       placeholder="e.g. Kolhapur"
                       value={formData.placeOfBirth}
                       onChange={(e) => handleInputChange('placeOfBirth', e.target.value)}
@@ -740,7 +998,7 @@ export default function StudentProfilePage() {
                     </label>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.5rem' }}>
                       <select
-                        className="edvana-select" disabled={!canEdit}
+                        className="edvana-select" disabled={fieldsLocked}
                         value={formData.dobDay}
                         onChange={(e) => handleInputChange('dobDay', e.target.value)}
                       >
@@ -751,7 +1009,7 @@ export default function StudentProfilePage() {
                         ))}
                       </select>
                       <select
-                        className="edvana-select" disabled={!canEdit}
+                        className="edvana-select" disabled={fieldsLocked}
                         value={formData.dobMonth}
                         onChange={(e) => handleInputChange('dobMonth', e.target.value)}
                       >
@@ -775,7 +1033,7 @@ export default function StudentProfilePage() {
                         ))}
                       </select>
                       <select
-                        className="edvana-select" disabled={!canEdit}
+                        className="edvana-select" disabled={fieldsLocked}
                         value={formData.dobYear}
                         onChange={(e) => handleInputChange('dobYear', e.target.value)}
                       >
@@ -801,7 +1059,8 @@ export default function StudentProfilePage() {
                       Gender <span style={{ color: '#ef4444' }}>*</span>
                     </label>
                     <select
-                      className="edvana-select" disabled={!canEdit}
+                      className="edvana-select" disabled
+                      title="Locked: gender from your admission record. Contact Admin Head for corrections."
                       value={formData.gender}
                       onChange={(e) => handleInputChange('gender', e.target.value)}
                     >
@@ -844,7 +1103,7 @@ export default function StudentProfilePage() {
                       className="edvana-input"
                       disabled
                       title="Locked: authoritative admission year."
-                      value={formData.admittedYear || student.admission_year_code || '2024-25'}
+                      value={formData.admittedYear || student.admission_year_code || ''}
                     />
                   </div>
 
@@ -865,7 +1124,7 @@ export default function StudentProfilePage() {
                       className="edvana-input"
                       disabled
                       title="Locked: admission record."
-                      value={formData.admissionType || (isDSYStudent ? 'Direct Second Year (DSE)' : 'First Year (CAP)')}
+                      value={formData.admissionType || ''}
                     />
                   </div>
 
@@ -886,7 +1145,7 @@ export default function StudentProfilePage() {
                       className="edvana-input"
                       disabled
                       title="Locked: official candidate category."
-                      value={formData.category || 'OPEN'}
+                      value={formData.category || ''}
                     />
                   </div>
 
@@ -907,7 +1166,7 @@ export default function StudentProfilePage() {
                       className="edvana-input"
                       disabled
                       title="Locked: admission allotment quota."
-                      value={formData.allottedSeatType || formData.category || 'General'}
+                      value={formData.allottedSeatType || formData.category || ''}
                     />
                   </div>
 
@@ -925,9 +1184,17 @@ export default function StudentProfilePage() {
                     </label>
                     <select
                       className="edvana-select"
-                      disabled={!canEdit}
+                      disabled={fieldsLocked}
                       value={formData.scholarshipApplied}
-                      onChange={(e) => handleInputChange('scholarshipApplied', e.target.value)}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        // Applied=No forces type back to None (server enforces too).
+                        setFormData((prev) => ({
+                          ...prev,
+                          scholarshipApplied: v,
+                          scholarshipType: v === 'No' ? 'NONE' : prev.scholarshipType === 'NONE' ? '' : prev.scholarshipType,
+                        }));
+                      }}
                     >
                       <option value="Yes">Yes</option>
                       <option value="No">No</option>
@@ -948,17 +1215,19 @@ export default function StudentProfilePage() {
                     </label>
                     <select
                       className="edvana-select"
-                      disabled={!canEdit}
+                      disabled={fieldsLocked || formData.scholarshipApplied === 'No'}
+                      title={formData.scholarshipApplied === 'No' ? 'Set Scholarship Applied to Yes to choose a type.' : undefined}
                       value={formData.scholarshipType}
                       onChange={(e) => handleInputChange('scholarshipType', e.target.value)}
                     >
-                      <option value="None">None</option>
-                      <option value="EBC">EBC (Economically Backward Class)</option>
-                      <option value="OBC Freeship">OBC Freeship</option>
-                      <option value="SC Scholarship">SC Scholarship</option>
-                      <option value="ST Scholarship">ST Scholarship</option>
-                      <option value="NT-C">NT-C</option>
-                      <option value="Minority Scholarship">Minority Scholarship</option>
+                      {formData.scholarshipApplied === 'Yes' && !SCHOLARSHIP_CODE_VALUES.has(formData.scholarshipType) && (
+                        <option value="">Select scholarship type</option>
+                      )}
+                      {SCHOLARSHIP_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value} disabled={o.value === 'NONE' && formData.scholarshipApplied === 'Yes'}>
+                          {o.label}
+                        </option>
+                      ))}
                     </select>
                   </div>
 
@@ -977,12 +1246,60 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled={!canEdit}
+                      disabled={fieldsLocked}
                       placeholder="e.g. ₹ 1,50,000"
                       value={formData.annualIncome}
                       onChange={(e) => handleInputChange('annualIncome', e.target.value)}
                     />
                   </div>
+                </div>
+
+                {/* Upload Allotment Letter (CAP) — max 200 KB */}
+                <div style={{ borderTop: '1px solid #f1f5f9', marginTop: '1.25rem', paddingTop: '1.25rem' }}>
+                  <label
+                    style={{
+                      display: 'block',
+                      fontSize: '0.8125rem',
+                      fontWeight: 600,
+                      color: '#334155',
+                      marginBottom: '0.375rem',
+                    }}
+                  >
+                    Upload Institute Allotment Letter <span style={{ color: '#ef4444' }}>*</span>{' '}
+                    <span style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 400 }}>
+                      (PDF / JPG / PNG, max 200 KB)
+                    </span>
+                  </label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'center' }}>
+                    <input
+                      type="file"
+                      accept=".pdf,.jpg,.jpeg,.png"
+                      className="edvana-input"
+                      disabled={!canEdit || uploadingDoc === 'ALLOTMENT_LETTER'}
+                      title={canEdit ? 'Upload CAP allotment letter (max 200 KB)' : 'Read-only view'}
+                      style={{ padding: '0.45rem', background: '#f8fafc', maxWidth: '360px' }}
+                      onChange={(e) => handleDocumentUpload(e, 'ALLOTMENT_LETTER')}
+                    />
+                    {uploadingDoc === 'ALLOTMENT_LETTER' && (
+                      <span style={{ fontSize: '0.8rem', color: '#2563eb' }}>Uploading…</span>
+                    )}
+                    {allotmentDoc && (
+                      <button
+                        type="button"
+                        className="edvana-btn edvana-btn-outline"
+                        onClick={() => handleDownloadDoc(allotmentDoc)}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}
+                      >
+                        <FileText size={16} />
+                        <span>View/Download (v{allotmentDoc.version}, {(allotmentDoc.file_size / 1024).toFixed(1)} KB)</span>
+                      </button>
+                    )}
+                  </div>
+                  {!allotmentDoc && (
+                    <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.35rem' }}>
+                      No allotment letter on file yet.
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -1006,7 +1323,7 @@ export default function StudentProfilePage() {
                     Address <span style={{ color: '#ef4444' }}>*</span>
                   </label>
                   <textarea
-                    className="edvana-textarea" disabled={!canEdit}
+                    className="edvana-textarea" disabled={fieldsLocked}
                     rows={3}
                     value={formData.address}
                     onChange={(e) => handleInputChange('address', e.target.value)}
@@ -1033,7 +1350,7 @@ export default function StudentProfilePage() {
                     </label>
                     <input
                       type="text"
-                      className="edvana-input" disabled={!canEdit}
+                      className="edvana-input" disabled={fieldsLocked}
                       value={formData.district}
                       onChange={(e) => handleInputChange('district', e.target.value)}
                     />
@@ -1052,7 +1369,7 @@ export default function StudentProfilePage() {
                     </label>
                     <input
                       type="text"
-                      className="edvana-input" disabled={!canEdit}
+                      className="edvana-input" disabled={fieldsLocked}
                       value={formData.state}
                       onChange={(e) => handleInputChange('state', e.target.value)}
                     />
@@ -1071,7 +1388,7 @@ export default function StudentProfilePage() {
                     </label>
                     <input
                       type="text"
-                      className="edvana-input" disabled={!canEdit}
+                      className="edvana-input" disabled={fieldsLocked}
                       value={formData.pincode}
                       onChange={(e) => handleInputChange('pincode', e.target.value)}
                     />
@@ -1112,16 +1429,22 @@ export default function StudentProfilePage() {
                     </label>
                     <input
                       type="file"
-                      accept="image/*"
+                      accept=".jpg,.jpeg,.png"
                       className="edvana-input"
-                      disabled
-                      title="Document upload not available yet."
+                      disabled={!canEdit || uploadingDoc === 'PHOTO'}
+                      title={canEdit ? 'Upload passport photo (max 150 KB)' : 'Read-only view'}
                       style={{ padding: '0.5rem', background: '#f8fafc' }}
                       onChange={handlePhotoUpload}
                     />
                     <p style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.5rem' }}>
-                      Max file size 200kb. Formats: .jpg, .png. White or light background recommended.
+                      Max file size 150 KB. Formats: .jpg, .png. White or light background recommended.
+                      {latestDocOf('PHOTO') && ` On file: v${latestDocOf('PHOTO').version} (${(latestDocOf('PHOTO').file_size / 1024).toFixed(1)} KB).`}
                     </p>
+                    {latestDocOf('PHOTO') && (
+                      <button type="button" className="edvana-btn edvana-btn-outline" onClick={() => handleDownloadDoc(latestDocOf('PHOTO'))} style={{ marginTop: '0.5rem' }}>
+                        <span>View/Download Photo</span>
+                      </button>
+                    )}
                   </div>
 
                   <div>
@@ -1241,13 +1564,22 @@ export default function StudentProfilePage() {
                     </label>
                     <input
                       type="file"
-                      accept="image/*"
+                      accept=".jpg,.jpeg,.png"
                       className="edvana-input"
-                      disabled
-                      title="Document upload not available yet."
+                      disabled={!canEdit || uploadingDoc === 'SIGNATURE'}
+                      title={canEdit ? 'Upload signature (max 150 KB)' : 'Read-only view'}
                       style={{ padding: '0.5rem', background: '#f8fafc' }}
                       onChange={handleSignatureUpload}
                     />
+                    <p style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.5rem' }}>
+                      Max file size 150 KB. Formats: .jpg, .png.
+                      {latestDocOf('SIGNATURE') && ` On file: v${latestDocOf('SIGNATURE').version}.`}
+                    </p>
+                    {latestDocOf('SIGNATURE') && (
+                      <button type="button" className="edvana-btn edvana-btn-outline" onClick={() => handleDownloadDoc(latestDocOf('SIGNATURE'))} style={{ marginTop: '0.5rem' }}>
+                        <span>View/Download Signature</span>
+                      </button>
+                    )}
                   </div>
 
                   <div>
@@ -1291,7 +1623,7 @@ export default function StudentProfilePage() {
                             fontStyle: 'italic',
                           }}
                         >
-                          {student.first_name || 'Rohit'}
+                          {student.first_name || '—'}
                         </span>
                       )}
                     </div>
@@ -1344,7 +1676,7 @@ export default function StudentProfilePage() {
                 >
                   <li>
                     Scan Aadhaar using a good quality scanner with min. 100dpi so that the file
-                    size should not be more than 100kb.
+                    size should not be more than 150 KB.
                   </li>
                   <li>Save the file in .pdf format on local machine.</li>
                   <li>
@@ -1427,7 +1759,7 @@ export default function StudentProfilePage() {
                     </label>
                     <input
                       type="text"
-                      className="edvana-input" disabled={!canEdit}
+                      className="edvana-input" disabled={fieldsLocked}
                       value={formData.aadhaarMobile}
                       onChange={(e) => handleInputChange('aadhaarMobile', e.target.value)}
                     />
@@ -1450,13 +1782,16 @@ export default function StudentProfilePage() {
                     </label>
                     <input
                       type="file"
-                      accept=".pdf"
+                      accept=".pdf,.jpg,.jpeg,.png"
                       className="edvana-input"
-                      disabled
-                      title="Document upload not available yet."
+                      disabled={!canEdit || uploadingDoc === 'AADHAAR'}
+                      title={canEdit ? 'Upload Aadhaar (max 150 KB)' : 'Read-only view'}
                       style={{ padding: '0.45rem', background: '#f8fafc' }}
-                      onChange={() => showFeedback('Aadhaar document selected.')}
+                      onChange={(e) => handleDocumentUpload(e, 'AADHAAR')}
                     />
+                    <p style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.35rem' }}>
+                      Max 150 KB. {latestDocOf('AADHAAR') ? `On file: v${latestDocOf('AADHAAR').version}.` : 'No file yet.'}
+                    </p>
                   </div>
                 </div>
 
@@ -1464,11 +1799,12 @@ export default function StudentProfilePage() {
                   <button
                     type="button"
                     className="edvana-btn edvana-btn-outline"
-                    onClick={() => showFeedback('Aadhaar document is on official file.')}
+                    disabled={!latestDocOf('AADHAAR')}
+                    onClick={() => latestDocOf('AADHAAR') && handleDownloadDoc(latestDocOf('AADHAAR'))}
                     style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}
                   >
                     <FileText size={16} />
-                    <span>View/Download existing Aadhaar PDF</span>
+                    <span>{latestDocOf('AADHAAR') ? 'View/Download existing Aadhaar' : 'No Aadhaar on file'}</span>
                   </button>
                 </div>
               </div>
@@ -1507,7 +1843,7 @@ export default function StudentProfilePage() {
                   </label>
                   <input
                     type="text"
-                    className="edvana-input" disabled={!canEdit}
+                    className="edvana-input" disabled={fieldsLocked}
                     value={formData.bankHolderName}
                     onChange={(e) => handleInputChange('bankHolderName', e.target.value)}
                   />
@@ -1527,7 +1863,7 @@ export default function StudentProfilePage() {
                   </label>
                   <input
                     type="text"
-                    className="edvana-input" disabled={!canEdit}
+                    className="edvana-input" disabled={fieldsLocked}
                     value={formData.bankName}
                     onChange={(e) => handleInputChange('bankName', e.target.value)}
                   />
@@ -1547,7 +1883,7 @@ export default function StudentProfilePage() {
                   </label>
                   <input
                     type="text"
-                    className="edvana-input" disabled={!canEdit}
+                    className="edvana-input" disabled={fieldsLocked}
                     value={formData.branchName}
                     onChange={(e) => handleInputChange('branchName', e.target.value)}
                   />
@@ -1567,7 +1903,7 @@ export default function StudentProfilePage() {
                   </label>
                   <input
                     type="text"
-                    className="edvana-input" disabled={!canEdit}
+                    className="edvana-input" disabled={fieldsLocked}
                     value={formData.accountNo}
                     onChange={(e) => handleInputChange('accountNo', e.target.value)}
                   />
@@ -1587,7 +1923,7 @@ export default function StudentProfilePage() {
                   </label>
                   <input
                     type="text"
-                    className="edvana-input" disabled={!canEdit}
+                    className="edvana-input" disabled={fieldsLocked}
                     value={formData.ifscCode}
                     onChange={(e) => handleInputChange('ifscCode', e.target.value)}
                   />
@@ -1598,10 +1934,10 @@ export default function StudentProfilePage() {
                 <button
                   type="button"
                   className="edvana-btn edvana-btn-primary"
-                  disabled={!canEdit || saving}
-                  title={canEdit ? 'Save all profile changes' : 'Only the student can edit their own profile'}
+                  disabled={fieldsLocked || saving}
+                  title={fieldsLocked ? 'Click Edit Profile first' : 'Save all profile changes and lock'}
                   onClick={handleSaveProfile}
-                  style={{ padding: '0.625rem 1.5rem', fontWeight: 600, opacity: !canEdit ? 0.55 : 1 }}
+                  style={{ padding: '0.625rem 1.5rem', fontWeight: 600, opacity: fieldsLocked ? 0.55 : 1 }}
                 >
                   {saving ? 'Saving…' : 'Save Changes'}
                 </button>
@@ -1653,7 +1989,7 @@ export default function StudentProfilePage() {
                   <li>
                     Upload clear, self-attested scanned copies in .pdf, .jpg, or .png format.
                   </li>
-                  <li>File size should not exceed 500kb per marksheet document.</li>
+                  <li>File size should not exceed 150 KB per marksheet document.</li>
                   <li>
                     Verify that candidate name, seat/roll number, passing marks, and official board
                     stamp are clearly legible.
@@ -1855,24 +2191,28 @@ export default function StudentProfilePage() {
                     </label>
                     <input
                       type="file"
-                      accept=".pdf,image/*"
+                      accept=".pdf,.jpg,.jpeg,.png"
                       className="edvana-input"
-                      disabled
-                      title="Document upload not available yet."
+                      disabled={!canEdit || uploadingDoc === 'SSC_MARKSHEET'}
+                      title={canEdit ? 'Upload SSC marksheet (max 150 KB)' : 'Read-only view'}
                       style={{ padding: '0.45rem', background: '#f8fafc' }}
-                      onChange={() => showFeedback('SSC Marksheet selected.')}
+                      onChange={(e) => handleDocumentUpload(e, 'SSC_MARKSHEET')}
                     />
+                    <p style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.35rem' }}>
+                      Max 150 KB. {latestDocOf('SSC_MARKSHEET') ? `On file: v${latestDocOf('SSC_MARKSHEET').version}.` : 'No file yet.'}
+                    </p>
                   </div>
 
                   <div>
                     <button
                       type="button"
                       className="edvana-btn edvana-btn-outline"
-                      onClick={() => showFeedback('Opening verified SSC Marksheet...')}
+                      disabled={!latestDocOf('SSC_MARKSHEET')}
+                      onClick={() => latestDocOf('SSC_MARKSHEET') && handleDownloadDoc(latestDocOf('SSC_MARKSHEET'))}
                       style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}
                     >
                       <FileText size={16} />
-                      <span>View Uploaded SSC Marksheet</span>
+                      <span>{latestDocOf('SSC_MARKSHEET') ? 'View Uploaded SSC Marksheet' : 'No SSC on file'}</span>
                     </button>
                   </div>
                 </div>
@@ -2125,24 +2465,28 @@ export default function StudentProfilePage() {
                     </label>
                     <input
                       type="file"
-                      accept=".pdf,image/*"
+                      accept=".pdf,.jpg,.jpeg,.png"
                       className="edvana-input"
-                      disabled
-                      title="Document upload not available yet."
+                      disabled={!canEdit || uploadingDoc === (isDSYStudent ? 'DIPLOMA_MARKSHEET' : 'HSC_MARKSHEET')}
+                      title={canEdit ? 'Upload marksheet (max 150 KB)' : 'Read-only view'}
                       style={{ padding: '0.45rem', background: '#f8fafc' }}
-                      onChange={() => showFeedback(isDSYStudent ? 'Diploma Marksheet selected.' : 'HSC Marksheet selected.')}
+                      onChange={(e) => handleDocumentUpload(e, isDSYStudent ? 'DIPLOMA_MARKSHEET' : 'HSC_MARKSHEET')}
                     />
+                    <p style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.35rem' }}>
+                      Max 150 KB. {(() => { const d = latestDocOf(isDSYStudent ? 'DIPLOMA_MARKSHEET' : 'HSC_MARKSHEET'); return d ? `On file: v${d.version}.` : 'No file yet.'; })()}
+                    </p>
                   </div>
 
                   <div>
                     <button
                       type="button"
                       className="edvana-btn edvana-btn-outline"
-                      onClick={() => showFeedback(isDSYStudent ? 'Opening verified Diploma Marksheet...' : 'Opening verified HSC Marksheet...')}
+                      disabled={!latestDocOf(isDSYStudent ? 'DIPLOMA_MARKSHEET' : 'HSC_MARKSHEET')}
+                      onClick={() => { const d = latestDocOf(isDSYStudent ? 'DIPLOMA_MARKSHEET' : 'HSC_MARKSHEET'); if (d) handleDownloadDoc(d); }}
                       style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}
                     >
                       <FileText size={16} />
-                      <span>{isDSYStudent ? 'View Uploaded Diploma Marksheet' : 'View Uploaded HSC Marksheet'}</span>
+                      <span>{(latestDocOf(isDSYStudent ? 'DIPLOMA_MARKSHEET' : 'HSC_MARKSHEET')) ? (isDSYStudent ? 'View Uploaded Diploma Marksheet' : 'View Uploaded HSC Marksheet') : 'No marksheet on file'}</span>
                     </button>
                   </div>
                 </div>

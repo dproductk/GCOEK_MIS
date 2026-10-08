@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import resultsApi from '../../api/resultsApi';
+import academicApi from '../../api/academicApi';
 import PageHeader from '../../components/common/PageHeader';
 import Badge from '../../components/common/Badge';
 import Modal from '../../components/common/Modal';
@@ -25,6 +26,7 @@ import {
   ChevronRight,
   Award,
   Lock,
+  XCircle,
 } from 'lucide-react';
 
 export default function EligibilityVerificationPage() {
@@ -40,6 +42,7 @@ export default function EligibilityVerificationPage() {
   const [loadingClasses, setLoadingClasses] = useState(true);
   const [classesError, setClassesError] = useState(null);
   const [startingDivId, setStartingDivId] = useState(null);
+  const [promotingDivId, setPromotingDivId] = useState(null);
   const [notice, setNotice] = useState(null);
   const noticeTimer = useRef(null);
 
@@ -66,7 +69,7 @@ export default function EligibilityVerificationPage() {
   const [studentResults, setStudentResults] = useState([]);
   const [loadingStudentResults, setLoadingStudentResults] = useState(false);
   const [actionType, setActionType] = useState('TEACHER_REVIEW'); // 'TEACHER_REVIEW' | 'HOD_ENDORSE' | 'VIEW_ONLY'
-  const [reviewMode, setReviewMode] = useState(null); // null | 'APPROVE' | 'FLAG' | 'REJECT'
+  const [reviewMode, setReviewMode] = useState(null); // null | 'APPROVE' | 'FLAG' | 'FAIL'
   const [decisionRemarks, setDecisionRemarks] = useState('');
   const [submittingReview, setSubmittingReview] = useState(false);
   const [reviewError, setReviewError] = useState(null);
@@ -108,13 +111,21 @@ export default function EligibilityVerificationPage() {
     loadClassRoster(cls.division_id);
   };
 
-  const loadClassRoster = async (divisionId) => {
+  const loadClassRoster = async (divisionId, retried = false) => {
     try {
       setLoadingRoster(true);
       setRosterError(null);
       const res = await resultsApi.getClassRoster(divisionId);
       setRosterData(res.data);
+      if (res.data?.warning) showNotice(res.data.warning, 6000);
     } catch (err) {
+      const statusCode = err.response?.status;
+      // One auto-retry on transient server/network failures (e.g. server
+      // reload mid-request): idempotent GET, safe to repeat once.
+      if (!retried && (statusCode >= 500 || !err.response)) {
+        await new Promise((r) => setTimeout(r, 800));
+        return loadClassRoster(divisionId, true);
+      }
       setRosterError(err.response?.data?.detail || 'Failed to load students for this class.');
     } finally {
       setLoadingRoster(false);
@@ -146,6 +157,61 @@ export default function EligibilityVerificationPage() {
   };
 
   // Open Review / Marksheet Modal
+  const [promoteTarget, setPromoteTarget] = useState(null);
+  const [promotePreview, setPromotePreview] = useState(null);
+  const [executingPromote, setExecutingPromote] = useState(false);
+  const [selectedRepeaterStudents, setSelectedRepeaterStudents] = useState([]);
+
+  const handlePromoteClass = async (e, cls) => {
+    e.stopPropagation();
+    try {
+      setPromotingDivId(cls.division_id);
+      const preview = await academicApi.promoteClass(cls.division_id, { dry_run: true });
+      const data = preview.data || {};
+      setPromoteTarget(cls);
+      setPromotePreview(data);
+      // Pre-select failed students for the repeater class (backend preselection),
+      // falling back to the failed bucket when preselection is absent.
+      const preselected =
+        data.default_repeater?.preselected_student_ids ||
+        data.buckets?.failed?.map((s) => s.id) ||
+        [];
+      setSelectedRepeaterStudents(preselected);
+    } catch (err) {
+      showNotice(err.response?.data?.detail || 'Failed to preview promotion.', 6000);
+    } finally {
+      setPromotingDivId(null);
+    }
+  };
+
+  const handlePromoteConfirm = async () => {
+    if (!promoteTarget || !promotePreview) return;
+    const readyCount = promotePreview.ready_to_move_count ?? promotePreview.buckets?.ready_to_move?.length ?? 0;
+    const willPromote = promotePreview.will_promote ?? readyCount;
+    // Allow repeater-only promotion (ready == 0 but repeater students selected).
+    if ((promotePreview.blocked || 0) > 0) return;
+    if (readyCount === 0 && selectedRepeaterStudents.length === 0 && !willPromote) return;
+    const cls = promoteTarget;
+    try {
+      setExecutingPromote(true);
+      const res = await academicApi.promoteClass(cls.division_id, {
+        repeater_student_ids: selectedRepeaterStudents,
+      });
+      showNotice(res.data?.detail || 'Class promoted.');
+      setPromoteTarget(null);
+      setPromotePreview(null);
+      setSelectedRepeaterStudents([]);
+      await loadClasses();
+      if (selectedClass && selectedClass.division_id === cls.division_id) {
+        await loadClassRoster(cls.division_id);
+      }
+    } catch (err) {
+      showNotice(err.response?.data?.detail || 'Failed to promote class.', 6000);
+    } finally {
+      setExecutingPromote(false);
+    }
+  };
+
   const handleOpenReviewModal = (student, mode) => {
     setSelectedStudent(student);
     setActionType(mode);
@@ -165,8 +231,8 @@ export default function EligibilityVerificationPage() {
 
   const handleReviewSubmit = async (statusChoice, remarksText) => {
     if (!selectedStudent || !selectedStudent.eligibility_id) return;
-    if (statusChoice === 'FLAGGED' && !remarksText.trim()) {
-      setReviewError('Please specify the reason for flagging so the student/teacher can rectify it.');
+    if ((statusChoice === 'FLAGGED' || statusChoice === 'REJECTED') && !remarksText.trim()) {
+      setReviewError('Please specify the reason — it becomes the permanent audit record.');
       return;
     }
 
@@ -229,10 +295,26 @@ export default function EligibilityVerificationPage() {
     if (statusFilter === 'TEACHER_PENDING') return s.result_filled && s.class_teacher_status === 'PENDING';
     if (statusFilter === 'HOD_PENDING') return s.class_teacher_status === 'APPROVED' && s.hod_status === 'PENDING';
     if (statusFilter === 'FLAGGED') return s.class_teacher_status === 'FLAGGED' || s.hod_status === 'FLAGGED';
+    if (statusFilter === 'FAILED') return s.class_teacher_status === 'REJECTED' || s.hod_status === 'REJECTED';
     if (statusFilter === 'ELIGIBLE') return s.final_eligible;
 
     return true;
   });
+
+  // Promoted-out students (moved up to the next sem) stay visible at the end
+  // of this class view with their new semester. Shown only under "All
+  // Students" (+ search) so stage filters and pipeline counters stay scoped
+  // to current members.
+  const filteredPromoted = (statusFilter === 'ALL' ? (rosterData?.promoted_students || []) : []).filter((s) => {
+    const query = (searchQuery || '').trim().toLowerCase();
+    return (
+      !query ||
+      (s.student_name || '').toLowerCase().includes(query) ||
+      (s.enrollment_no && s.enrollment_no.toLowerCase().includes(query)) ||
+      (s.roll_number && s.roll_number.toLowerCase().includes(query))
+    );
+  });
+  const renderedStudents = [...filteredStudents, ...filteredPromoted];
 
   return (
     <div style={{ maxWidth: '1400px', margin: '0 auto', padding: '1.5rem 1rem' }}>
@@ -563,7 +645,27 @@ export default function EligibilityVerificationPage() {
                       </div>
 
                       {/* Action Buttons Row */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                        {/* No-teacher guard: verification needs a reviewer */}
+                        {cls.is_year_change_class && !cls.is_verification_started && (cls.has_class_teacher === false || cls.class_teacher_name === 'Unassigned') && (
+                          <span
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '0.4rem',
+                              padding: '0.55rem 1rem',
+                              borderRadius: '10px',
+                              fontSize: '0.8rem',
+                              fontWeight: 700,
+                              backgroundColor: '#fffbeb',
+                              color: '#b45309',
+                              border: '1px solid #fde68a',
+                            }}
+                            title="Assign a class teacher on the Classes & Divisions page first"
+                          >
+                            Assign a class teacher before starting verification
+                          </span>
+                        )}
                         {/* Start Verification Button */}
                         {cls.can_start_verification && !cls.is_verification_started && (
                           <button
@@ -594,6 +696,40 @@ export default function EligibilityVerificationPage() {
                             )}
                             <span>
                               {isStarting ? 'Starting...' : cls.is_verification_started ? 'Re-sync Queue' : 'Start Verification'}
+                            </span>
+                          </button>
+                        )}
+
+                        {/* Promote Class Button */}
+                        {cls.can_promote_class && cls.is_verification_started && (
+                          <button
+                            type="button"
+                            onClick={(e) => handlePromoteClass(e, cls)}
+                            disabled={promotingDivId === cls.division_id}
+                            className="edvana-btn"
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '0.45rem',
+                              padding: '0.55rem 1rem',
+                              borderRadius: '10px',
+                              fontSize: '0.85rem',
+                              fontWeight: 700,
+                              backgroundColor: '#16a34a',
+                              color: '#ffffff',
+                              border: 'none',
+                              boxShadow: '0 2px 6px rgba(22,163,74,0.25)',
+                              cursor: promotingDivId === cls.division_id ? 'not-allowed' : 'pointer',
+                              transition: 'all 0.15s ease',
+                            }}
+                          >
+                            {promotingDivId === cls.division_id ? (
+                              <RefreshCw size={14} className="animate-spin" />
+                            ) : (
+                              <GraduationCap size={14} />
+                            )}
+                            <span>
+                              {promotingDivId === cls.division_id ? 'Promoting...' : `Promote to Sem ${cls.target_semester_number}`}
                             </span>
                           </button>
                         )}
@@ -713,6 +849,24 @@ export default function EligibilityVerificationPage() {
                   <Play size={14} />
                   <span>Start Verification</span>
                 </button>
+              ) : (selectedClass.has_class_teacher === false || selectedClass.class_teacher_name === 'Unassigned') ? (
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    fontSize: '0.8rem',
+                    fontWeight: 700,
+                    padding: '0.5rem 1rem',
+                    borderRadius: '10px',
+                    backgroundColor: '#fffbeb',
+                    color: '#b45309',
+                    border: '1px solid #fde68a',
+                  }}
+                  title="Assign a class teacher on the Classes & Divisions page first"
+                >
+                  Assign a class teacher before starting verification
+                </span>
               ) : null}
             </div>
 
@@ -732,6 +886,9 @@ export default function EligibilityVerificationPage() {
                 { label: '2. Teacher Approved', value: rosterData?.students?.filter((s) => s.class_teacher_status === 'APPROVED').length || 0 },
                 { label: '3. HOD Endorsed', value: rosterData?.students?.filter((s) => s.hod_status === 'APPROVED').length || 0 },
                 { label: '4. Added to Eligible List', value: rosterData?.students?.filter((s) => s.final_eligible).length || 0 },
+                ...((rosterData?.promoted_students || []).length > 0
+                  ? [{ label: `5. Promoted to Sem ${rosterData.target_semester_number}`, value: rosterData.promoted_students.length }]
+                  : []),
               ].map((stat, idx) => (
                 <div
                   key={idx}
@@ -785,6 +942,7 @@ export default function EligibilityVerificationPage() {
                 { id: 'TEACHER_PENDING', label: 'Needs Teacher Review' },
                 { id: 'HOD_PENDING', label: 'Needs HOD Review' },
                 { id: 'FLAGGED', label: 'Flagged' },
+                { id: 'FAILED', label: 'Failed' },
                 { id: 'ELIGIBLE', label: 'Eligible List' },
               ].map((f) => (
                 <button
@@ -815,7 +973,7 @@ export default function EligibilityVerificationPage() {
             <LoadingState message="Loading class student records..." />
           ) : rosterError ? (
             <ErrorState message={rosterError} onRetry={() => loadClassRoster(selectedClass.division_id)} />
-          ) : filteredStudents.length === 0 ? (
+          ) : renderedStudents.length === 0 ? (
             <EmptyState
               title="No Students Matching Filters"
               description="No student records match the active search query or status filter."
@@ -836,8 +994,8 @@ export default function EligibilityVerificationPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredStudents.map((s) => (
-                      <tr key={s.student_id}>
+                    {renderedStudents.map((s) => (
+                      <tr key={s.student_id} style={s.moved_up ? { backgroundColor: '#f0fdf4' } : undefined}>
                         {/* Roll Number */}
                         <td style={{ textAlign: 'center', fontWeight: 700, color: '#334155', fontFamily: 'var(--edvana-font-mono)' }}>
                           {s.roll_number}
@@ -850,6 +1008,25 @@ export default function EligibilityVerificationPage() {
                           </div>
                           <div style={{ fontSize: '0.75rem', color: '#64748b', fontFamily: 'var(--edvana-font-mono)' }}>
                             PRN: {s.enrollment_no || '—'}
+                          </div>
+                          <div style={{ marginTop: '2px' }}>
+                            <span
+                              title={s.current_semester !== selectedClass?.semester_number ? 'Promoted to next semester' : 'Current semester'}
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                fontSize: '0.7rem',
+                                fontWeight: 700,
+                                padding: '0.1rem 0.5rem',
+                                borderRadius: '6px',
+                                backgroundColor: s.current_semester !== selectedClass?.semester_number ? '#f0fdf4' : '#eff6ff',
+                                color: s.current_semester !== selectedClass?.semester_number ? '#15803d' : '#1d4ed8',
+                                border: s.current_semester !== selectedClass?.semester_number ? '1px solid #bbf7d0' : '1px solid #bfdbfe',
+                              }}
+                            >
+                              Sem {s.current_semester ?? selectedClass?.semester_number}
+                              {s.current_semester !== selectedClass?.semester_number ? ' · moved up' : ''}
+                            </span>
                           </div>
                         </td>
 
@@ -954,6 +1131,23 @@ export default function EligibilityVerificationPage() {
                             <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#d97706' }}>
                               Pending Review
                             </span>
+                          ) : s.class_teacher_status === 'REJECTED' ? (
+                            <span
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '0.3rem',
+                                fontSize: '0.75rem',
+                                fontWeight: 700,
+                                padding: '0.25rem 0.55rem',
+                                borderRadius: '6px',
+                                backgroundColor: '#7f1d1d',
+                                color: '#ffffff',
+                              }}
+                            >
+                              <XCircle size={12} />
+                              Failed
+                            </span>
                           ) : (
                             <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Not Started</span>
                           )}
@@ -1003,8 +1197,21 @@ export default function EligibilityVerificationPage() {
                               </span>
                             </div>
                           ) : s.hod_status === 'REJECTED' ? (
-                            <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#dc2626' }}>
-                              Rejected
+                            <span
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '0.3rem',
+                                fontSize: '0.75rem',
+                                fontWeight: 700,
+                                padding: '0.25rem 0.55rem',
+                                borderRadius: '6px',
+                                backgroundColor: '#7f1d1d',
+                                color: '#ffffff',
+                              }}
+                            >
+                              <XCircle size={12} />
+                              Failed — Not Eligible
                             </span>
                           ) : s.hod_status === 'PENDING' ? (
                             <span style={{ fontSize: '0.75rem', fontWeight: 500, color: '#64748b' }}>
@@ -1037,7 +1244,7 @@ export default function EligibilityVerificationPage() {
                             </span>
                           ) : (
                             <span style={{ fontSize: '0.75rem', color: '#94a3b8', fontStyle: 'italic' }}>
-                              Pending Approval
+                              {(s.class_teacher_status === 'REJECTED' || s.hod_status === 'REJECTED') ? 'Not Eligible' : 'Pending Approval'}
                             </span>
                           )}
                         </td>
@@ -1109,6 +1316,240 @@ export default function EligibilityVerificationPage() {
       {/* ─────────────────────────────────────────────────────────────
           MODAL 1: STUDENT RESULTS & TEACHER/HOD REVIEW MODAL
          ───────────────────────────────────────────────────────────── */}
+      {/* Promote Class confirmation */}
+      <Modal
+        isOpen={Boolean(promoteTarget && promotePreview)}
+        onClose={() => {
+          if (!executingPromote) {
+            setPromoteTarget(null);
+            setPromotePreview(null);
+            setSelectedRepeaterStudents([]);
+          }
+        }}
+        title={`Promote class to Sem ${(promotePreview?.target_semester || promotePreview?.to_semester) ?? ''}`}
+        maxWidth="680px"
+        footer={
+          <>
+            <button
+              type="button"
+              className="edvana-btn edvana-btn-secondary"
+              disabled={executingPromote}
+              onClick={() => {
+                setPromoteTarget(null);
+                setPromotePreview(null);
+                setSelectedRepeaterStudents([]);
+              }}
+              style={{ padding: '0.55rem 1rem', borderRadius: '10px', fontWeight: 600 }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="edvana-btn"
+              disabled={
+                executingPromote ||
+                (promotePreview?.blocked || 0) > 0 ||
+                ((promotePreview?.ready_to_move_count || 0) === 0 && selectedRepeaterStudents.length === 0 && !promotePreview?.will_promote)
+              }
+              onClick={handlePromoteConfirm}
+              style={{
+                padding: '0.55rem 1.1rem',
+                borderRadius: '10px',
+                fontWeight: 700,
+                backgroundColor: '#16a34a',
+                color: '#ffffff',
+                border: 'none',
+                cursor: (executingPromote || (promotePreview?.blocked || 0) > 0 || ((promotePreview?.ready_to_move_count || 0) === 0 && selectedRepeaterStudents.length === 0 && !promotePreview?.will_promote)) ? 'not-allowed' : 'pointer',
+                opacity: (promotePreview?.blocked || 0) > 0 || ((promotePreview?.ready_to_move_count || 0) === 0 && selectedRepeaterStudents.length === 0 && !promotePreview?.will_promote) ? 0.55 : 1,
+              }}
+            >
+              {executingPromote
+                ? 'Processing...'
+                : (promotePreview?.blocked || 0) > 0
+                ? `Blocked (${promotePreview.blocked} pending decision)`
+                : selectedRepeaterStudents.length > 0 && (promotePreview?.ready_to_move_count || 0) > 0
+                ? `Promote (${promotePreview.ready_to_move_count}) & Repeat (${selectedRepeaterStudents.length})`
+                : selectedRepeaterStudents.length > 0
+                ? `Move to Repeater (${selectedRepeaterStudents.length}) & Flip`
+                : `Promote (${promotePreview?.ready_to_move_count || (promotePreview?.will_promote ? 'Class' : 0)})`}
+            </button>
+          </>
+        }
+      >
+        {promotePreview && (() => {
+          const readyCount = promotePreview.ready_to_move_count ?? (promotePreview.buckets?.ready_to_move?.length || 0);
+          const alreadyCount = promotePreview.already_promoted_count ?? (promotePreview.buckets?.already_promoted?.length || 0);
+          const unpaidCount = promotePreview.fees_pending_count ?? (promotePreview.buckets?.fees_pending?.length || 0);
+          const failedCount = promotePreview.failed_count ?? (promotePreview.buckets?.failed?.length || 0);
+          const blockedCount = promotePreview.blocked ?? (promotePreview.buckets?.blocked?.length || 0);
+          const targetSem = promotePreview.target_semester || promotePreview.to_semester;
+          const fromSem = promotePreview.from_semester;
+
+          const failedList = promotePreview.buckets?.failed || [];
+          const unpaidList = promotePreview.buckets?.fees_pending || [];
+          const repeaterCandidates = [...failedList, ...unpaidList];
+
+          const activeBefore =
+            promotePreview.total_students != null
+              ? promotePreview.total_students - alreadyCount
+              : readyCount + unpaidCount + failedCount + blockedCount;
+          // Active = ready + unpaid + failed + blocked (already-promoted are a separate cohort).
+          // Remaining = those not promoted and not moved to repeater.
+          const remainingActive = activeBefore - readyCount - (selectedRepeaterStudents?.length || 0);
+          const willFlip = remainingActive === 0 && blockedCount === 0;
+
+          const toggleRepeaterStudent = (id) => {
+            setSelectedRepeaterStudents((prev) =>
+              prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+            );
+          };
+
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              {/* 5 Distinct Bucket Stat Cards */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: '0.5rem' }}>
+                <div style={{ backgroundColor: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '10px', padding: '0.65rem 0.5rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#15803d' }}>{readyCount}</div>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: '#166534' }}>Ready to move</div>
+                </div>
+                <div style={{ backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '0.65rem 0.5rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#1d4ed8' }}>{alreadyCount}</div>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: '#1e40af' }}>Already in Sem {targetSem}</div>
+                </div>
+                <div style={{ backgroundColor: '#fffbeb', border: '1px solid #fde68a', borderRadius: '10px', padding: '0.65rem 0.5rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#b45309' }}>{unpaidCount}</div>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: '#92400e' }}>Fees pending</div>
+                </div>
+                <div style={{ backgroundColor: '#fff1f2', border: '1px solid #fecdd3', borderRadius: '10px', padding: '0.65rem 0.5rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#e11d48' }}>{failedCount}</div>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: '#9f1239' }}>Failed</div>
+                </div>
+                <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '0.65rem 0.5rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#475569' }}>{blockedCount}</div>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: '#334155' }}>Blocked</div>
+                </div>
+              </div>
+
+              {/* Class Flip Rule Status Banner */}
+              {willFlip ? (
+                <div style={{ backgroundColor: '#f0fdf4', border: '1px solid #86efac', borderRadius: '10px', padding: '0.75rem 1rem', fontSize: '0.82rem', color: '#166534' }}>
+                  <div style={{ fontWeight: 800, marginBottom: '0.2rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <Check size={16} /> Strict 0-Active Student Flip Met
+                  </div>
+                  <div>
+                    All active Sem {fromSem} students will move to Sem {targetSem} or to the repeater class (Div R).
+                    This class will flip to <strong>Sem {targetSem}</strong> in-place!
+                  </div>
+                </div>
+              ) : (
+                <div style={{ backgroundColor: '#fef2f2', border: '1px solid #fecaca', borderRadius: '10px', padding: '0.75rem 1rem', fontSize: '0.82rem', color: '#991b1b' }}>
+                  <div style={{ fontWeight: 800, marginBottom: '0.2rem' }}>
+                    Note: {remainingActive} student(s) will remain active in Sem {fromSem}.
+                  </div>
+                  <div>
+                    In accordance with college rules, the class remains in Sem {fromSem} until all active students either promote or move to a repeater class.
+                  </div>
+                </div>
+              )}
+
+              {/* Repeater Class Creation Section */}
+              {repeaterCandidates.length > 0 && (
+                <div style={{ backgroundColor: '#f8fafc', border: '1.5px solid #cbd5e1', borderRadius: '12px', padding: '1rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                    <div>
+                      <div style={{ fontSize: '0.9rem', fontWeight: 800, color: '#0f172a' }}>
+                        Create Repeater Class
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                        Sem {fromSem} · Div {promotePreview.default_repeater?.division_name || 'R'}
+                        {promotePreview.default_repeater?.class_teacher_name ? ` · Teacher: ${promotePreview.default_repeater.class_teacher_name}` : ''}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#0369a1', backgroundColor: '#e0f2fe', padding: '0.2rem 0.6rem', borderRadius: '6px' }}>
+                      {selectedRepeaterStudents.length} selected for Repeater
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '0.78rem', color: '#475569', marginBottom: '0.75rem' }}>
+                    Move failed and unpaid students into the repeater division so they don't block the class transition.
+                    Failed students are pre-selected; unpaid students can optionally be moved.
+                  </div>
+
+                  <div style={{ maxHeight: '180px', overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: '8px', backgroundColor: '#ffffff' }}>
+                    {repeaterCandidates.map((s) => {
+                      const isFailed = failedList.some((f) => f.id === s.id);
+                      const isChecked = selectedRepeaterStudents.includes(s.id);
+                      return (
+                        <label
+                          key={s.id}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: '0.75rem',
+                            padding: '0.5rem 0.85rem',
+                            borderBottom: '1px solid #f1f5f9',
+                            fontSize: '0.8rem',
+                            cursor: 'pointer',
+                            backgroundColor: isChecked ? '#f8fafc' : '#ffffff',
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => toggleRepeaterStudent(s.id)}
+                              style={{ cursor: 'pointer' }}
+                            />
+                            <span style={{ fontWeight: 600, color: '#0f172a' }}>{s.name}</span>
+                            <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                              ({s.enrollment_no || s.roll_number || 'No ID'})
+                            </span>
+                          </div>
+                          <span
+                            style={{
+                              fontSize: '0.72rem',
+                              fontWeight: 700,
+                              padding: '0.1rem 0.45rem',
+                              borderRadius: '4px',
+                              backgroundColor: isFailed ? '#ffe4e6' : '#fef3c7',
+                              color: isFailed ? '#be123c' : '#92400e',
+                            }}
+                          >
+                            {isFailed ? 'Failed' : 'Eligible, Unpaid'}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Blocked students alert */}
+              {blockedCount > 0 && (
+                <div>
+                  <div style={{ backgroundColor: '#fef2f2', border: '1.5px solid #f87171', borderRadius: '10px', padding: '0.75rem 1rem', fontSize: '0.82rem', color: '#991b1b' }}>
+                    <div style={{ fontWeight: 800, marginBottom: '0.35rem' }}>
+                      Blocked: Verification undecided for {blockedCount} student(s).
+                    </div>
+                    <div style={{ fontWeight: 500 }}>
+                      Every student must be either eligible or failed before the class can move. Complete teacher approval or HOD endorsement first.
+                    </div>
+                  </div>
+                  <div style={{ maxHeight: '140px', overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: '8px', marginTop: '0.5rem' }}>
+                    {(promotePreview.buckets?.blocked || promotePreview.blocked_students || []).map((s) => (
+                      <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', padding: '0.45rem 0.8rem', borderBottom: '1px solid #f1f5f9', fontSize: '0.78rem' }}>
+                        <span style={{ fontWeight: 600, color: '#0f172a' }}>{s.name}</span>
+                        <span style={{ color: '#b91c1c', textAlign: 'right' }}>{s.reason || 'Verification incomplete'}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </Modal>
+
       {selectedStudent && (
         <Modal
           isOpen={Boolean(selectedStudent)}
@@ -1354,6 +1795,32 @@ export default function EligibilityVerificationPage() {
                         <Check size={15} />
                         <span>{actionType === 'HOD_ENDORSE' ? 'Approve & Endorse (Add to Eligible)' : 'Approve & Lock Record'}</span>
                       </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setReviewMode('FAIL');
+                          setDecisionRemarks('');
+                          setReviewError(null);
+                        }}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '0.4rem',
+                          padding: '0.75rem 1rem',
+                          borderRadius: '8px',
+                          fontWeight: 600,
+                          fontSize: '0.85rem',
+                          backgroundColor: '#7f1d1d',
+                          color: '#ffffff',
+                          border: '1.5px solid #7f1d1d',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <XCircle size={15} />
+                        <span>{actionType === 'HOD_ENDORSE' ? 'Fail (Not Eligible)' : 'Fail Student'}</span>
+                      </button>
                     </div>
                   </div>
                 ) : reviewMode === 'FLAG' ? (
@@ -1389,6 +1856,45 @@ export default function EligibilityVerificationPage() {
                         style={{ backgroundColor: '#dc2626', color: '#ffffff', fontWeight: 600 }}
                       >
                         {submittingReview ? 'Submitting...' : 'Confirm Flag'}
+                      </button>
+                    </div>
+                  </div>
+                ) : reviewMode === 'FAIL' ? (
+                  /* Fail form — terminal, requires reason */
+                  <div style={{ backgroundColor: '#7f1d1d', border: '1.5px solid #7f1d1d', borderRadius: '8px', padding: '1rem' }}>
+                    <div style={{ fontWeight: 700, color: '#ffffff', fontSize: '0.875rem', marginBottom: '0.3rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                      <XCircle size={15} />
+                      <span>Mark Student as Failed (Required reason)</span>
+                    </div>
+                    <div style={{ fontSize: '0.78rem', color: '#fecaca', marginBottom: '0.5rem' }}>
+                      Terminal decision — the student stays back this cycle and fees can never promote them. Only the HOD can reopen by flagging.
+                    </div>
+                    <textarea
+                      rows={2}
+                      className="edvana-input"
+                      style={{ width: '100%', fontSize: '0.85rem' }}
+                      placeholder="e.g. Failed in 2 subjects, exceeds backlog limit. To repeat the semester."
+                      value={decisionRemarks}
+                      onChange={(e) => setDecisionRemarks(e.target.value)}
+                      autoFocus
+                    />
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.6rem', marginTop: '0.75rem' }}>
+                      <button
+                        type="button"
+                        className="edvana-btn edvana-btn-secondary"
+                        onClick={() => setReviewMode(null)}
+                        disabled={submittingReview}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleReviewSubmit('REJECTED', decisionRemarks)}
+                        disabled={submittingReview}
+                        className="edvana-btn"
+                        style={{ backgroundColor: '#dc2626', color: '#ffffff', fontWeight: 600 }}
+                      >
+                        {submittingReview ? 'Submitting...' : 'Confirm Fail'}
                       </button>
                     </div>
                   </div>

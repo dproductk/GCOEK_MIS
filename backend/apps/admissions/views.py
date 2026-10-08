@@ -56,6 +56,131 @@ class AdmissionImportViewSet(viewsets.ReadOnlyModelViewSet):
             return ImportBatchDetailSerializer
         return ImportBatchSerializer
 
+    @action(detail=False, methods=['get'], url_path='pending-intakes')
+    def pending_intakes(self, request):
+        """HOD-scoped pending import cards with true single-use tracking.
+
+        Groups IMPORTED rows by (batch, department, stream, semester) and
+        reports placed vs pending via StudentEnrollment.placement_confirmed.
+
+        - SYSADMIN / ADMIN_HEAD: all departments.
+        - HOD: own department slice only (no file contents, only aggregates
+          + pending student ids for placement).
+        - Consumed batches (pending == 0) are omitted, so a batch card
+          cannot be reused once fully placed. Partially placed batches show
+          the remaining count and stay usable until empty.
+        """
+        from apps.authentication.permissions import user_has_role
+        from apps.students.models import StudentEnrollment
+
+        user = request.user
+        scopes = get_user_scopes(user)
+        is_privileged = (
+            scopes.get('is_system_wide')
+            or 'ADMIN_HEAD' in scopes.get('roles', [])
+            or user.is_superuser
+        )
+        is_hod = user_has_role(user, 'HOD')
+        if not (is_privileged or is_hod):
+            return Response(
+                {'detail': 'Permission denied.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        allowed_depts = None
+        if not is_privileged:
+            allowed_depts = {str(d) for d in scopes.get('department_ids', [])}
+            if not allowed_depts:
+                return Response([], status=status.HTTP_200_OK)
+
+        batches = list(
+            ImportBatch.objects.filter(
+                status__in=(
+                    ImportBatch.Status.COMPLETED,
+                    ImportBatch.Status.PARTIALLY_COMPLETED,
+                )
+            ).select_related('academic_year').order_by('-created_at')[:100]
+        )
+        if not batches:
+            return Response([], status=status.HTTP_200_OK)
+        batch_by_id = {str(b.id): b for b in batches}
+
+        rows = list(
+            ImportRow.objects.filter(
+                batch__in=batches,
+                validation_status=ImportRow.ValidationStatus.IMPORTED,
+                student__isnull=False,
+            ).select_related('student').only(
+                'id', 'batch_id', 'student_id',
+            )
+        )
+        if not rows:
+            return Response([], status=status.HTTP_200_OK)
+
+        student_ids = list({str(r.student_id) for r in rows})
+        enrollments = (
+            StudentEnrollment.objects.filter(
+                student_id__in=student_ids, is_current=True
+            ).select_related('department', 'semester', 'student')
+        )
+        enr_by_student = {str(e.student_id): e for e in enrollments}
+
+        # student_id -> batch_id (first IMPORTED link wins; duplicates stay linked without re-import)
+        student_batch = {}
+        for r in rows:
+            sid = str(r.student_id)
+            if sid not in student_batch:
+                student_batch[sid] = str(r.batch_id)
+
+        groups = {}
+        for sid in student_ids:
+            enr = enr_by_student.get(sid)
+            if not enr or not enr.department_id or not enr.semester:
+                continue
+            dept_id = str(enr.department_id)
+            if allowed_depts is not None and dept_id not in allowed_depts:
+                continue
+            batch_id = student_batch.get(sid)
+            batch = batch_by_id.get(batch_id)
+            if batch is None:
+                continue
+            # Stream from the live student record (row-level DSY can differ from batch header).
+            try:
+                is_dsy = bool(getattr(enr.student, 'is_direct_second_year', False))
+            except Exception:
+                is_dsy = batch.admission_type == ImportBatch.AdmissionType.DIRECT_SECOND_YEAR
+            stream = 'DSE' if is_dsy else 'FY'
+            sem_no = enr.semester.number
+            key = (batch_id, dept_id, stream, sem_no)
+            g = groups.get(key)
+            if g is None:
+                g = groups[key] = {
+                    'batch_id': batch_id,
+                    'file_name': batch.file_name,
+                    'academic_year_code': batch.academic_year.code if batch.academic_year else '',
+                    'admission_type': batch.admission_type,
+                    'stream': stream,
+                    'department_id': dept_id,
+                    'department_code': enr.department.code if enr.department else '',
+                    'semester_number': sem_no,
+                    'total': 0,
+                    'placed': 0,
+                    'pending': 0,
+                    'pending_student_ids': [],
+                }
+            g['total'] += 1
+            if enr.placement_confirmed:
+                g['placed'] += 1
+            else:
+                g['pending'] += 1
+                g['pending_student_ids'].append(sid)
+
+        # Single-use: fully consumed cards disappear.
+        result = [g for g in groups.values() if g['pending'] > 0]
+        result.sort(
+            key=lambda g: (g['academic_year_code'], g['file_name'], g['semester_number'])
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
     def get_throttles(self):
         # Import uploads capped at 10/hr per SECURITY.md Sec 10; other
         # batch actions keep the default authenticated throttle.

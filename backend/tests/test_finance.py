@@ -251,6 +251,36 @@ def test_assessment_api_validates_and_freezes_on_payment(api_client, finance_set
 
 
 @pytest.mark.django_db
+def test_untouched_zero_head_breaks_whole_save(api_client, finance_setup):
+    """Production regression: a second head whose presets exclude 0 (e.g. ID
+    card fee [50, 100]) rejects the entire assessment when the desk leaves it
+    at the form's old blind-0 default. The UI now defaults to the first
+    preset; the API must keep rejecting off-preset values with a clear
+    head-naming message."""
+    from apps.finance.models import FeeHead
+    year = finance_setup['year']
+    FeeHead.objects.create(
+        name='ID card fee', code='ID-2026', academic_year=year,
+        program=finance_setup['prog'],
+        category_quota=FeeHead.CategoryQuota.OPEN, amount=50,
+        allowed_amounts=[50, 100],
+    )
+    api_client.force_authenticate(user=finance_setup['user_acc'])
+    stu1 = finance_setup['stu1']
+    bad = api_client.post('/api/v1/finance/assessments/', {
+        'student': str(stu1.id), 'academic_year': str(year.id),
+        'fee_breakdown': {'Tuition Fee': 65000, 'ID card fee': 0},
+        'total_fee': '65000'}, format='json')
+    assert bad.status_code == status.HTTP_400_BAD_REQUEST
+    assert 'ID card fee' in str(bad.data)
+    ok = api_client.post('/api/v1/finance/assessments/', {
+        'student': str(stu1.id), 'academic_year': str(year.id),
+        'fee_breakdown': {'Tuition Fee': 65000, 'ID card fee': 50},
+        'total_fee': '65050'}, format='json')
+    assert ok.status_code in (200, 201), ok.data
+
+
+@pytest.mark.django_db
 def test_manual_marking_happy_path_receipt_backend_generated(api_client, finance_setup):
     """Manual desk happy path: Set Fee -> Mark Fee succeeds once, receipt is backend-generated."""
     import datetime
@@ -317,3 +347,30 @@ def test_manual_marking_happy_path_receipt_backend_generated(api_client, finance
     }, format='json')
     assert dup.status_code == status.HTTP_400_BAD_REQUEST
     assert PaymentLedger.objects.filter(student=stu, academic_year=year).count() == 1
+
+
+@pytest.mark.django_db
+def test_receipt_carries_fee_breakdown(api_client, finance_setup):
+    """Detailed bill: my-payments receipt must include the pay-head breakup."""
+    from apps.finance.models import StudentFeeAssessment
+    stu1 = finance_setup['stu1']
+    year = finance_setup['year']
+    StudentFeeAssessment.objects.create(
+        student=stu1, academic_year=year,
+        fee_breakdown={'Tuition Fee': '60000.00', 'Development Fee': '5000.00'},
+        total_fee=Decimal('65000.00'),
+    )
+    api_client.force_authenticate(user=finance_setup['user_stu1'])
+    response = api_client.get('/api/v1/finance/ledger/my-payments/')
+    assert response.status_code == status.HTTP_200_OK
+    row = response.data[0]
+    assert row['fee_breakdown'] == {'Tuition Fee': '60000.00', 'Development Fee': '5000.00'}
+
+
+@pytest.mark.django_db
+def test_receipt_without_assessment_yields_empty_breakdown(api_client, finance_setup):
+    """Old receipts with no assessment still serialize (empty breakup)."""
+    api_client.force_authenticate(user=finance_setup['user_stu1'])
+    response = api_client.get('/api/v1/finance/ledger/my-payments/')
+    assert response.status_code == status.HTTP_200_OK
+    assert response.data[0]['fee_breakdown'] == {}

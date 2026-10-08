@@ -232,7 +232,7 @@ class StudentAdmission(BaseModel):
     )
     application_id = models.CharField(max_length=50, db_index=True)
     admission_date = models.DateField(null=True, blank=True)
-    admission_type = models.CharField(max_length=50, default='CAP')
+    admission_type = models.CharField(max_length=50, blank=True, default='')
     category = models.CharField(
         max_length=20,
         blank=True,
@@ -241,15 +241,15 @@ class StudentAdmission(BaseModel):
         help_text='Government admission category (OPEN/OBC/SC/ST/VJ/NT-B/NT-C/NT-D/SBC/SEBC/EWS/TFWS/PWD/DEF/ORPHAN).',
     )
     candidature_type = models.CharField(max_length=50, blank=True, default='')
-    institute_code = models.CharField(max_length=20, default='6270')
-    institute_name = models.CharField(max_length=255, default='Government College of Engineering, Kolhapur')
+    institute_code = models.CharField(max_length=20, blank=True, default='')
+    institute_name = models.CharField(max_length=255, blank=True, default='')
     choice_code = models.CharField(max_length=50, blank=True, default='')
     program_code = models.CharField(max_length=50, blank=True, default='')
     seat_type = models.CharField(max_length=50, blank=True, default='')
     allotted_seat_type = models.CharField(max_length=50, blank=True, default='')
     merit_no = models.PositiveIntegerField(null=True, blank=True)
     merit_marks = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
-    entrance_exam_type = models.CharField(max_length=50, blank=True, default='MHT-CET')
+    entrance_exam_type = models.CharField(max_length=50, blank=True, default='')
     entrance_percentile = models.DecimalField(max_digits=7, decimal_places=4, null=True, blank=True)
     reported_date = models.DateField(null=True, blank=True)
     source_import_row = models.ForeignKey(

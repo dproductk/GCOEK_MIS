@@ -770,3 +770,57 @@ class TestUploadThrottle:
             codes.append(res.status_code)
         assert codes[:10] == [status.HTTP_201_CREATED] * 10, codes
         assert codes[10] == 429, codes
+
+
+@pytest.mark.django_db
+class TestLandingDivisionUsesCurrentYear:
+    """Senior/backfill imports land in the CURRENT year's Division A.
+
+    Regression: a 2024-25 DSY file stranded a second Sem-7 Div A under the
+    past year that the HOD had to merge by hand. Fresh files (batch year ==
+    current year) behave exactly as before.
+    """
+
+    def test_old_batch_lands_in_current_year_division(self):
+        import datetime
+        from apps.admissions.services import commit_import_batch, stage_admission_file
+        cur = AcademicYear.objects.create(
+            code='2026-27', name='Academic Year 2026-2027',
+            start_date=datetime.date(2026, 7, 1), end_date=datetime.date(2027, 6, 30),
+            is_current=True)
+        old = AcademicYear.objects.create(
+            code='2023-24', name='Academic Year 2023-2024',
+            start_date=datetime.date(2023, 7, 1), end_date=datetime.date(2024, 6, 30),
+            is_current=False)
+        dept = Department.objects.create(name='Landing Dept', code='LND2')
+        Program.objects.create(
+            department=dept, name='B.Tech L', code='BTECH_LND2',
+            university_program_code='11999')
+        Semester.objects.create(number=1, name='Semester 1', year_level=1, term_type=Semester.TermType.ODD)
+        Semester.objects.create(number=7, name='Semester 7', year_level=4, term_type=Semester.TermType.ODD)
+        role_admin, _ = Role.objects.get_or_create(codename='ADMIN_HEAD', defaults={'name': 'Administrative Head'})
+        Role.objects.get_or_create(codename='STUDENT', defaults={'name': 'Student'})
+        admin = User.objects.create_user(username='adm_land', password='Password123!', user_type=User.UserType.SYSADMIN)
+        RoleAssignment.objects.create(user=admin, role=role_admin, status=RoleAssignment.Status.ACTIVE)
+        csv_content = (
+            "PRN,Students Full Name,Gender,DOB,Category,Mobile No,Email-Id,Blood Group,Program Code,"
+            "Program Name,Student Admitted Semester,Student Admitted Year,Cast,MARITAL STATUS,ABC Id,"
+            "Student Location Category,Student State,Student District,Student Taluka,Student_City/Village,Student Location Pincode,Admitted_Category\n"
+            "23060361242991,LANDING SENIOR,Male,15/08/2005,OPEN,9876543210,senior@gmail.com,O+,11999,"
+            "B.Tech L,SEMESTER - 1,2023-24,MARATHA,Unmarried,605-880-265-207,Urban,Maharashtra,Kolhapur,Karveer,Kolhapur,416004,General\n"
+        ).encode('utf-8')
+        batch = stage_admission_file(
+            file_bytes=csv_content, file_name='Landing_Old.csv',
+            academic_year=old, user=admin)
+        committed = commit_import_batch(batch.id)
+        assert committed.status == ImportBatch.Status.COMPLETED, committed.summary_report
+        s = Student.objects.get(enrollment_no='23060361242991')
+        enr = s.enrollments.get(is_current=True)
+        assert enr.semester.number == 7
+        # Admission truth stays on the old year...
+        assert enr.academic_year.code == '2023-24'
+        assert s.admission_year.code == '2023-24'
+        # ...but the class the student studies in runs now.
+        assert enr.division is not None
+        assert enr.division.academic_year.code == '2026-27'
+        assert Division.objects.filter(academic_year=old).count() == 0

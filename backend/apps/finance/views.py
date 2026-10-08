@@ -188,6 +188,7 @@ class PaymentLedgerViewSet(viewsets.ModelViewSet):
             qs = super().get_queryset()
             search = self.request.query_params.get('search')
             stat = self.request.query_params.get('status')
+            year_id = self.request.query_params.get('academic_year') or self.request.query_params.get('academic_year_id')
             if search:
                 search = search.strip()
                 qs = qs.filter(
@@ -195,6 +196,8 @@ class PaymentLedgerViewSet(viewsets.ModelViewSet):
                 ) | qs.filter(receipt_no__icontains=search) | qs.filter(student__enrollment_no__icontains=search)
             if stat:
                 qs = qs.filter(status=stat)
+            if year_id:
+                qs = qs.filter(academic_year_id=year_id)
             return qs
 
         if 'STUDENT' in scopes['roles']:
@@ -739,12 +742,19 @@ class OnlinePaymentInitiateView(APIView):
         if stale:
             from apps.finance.services import apply_gateway_result as _apply
             gateway_probe = EasebuzzGateway()
+            # Retrieve hash must reuse the exact initiation contact — never a
+            # placeholder, or the gateway rejects the inquiry.
             probe_email = stale.customer_email or getattr(
                 getattr(student, 'personal_details', None), 'student_email', ''
-            ) or request.user.email or 'student@gceok.ac.in'
+            ) or request.user.email or ''
             probe_phone = stale.customer_phone or getattr(
                 getattr(student, 'personal_details', None), 'student_mobile', ''
-            ) or '9999999999'
+            ) or ''
+            if not (probe_email and probe_phone):
+                return Response(
+                    {'detail': 'A payment attempt is still pending, but no contact is on record for bank inquiry. Ask the accounts desk to reconcile it.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
             try:
                 probe_res = gateway_probe.retrieve_transaction(
                     stale.transaction_id, stale.amount, probe_email, probe_phone,
@@ -828,8 +838,20 @@ class OnlinePaymentInitiateView(APIView):
         txnid = f"GCOEK_{int(timezone.now().timestamp())}_{uuid.uuid4().hex[:8]}"
 
         personal = getattr(student, 'personal_details', None)
-        customer_email = getattr(personal, 'student_email', '') or request.user.email or 'student@gceok.ac.in'
-        customer_phone = getattr(personal, 'student_mobile', '') or '9999999999'
+        customer_email = (getattr(personal, 'student_email', '') or '').strip() or (request.user.email or '').strip()
+        customer_phone = (getattr(personal, 'student_mobile', '') or '').strip()
+        # Gateway hashes bind email+phone: placeholder contact would corrupt
+        # initiation and every later inquiry. Require real contact instead.
+        if not customer_email:
+            return Response(
+                {'detail': 'Add an email address to the student profile before starting online payment.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not customer_phone:
+            return Response(
+                {'detail': 'Add a mobile number to the student profile before starting online payment.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         attempt = OnlinePaymentAttempt.objects.create(
             student=student,
@@ -968,10 +990,15 @@ class OnlinePaymentAttemptVerifyView(APIView):
         student = attempt.student
         email = attempt.customer_email or getattr(
             getattr(student, 'personal_details', None), 'student_email', ''
-        ) or getattr(getattr(student, 'user', None), 'email', '') or 'student@gceok.ac.in'
+        ) or getattr(getattr(student, 'user', None), 'email', '') or ''
         phone = attempt.customer_phone or getattr(
             getattr(student, 'personal_details', None), 'student_mobile', ''
-        ) or '9999999999'
+        ) or ''
+        if not (email and phone):
+            return Response(
+                {'detail': 'This attempt has no gateway contact on record, so the bank cannot be queried. Ask the accounts desk to reconcile it.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         res = gateway.retrieve_transaction(attempt.transaction_id, attempt.amount, email, phone)
         msg_data = res.get('msg', {}) if isinstance(res.get('msg'), dict) else {}

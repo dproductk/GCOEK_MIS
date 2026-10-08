@@ -59,8 +59,10 @@ export default function PaymentStatusPage() {
     }
   };
 
-  // Mock sandbox completion for local testing
+  // Mock sandbox completion — dev builds only. Production bundles never
+  // expose this (and the backend only honors mock callbacks in MOCK_MODE).
   const handleSimulateMockResult = (statusValue) => {
+    if (!import.meta.env.DEV) return;
     const form = document.createElement('form');
     form.method = 'POST';
     form.action = '/api/v1/finance/online-payment/callback/';
@@ -85,6 +87,16 @@ export default function PaymentStatusPage() {
   };
 
   if (isMockCheckout) {
+    if (!import.meta.env.DEV) {
+      return (
+        <div style={{ padding: '2rem', maxWidth: '600px', margin: '3rem auto' }}>
+          <div className="edvana-card" style={{ padding: '2rem', textAlign: 'center' }}>
+            <h2 style={{ fontSize: '1.2rem', fontWeight: 700, color: '#0f172a' }}>Not Available</h2>
+            <p style={{ fontSize: '0.875rem', color: '#64748b' }}>The payment simulator exists only in development builds.</p>
+          </div>
+        </div>
+      );
+    }
     return (
       <div style={{ padding: '2rem', maxWidth: '600px', margin: '3rem auto' }}>
         <div className="edvana-card" style={{ padding: '2rem', textAlign: 'center' }}>

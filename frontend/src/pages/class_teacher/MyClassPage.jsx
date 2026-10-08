@@ -101,14 +101,14 @@ export default function MyClassPage() {
               flexShrink: 0,
             }}
           >
-            {st.first_name?.[0] || 'S'}
+            {(st.display_name?.[0] || st.first_name?.[0] || '—').toUpperCase()}
           </div>
           <div>
             <div style={{ fontWeight: 700, color: '#0f172a', fontSize: '0.8125rem' }}>
-              {(st.display_name || `${st.first_name} ${st.last_name}`).toUpperCase()}
+              {(st.display_name || `${st.first_name || ''} ${st.last_name || ''}`.trim() || '—').toUpperCase()}
             </div>
             <div style={{ fontSize: '0.6875rem', color: '#64748b' }}>
-              Division {st.division_name || 'A'} • Semester {st.semester_number || '1'}
+              Division {st.division_name || '—'} • Semester {st.semester_number || '—'}
             </div>
           </div>
         </div>
@@ -124,19 +124,16 @@ export default function MyClassPage() {
     },
     {
       header: 'DEPARTMENT',
-      render: (st) => <span style={{ fontWeight: 500, fontSize: '0.8125rem' }}>{st.department_code || 'CSE'}</span>,
-    },
-    {
-      header: 'ATTENDANCE',
-      render: () => (
-        <span style={{ fontWeight: 700, color: '#16a34a', fontSize: '0.8125rem' }}>88.4%</span>
-      ),
+      render: (st) => <span style={{ fontWeight: 500, fontSize: '0.8125rem' }}>{st.department_code || '—'}</span>,
     },
     {
       header: 'BACKLOGS',
       render: (st) => {
         const elig = eligMap.get(st.id);
-        const count = elig ? elig.active_backlog_count : 0;
+        if (!elig || elig.active_backlog_count === undefined || elig.active_backlog_count === null) {
+          return <span style={{ color: '#94a3b8' }}>—</span>;
+        }
+        const count = elig.active_backlog_count;
         return (
           <span style={{ fontFamily: 'var(--edvana-font-mono)', fontWeight: 700, color: count === 0 ? '#16a34a' : '#dc2626' }}>
             {count}
@@ -148,10 +145,17 @@ export default function MyClassPage() {
       header: 'ELIGIBILITY',
       render: (st) => {
         const elig = eligMap.get(st.id);
-        const isEligible = elig ? elig.calculated_status === 'ELIGIBLE' : true;
+        if (!elig) {
+          return (
+            <Badge variant="neutral" dot>
+              Not evaluated
+            </Badge>
+          );
+        }
+        const isEligible = elig.calculated_status === 'ELIGIBLE';
         return (
           <Badge variant={isEligible ? 'success' : 'warning'} dot>
-            {elig ? elig.calculated_status_display : 'Eligible'}
+            {elig.calculated_status_display || elig.calculated_status}
           </Badge>
         );
       },

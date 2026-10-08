@@ -127,6 +127,7 @@ class StudentDocumentSerializer(serializers.ModelSerializer):
 class StudentEnrollmentSerializer(serializers.ModelSerializer):
     department_code = serializers.CharField(source='department.code', read_only=True)
     department_name = serializers.CharField(source='department.name', read_only=True)
+    program_code = serializers.CharField(source='program.code', read_only=True)
     program_name = serializers.CharField(source='program.name', read_only=True)
     semester_number = serializers.IntegerField(source='semester.number', read_only=True)
     division_name = serializers.CharField(source='division.name', read_only=True, default='')
@@ -144,6 +145,7 @@ class StudentEnrollmentSerializer(serializers.ModelSerializer):
             'department_code',
             'department_name',
             'program',
+            'program_code',
             'program_name',
             'semester',
             'semester_number',
@@ -233,7 +235,9 @@ class StudentListSerializer(serializers.ModelSerializer):
             return False
         curr = self._get_current(obj)
         sem_no = curr.semester.number if curr and curr.semester else None
-        adm_type = (obj.admission_type or 'FY').upper()
+        adm_type = (obj.admission_type or '').upper()
+        if adm_type not in ('FY', 'DSE'):
+            return False
         if not ((adm_type == 'FY' and sem_no == 1) or (adm_type == 'DSE' and sem_no == 3)):
             return False
         division = curr.division if curr and curr.division_id else None
@@ -246,11 +250,11 @@ class StudentListSerializer(serializers.ModelSerializer):
         from apps.students.placement import suggest_semester
         adm_year = getattr(obj, 'admission_year', None)
         ctx = self._placement_ctx()
-        if not adm_year or not ctx.get('current_year_start'):
+        if not adm_year or not ctx.get('current_year_start') or not obj.admission_type:
             return None, None
         try:
             sem, year, _ = suggest_semester(
-                adm_year.code.split('-')[0], obj.admission_type or 'FY',
+                adm_year.code.split('-')[0], obj.admission_type,
                 ctx['current_year_start'], ctx.get('term', 'ODD'))
         except Exception:
             return None, None
@@ -289,8 +293,7 @@ class StudentListSerializer(serializers.ModelSerializer):
         curr = self._get_current(obj)
         if curr and hasattr(curr, 'program') and curr.program:
             return curr.program.code
-        dept = self.get_department_code(obj)
-        return dept or 'B.Tech'
+        return None
 
     def get_semester_number(self, obj):
         curr = self._get_current(obj)
@@ -334,25 +337,22 @@ class StudentListSerializer(serializers.ModelSerializer):
         return None
 
     def get_father_name(self, obj):
-        # Look in prefetched guardians first
+        # Guardian record only — never guess from the student's middle name.
         if hasattr(obj, 'guardians'):
             for g in obj.guardians.all():
                 if g.relationship == 'FATHER' or g.is_primary:
                     return g.name
-        # Fallback to middle_name + last_name if available
-        if obj.middle_name:
-            return f"{obj.middle_name} {obj.last_name}".strip().upper()
-        return '—'
+        return None
 
     def get_mobile(self, obj):
         if hasattr(obj, 'personal_details') and obj.personal_details:
-            return obj.personal_details.student_mobile or '—'
-        return '—'
+            return obj.personal_details.student_mobile or None
+        return None
 
     def get_gender(self, obj):
         if hasattr(obj, 'personal_details') and obj.personal_details:
-            return obj.personal_details.gender or 'MALE'
-        return 'MALE'
+            return obj.personal_details.gender or None
+        return None
 
     def get_username(self, obj):
         if obj.user:
@@ -377,6 +377,7 @@ class StudentProfileSerializer(serializers.ModelSerializer):
     current_enrollment = serializers.SerializerMethodField()
     enrollment_history = serializers.SerializerMethodField()
     admission_details = serializers.SerializerMethodField()
+    scholarship_type_display = serializers.CharField(source='get_scholarship_type_display', read_only=True)
 
     class Meta:
         model = Student
@@ -390,6 +391,9 @@ class StudentProfileSerializer(serializers.ModelSerializer):
             'display_name',
             'status',
             'is_direct_second_year',
+            'scholarship_applied',
+            'scholarship_type',
+            'scholarship_type_display',
             'admission_details',
             'personal_details',
             'guardians',

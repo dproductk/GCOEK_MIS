@@ -203,11 +203,13 @@ class HasScopeAccess(permissions.BasePermission):
                 return False
             return True
 
-        # HOD / Class Teacher / Faculty: college-wide READ for Student directory+profiles.
-        # Write remains blocked (StudentViewSet is read-only); sensitive reveal still
+        # HOD / Class Teacher / Faculty / Accountant: college-wide READ for
+        # Student directory+profiles. Accountant needs this to open student
+        # records from the directory (fee desk / ledger). Write remains
+        # blocked (StudentViewSet is read-only); sensitive reveal still
         # requires 'student.sensitive_reveal'.
         if request.method in permissions.SAFE_METHODS and any(
-            r in roles for r in ('HOD', 'CLASS_TEACHER', 'FACULTY')
+            r in roles for r in ('HOD', 'CLASS_TEACHER', 'FACULTY', 'ACCOUNTANT')
         ):
             # Student-like object (Student model has enrollment_no / application_id)
             if hasattr(obj, 'enrollment_no') or hasattr(obj, 'application_id'):

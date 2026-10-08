@@ -239,3 +239,15 @@
 
 **Decision:** Set Fee moved from browser localStorage to `POST /finance/assessments/` (preset + total==sum validation, audited, frozen once paid). Marking requires an existing assessment and amounts equal to it; receipts are server-sequenced `GCOEK/<year>/FEE/<nnnn>`. Analytics accepts an optional year filter. No category-quota enforcement until the mapping is supplied.
 
+---
+
+## ADR-019: Promotion Seats Confirmed + Imports Land in the Running Year
+**Date:** 2026-10-09
+**Status:** Approved
+
+**Context:** HOD promotion (eligibility-endorsed + fully paid students seated into a class by HOD action) left `placement_confirmed=False`, so promoted students re-appeared on the pending-imports queue asking for a redundant confirmation. Separately, senior/backfill imports created landing Div A under the old admission year (e.g. a second 2024-25 Sem-7 Div A next to the running 2026-27 one), which the HOD had to merge by hand.
+
+**Decision:** Promotion seating counts as HOD placement — `check_and_promote_student` and `seat_traced_students_to_division` set `placement_confirmed=True` exactly when a division is assigned (unassigned stays open for HOD pickup). Import landing divisions are created under the current academic year (fallback: batch year when none configured); enrollment/admission years keep admission truth. Pending table gains "Add to existing class" (merge without creating) next to Create Division.
+
+**Consequences:** No migration (flag + year columns already exist). Promoted students skip the pending queue; backfill files land in the running class; one-time audited backfill confirmed 4 promotion-seated rows and merged 2 DSY students, deleting the emptied past-year division.
+

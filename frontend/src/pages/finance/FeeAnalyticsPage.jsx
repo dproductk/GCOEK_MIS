@@ -14,6 +14,7 @@ import { LoadingState, ErrorState, EmptyState } from '../../components/common/St
 export default function FeeAnalyticsPage() {
   const [analytics, setAnalytics] = useState(null);
   const [ledger, setLedger] = useState([]);
+  const [ledgerTotalCount, setLedgerTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeCards, setActiveCards] = useState({});
@@ -31,20 +32,30 @@ export default function FeeAnalyticsPage() {
     }));
   };
 
-  const fetchData = async () => {
+  const fetchData = async (yearOverride) => {
     setLoading(true);
     setError(null);
     try {
+      const effectiveYear = yearOverride !== undefined ? yearOverride : yearFilter;
       const [anaRes, ledRes, yearsRes] = await Promise.all([
-        financeApi.getFinanceAnalytics(yearFilter ? { academic_year: yearFilter } : undefined),
+        financeApi.getFinanceAnalytics(effectiveYear ? { academic_year: effectiveYear } : undefined),
         financeApi.getPaymentLedgers({
           search: searchTerm || undefined,
           status: statusFilter || undefined,
+          academic_year: effectiveYear || undefined,
+          // FinancePagination allows up to 1000 rows so a full college
+          // roster fits in one request (see backend FinancePagination).
+          page_size: 1000,
         }),
         academicApi.getAcademicYears().catch(() => ({ data: [] })),
       ]);
       setAnalytics(anaRes.data);
-      setLedger(ledRes.data?.results || ledRes.data || []);
+      const rows = ledRes.data?.results || ledRes.data || [];
+      setLedger(Array.isArray(rows) ? rows : []);
+      // Authoritative total from pagination (rows may be capped at page_size).
+      setLedgerTotalCount(
+        typeof ledRes.data?.count === 'number' ? ledRes.data.count : (Array.isArray(rows) ? rows.length : 0)
+      );
       const rawYears = yearsRes.data?.results || yearsRes.data || [];
       if (rawYears.length > 0) setYears(rawYears);
     } catch (err) {
@@ -76,30 +87,44 @@ export default function FeeAnalyticsPage() {
     }
   };
 
-  // Helper calculations
-  const totalCollected = analytics?.total_collected || 0;
-  const totalDue = analytics?.total_due || 0;
-  const totalBalance = analytics?.total_balance || 0;
-  const totalReceipts = analytics?.total_receipts || 0;
-  const recoveryRate = totalDue > 0 ? ((totalCollected / totalDue) * 100).toFixed(1) : '100.0';
+  // Helper calculations (authoritative KPIs come from /analytics/ aggregates;
+  // the ledger table below is the same year-filtered, paginated slice).
+  const totalCollected = Number(analytics?.total_collected || 0);
+  const totalDue = Number(analytics?.total_due || 0);
+  const totalBalance = Number(analytics?.total_balance || 0);
+  // Authoritative receipt count from the backend aggregate, not page length.
+  const totalReceipts = analytics?.total_receipts ?? ledgerTotalCount ?? ledger.length ?? 0;
+  const recoveryRate = totalDue > 0 ? ((totalCollected / totalDue) * 100).toFixed(1) : '0.0';
+  // Treasury clearance = share of billed fees actually collected.
+  const treasuryClearance = `${recoveryRate}%`;
 
   const modeMap = analytics?.collection_by_mode || {};
+  // Exact backend labels (PaymentLedger.PaymentMode.choices) first,
+  // fuzzy substring match only as a fallback for future labels.
   const getModeAmt = (pattern) => {
+    if (modeMap[pattern] !== undefined) return Number(modeMap[pattern]) || 0;
     for (const [key, val] of Object.entries(modeMap)) {
-      if (key.toLowerCase().includes(pattern.toLowerCase())) return val;
+      if (key.toLowerCase().includes(pattern.toLowerCase())) return Number(val) || 0;
     }
     return 0;
   };
 
-  const onlineAmt = getModeAmt('online') || getModeAmt('gateway') || 0;
-  const ddAmt = getModeAmt('draft') || getModeAmt('dd') || 0;
-  const challanAmt = getModeAmt('challan') || 0;
-  const cashAmt = getModeAmt('cash') || 0;
-  const neftAmt = getModeAmt('neft') || getModeAmt('rtgs') || 0;
+  const onlineAmt = getModeAmt('Online Gateway (UPI/Netbanking)') || getModeAmt('online') || 0;
+  const ddAmt = getModeAmt('Demand Draft') || getModeAmt('draft') || 0;
+  const challanAmt = getModeAmt('Bank Challan') || getModeAmt('challan') || 0;
+  const cashAmt = getModeAmt('Cash Counter') || getModeAmt('cash') || 0;
+  const neftAmt = getModeAmt('NEFT / RTGS Transfer') || getModeAmt('neft') || getModeAmt('rtgs') || 0;
 
   const paidCount = ledger.filter(r => r.status === 'PAID').length;
   const partialCount = ledger.filter(r => r.status === 'PARTIAL').length;
   const pendingCount = ledger.filter(r => r.status === 'PENDING').length;
+  // Share of receipts fully settled. Only exact when the full filtered
+  // set fits in one page (page_size=1000); otherwise it is a lower-bound
+  // estimate from the loaded slice.
+  const ledgerCoversAll = ledgerTotalCount > 0 ? ledger.length >= ledgerTotalCount : true;
+  const auditSettlement = totalReceipts > 0
+    ? ((paidCount / totalReceipts) * 100).toFixed(1) + '%'
+    : '0.0%';
 
   // Online payment gateway stats (from backend analytics.online_payment)
   const online = analytics?.online_payment || {};
@@ -150,8 +175,8 @@ export default function FeeAnalyticsPage() {
     {
       id: 'kpi_clearance',
       label: 'Treasury Clearance',
-      value: '100.0%',
-      subtext: 'Settled',
+      value: treasuryClearance,
+      subtext: 'Collected / Billed',
     },
   ];
 
@@ -426,7 +451,7 @@ export default function FeeAnalyticsPage() {
             </div>
             <div className="analytics-summary-row">
               <span className="analytics-summary-row-label">Total Fee Records</span>
-              <span className="analytics-summary-row-val">{ledger.length}</span>
+              <span className="analytics-summary-row-val">{totalReceipts}</span>
             </div>
             <div className="metric-bottom-bar" />
           </div>
@@ -500,7 +525,9 @@ export default function FeeAnalyticsPage() {
             </div>
             <div className="analytics-summary-row">
               <span className="analytics-summary-row-label">Audit Settlement</span>
-              <span className="analytics-summary-row-val" style={{ color: '#1E60DC' }}>100.0%</span>
+              <span className="analytics-summary-row-val" style={{ color: '#1E60DC' }}>
+                {auditSettlement}{!ledgerCoversAll ? '*' : ''}
+              </span>
             </div>
             <div className="metric-bottom-bar" />
           </div>
@@ -510,8 +537,8 @@ export default function FeeAnalyticsPage() {
         <div className="edvana-card">
           <div className="edvana-card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
             <div>
-              <h2 className="edvana-card-title">Master Payment Ledger ({ledger.length})</h2>
-              <p className="edvana-card-description">Auditable record of all fee transactions and reconciliation entries</p>
+              <h2 className="edvana-card-title">Master Payment Ledger ({ledgerTotalCount || ledger.length})</h2>
+              <p className="edvana-card-description">Auditable record of all fee transactions and reconciliation entries{!ledgerCoversAll ? ' — showing first 1000 of ' + ledgerTotalCount : ''}</p>
             </div>
 
             <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.75rem' }}>
