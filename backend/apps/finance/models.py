@@ -136,9 +136,10 @@ class StudentFeeAssessment(BaseModel):
     Matches 'Update Admission Fees' (Candidate Details + Admission Fee Details).
     """
 
+    # F-S4-004: PROTECT backstop so fee assessments are never silently cascaded
     student = models.ForeignKey(
         'students.Student',
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='fee_assessments',
     )
     academic_year = models.ForeignKey(

@@ -81,7 +81,18 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # Account security: Block all API access for accounts that must change their password.
+    'apps.authentication.middleware.MustChangePasswordMiddleware',
 ]
+
+# WhiteNoise serves static files in production. It is a prod-only dependency
+# (see requirements.txt) and is NOT installed in the dev venv — so it is
+# enabled only when importable. Dev runserver serves static via staticfiles.
+try:
+    import whitenoise  # noqa: F401
+    MIDDLEWARE.insert(1, 'whitenoise.middleware.WhiteNoiseMiddleware')
+except ImportError:
+    pass
 
 ROOT_URLCONF = 'gceok_core.urls'
 
@@ -207,6 +218,7 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
+        'apps.authentication.permissions.MustChangePasswordPermission',
     ),
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 25,
@@ -265,6 +277,10 @@ CORS_ALLOWED_ORIGINS = [
 ]
 CORS_ALLOW_CREDENTIALS = True
 
+# CORS configuration: Explicitly set CORS_ALLOW_ALL_ORIGINS=False to prevent any
+# accidental env injection turning it on. Fail-closed: never wildcard.
+CORS_ALLOW_ALL_ORIGINS = False
+
 if DEBUG:
     CORS_ALLOWED_ORIGIN_REGEXES = [
         r"^http://localhost:(517[0-9]|3000)$",
@@ -274,13 +290,26 @@ if DEBUG:
 # ---------------------------------------------------------------------------
 # Security Headers (production-ready defaults)
 # ---------------------------------------------------------------------------
+# Always apply safe baseline headers (non-breaking in dev).
+X_FRAME_OPTIONS = 'DENY'
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_BROWSER_XSS_FILTER = True
+
 if not DEBUG:
-    SECURE_BROWSER_XSS_FILTER = True
-    SECURE_CONTENT_TYPE_NOSNIFF = True
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_SSL_REDIRECT = True
-    X_FRAME_OPTIONS = 'DENY'
+    # HSTS — 1 year, include subdomains.
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+
+# Content Security Policy (API-only backend: no inline scripts/styles).
+CSP_DEFAULT_SRC = ("'none'",)
+CSP_CONNECT_SRC = ("'self'",)
+CSP_FRAME_ANCESTORS = ("'none'",)
+CSP_BASE_URI = ("'none'",)
+CSP_FORM_ACTION = ("'self'",)
 
 # ---------------------------------------------------------------------------
 # Login attempt security
@@ -298,7 +327,7 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10 MB
 # ---------------------------------------------------------------------------
 # Easebuzz Payment Gateway Configuration (Production Ready)
 # ---------------------------------------------------------------------------
-EASEBUZZ_ENABLED = os.getenv('EASEBUZZ_ENABLED', 'True').lower() in ('true', '1', 'yes')
+EASEBUZZ_ENABLED = os.getenv('EASEBUZZ_ENABLED', 'False').lower() in ('true', '1', 'yes')
 EASEBUZZ_ENV = os.getenv('EASEBUZZ_ENV', 'sandbox').lower()  # 'sandbox' or 'production'
 EASEBUZZ_KEY = os.getenv('EASEBUZZ_KEY', '')
 EASEBUZZ_SALT = os.getenv('EASEBUZZ_SALT', '')

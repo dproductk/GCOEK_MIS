@@ -94,38 +94,6 @@ def apply_gateway_result(
             logger.info("Payment attempt '%s' was already applied successfully. Idempotent return.", transaction_id)
             return attempt, True, "Payment already recorded and confirmed."
 
-        # Verify whether student already has a PAID ledger for this academic year
-        existing_ledger = PaymentLedger.objects.filter(
-            student=attempt.student,
-            academic_year=attempt.academic_year,
-        ).first()
-
-        if existing_ledger and (existing_ledger.status == PaymentLedger.PaymentStatus.PAID or existing_ledger.balance_due <= 0):
-            logger.warning("Duplicate payment attempt blocked: Student %s already has paid ledger %s.", attempt.student.display_name, existing_ledger.receipt_no)
-            attempt.status = OnlinePaymentAttempt.Status.SUCCESS
-            attempt.completed_at = timezone.now()
-            attempt.save(update_fields=['status', 'completed_at'])
-            audit_log(
-                request=request,
-                actor=actor,
-                action=AuditLog.Action.UPDATE,
-                target_type='OnlinePaymentAttempt',
-                target_id=str(attempt.id),
-                target_display=f"Online Payment {attempt.transaction_id}",
-                old_value={'status': 'PENDING'},
-                new_value={
-                    'status': attempt.status,
-                    'blocked_as_duplicate': True,
-                    'existing_receipt': existing_ledger.receipt_no,
-                },
-                reason='Duplicate online payment blocked — fee already settled',
-                description=(
-                    f"Blocked duplicate online attempt {attempt.transaction_id} for "
-                    f"{attempt.student.display_name}: receipt {existing_ledger.receipt_no} already PAID."
-                ),
-            )
-            return attempt, True, "Fee was already settled for this candidate."
-
         norm_status = str(gateway_status or '').strip().lower()
         is_success = norm_status in ('success', 'successful')
 
@@ -160,8 +128,8 @@ def apply_gateway_result(
             )
             return attempt, False, f"Payment was not successful (Status: {attempt.status})."
 
-        # SECURITY CHECK: Verify payload amount matches attempt.amount authoritatively
-        # (SECURITY.md Sec 15: never trust client/gateway totals — verify backend.)
+        # F-S5-003: SECURITY CHECK: Verify payload amount matches attempt.amount authoritatively
+        # Run tamper check BEFORE existing_ledger duplicate check to avoid marking tampered payloads SUCCESS.
         payload_amt = raw_payload.get('amount')
         if payload_amt is not None:
             try:
@@ -183,17 +151,46 @@ def apply_gateway_result(
                         target_id=str(attempt.id),
                         target_display=f"Online Payment {attempt.transaction_id}",
                         old_value={'status': 'PENDING', 'expected_amount': str(attempt.amount)},
-                        new_value={'status': attempt.status, 'received_amount': str(payload_amt)},
-                        reason='Security: gateway amount mismatch rejected',
-                        description=(
-                            f"Rejected online payment {attempt.transaction_id} for "
-                            f"{attempt.student.display_name}: expected {attempt.amount}, "
-                            f"gateway sent {payload_amt}."
-                        ),
+                        new_value={'status': 'FAILED', 'received_amount': str(payload_amt)},
+                        reason='Amount tampering detected',
+                        description=f"Amount mismatch on online transaction {transaction_id}: expected ₹{attempt.amount}, received ₹{payload_amt}.",
                     )
-                    return attempt, False, "Payment rejected: amount mismatch."
-            except Exception as parse_err:
-                logger.error("Could not parse payload amount '%s': %s", payload_amt, parse_err)
+                    return attempt, False, "Security verification failed: amount mismatch."
+            except Exception as e:
+                logger.error("Error validating payload amount: %s", str(e))
+                return attempt, False, "Amount validation error."
+
+        # Verify whether student already has a PAID ledger for this academic year
+        existing_ledger = PaymentLedger.objects.filter(
+            student=attempt.student,
+            academic_year=attempt.academic_year,
+        ).first()
+
+        if existing_ledger and (existing_ledger.status == PaymentLedger.PaymentStatus.PAID or existing_ledger.balance_due <= 0):
+            logger.warning("Duplicate payment attempt blocked: Student %s already has paid ledger %s.", attempt.student.display_name, existing_ledger.receipt_no)
+            attempt.status = OnlinePaymentAttempt.Status.SUCCESS
+            attempt.completed_at = timezone.now()
+            attempt.save(update_fields=['status', 'completed_at'])
+            audit_log(
+                request=request,
+                actor=actor,
+                action=AuditLog.Action.UPDATE,
+                target_type='OnlinePaymentAttempt',
+                target_id=str(attempt.id),
+                target_display=f"Online Payment {attempt.transaction_id}",
+                old_value={'status': 'PENDING'},
+                new_value={
+                    'status': attempt.status,
+                    'blocked_as_duplicate': True,
+                    'existing_receipt': existing_ledger.receipt_no,
+                },
+                reason='Duplicate online payment blocked — fee already settled',
+                description=(
+                    f"Blocked duplicate online attempt {attempt.transaction_id} for "
+                    f"{attempt.student.display_name}: receipt {existing_ledger.receipt_no} already PAID."
+                ),
+            )
+            return attempt, True, "Fee was already settled for this candidate."
 
         # SUCCESS PATH: Create official permanent PaymentLedger row with concurrency protection.
         # The insert runs in its own savepoint so a unique-violation rolls

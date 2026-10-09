@@ -61,13 +61,34 @@ def get_student_scheme(student):
 
 
 def get_thresholds(student, defaults=(20.0, 40.0, 4)):
-    """Return (min_theory, min_total, max_backlogs) for a student."""
+    """Return (min_theory, min_total, max_backlogs) for a student.
+
+    Falls back to defaults when the student has no scheme configured.
+    F-S6-006: logs a WARNING on fallback so misconfigured schemes are
+    observable in production without silently accepting wrong rules.
+    """
+    import logging as _logging
+    _logger = _logging.getLogger(__name__)
     try:
         _, rules = get_student_scheme(student)
         if rules:
             return rules['min_theory'], rules['min_total'], rules['max_backlogs']
-    except Exception:
-        pass
+    except Exception as _exc:
+        _logger.warning(
+            'get_thresholds: exception resolving scheme for student %s (%s); '
+            'falling back to defaults %s. Error: %s',
+            getattr(student, 'id', '?'),
+            getattr(student, 'display_name', '?'),
+            defaults,
+            _exc,
+        )
+    _logger.warning(
+        'get_thresholds: no scheme found for student %s (%s); '
+        'using defaults %s. Assign a scheme to avoid this.',
+        getattr(student, 'id', '?'),
+        getattr(student, 'display_name', '?'),
+        defaults,
+    )
     return defaults
 
 

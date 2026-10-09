@@ -18,6 +18,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'gceok_core.settings')
 django.setup()
 
+from django.conf import settings as _settings
+if not _settings.DEBUG:
+    print('ERROR: This script is for development only. Set DEBUG=True to use it.')
+    sys.exit(1)
+
 from apps.academic_structure.models import Division
 from apps.audit.models import AuditLog
 from apps.audit.services import audit_log

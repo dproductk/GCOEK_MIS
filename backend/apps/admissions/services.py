@@ -491,6 +491,30 @@ def stage_admission_file(file_bytes, file_name, academic_year, user, uploaded_fi
                 'row count below the header.' % (file_name, len(headers)))
         raise ValueError('Unable to parse rows from file. Ensure it is a valid government candidate list.')
 
+    # F-S6-004: Enforce row, column, and cell-value caps before processing.
+    # A 2 000-row limit covers any single DTE batch (60 students/dept × max 33
+    # programs). Column cap prevents O(N) header-match abuse. Cell cap prevents
+    # runaway string storage.
+    MAX_IMPORT_ROWS = 2000
+    MAX_IMPORT_COLS = 60
+    MAX_CELL_LEN = 500
+    if len(rows) > MAX_IMPORT_ROWS:
+        raise ValueError(
+            f'File has {len(rows)} data rows — maximum allowed is {MAX_IMPORT_ROWS}. '
+            'Split the file into smaller batches and upload each separately.'
+        )
+    if headers and len(headers) > MAX_IMPORT_COLS:
+        raise ValueError(
+            f'File has {len(headers)} columns — maximum allowed is {MAX_IMPORT_COLS}. '
+            'The file may be corrupted or contain extra sheets.'
+        )
+    # Truncate long cell values in place so they fit varchar fields.
+    rows = [
+        {k: (str(v)[:MAX_CELL_LEN] if isinstance(v, str) and len(str(v)) > MAX_CELL_LEN else v)
+         for k, v in row.items()}
+        for row in rows
+    ]
+
     # Admission year from the file itself ("Student Admitted Year" first,
     # then "Academic Year"), falling back to the AH-selected/current default.
     # The file wins only when it parses AND a matching AcademicYear is
@@ -798,7 +822,10 @@ def stage_admission_file(file_bytes, file_name, academic_year, user, uploaded_fi
                 student_id=matched_uuid,
             ))
 
-        ImportRow.objects.bulk_create(staged)
+        # F-S6-004: Batch bulk_create to avoid a single massive INSERT.
+        batch_size = 500
+        for i in range(0, len(staged), batch_size):
+            ImportRow.objects.bulk_create(staged[i:i + batch_size])
 
         batch.valid_rows = valid_count
         batch.invalid_rows = invalid_count
@@ -876,9 +903,18 @@ def commit_import_batch(batch_id):
         batch.save(update_fields=['status'])
 
     # Only VALID rows proceed (CONTEXT.md Sec 15.6). IMPORTED rows stay done.
+    # F-S7-003: FAILED rows from a previous partial commit are reset to VALID
+    # and retried on recommit — otherwise they stay stuck forever.
+    failed_rows_qs = batch.rows.filter(validation_status=ImportRow.ValidationStatus.FAILED)
+    if failed_rows_qs.exists():
+        failed_rows_qs.update(
+            validation_status=ImportRow.ValidationStatus.VALID,
+            import_error='',
+        )
     valid_rows = list(batch.rows.filter(
         validation_status=ImportRow.ValidationStatus.VALID
     ).order_by('row_number'))
+
 
     try:
         role_student = Role.objects.get(codename='STUDENT')
@@ -948,11 +984,14 @@ def commit_import_batch(batch_id):
                     raise ValueError('Missing Application ID and Enrollment No / PRN at import.')
 
                 # Re-check identity under lock: never create duplicates.
+                # F-S6-003: Use select_for_update to prevent concurrent commit
+                # workers from both passing the `existing is None` guard and
+                # creating duplicate students.
                 existing = None
                 if app_id:
-                    existing = Student.objects.filter(application_id=app_id).first()
+                    existing = Student.objects.select_for_update().filter(application_id=app_id).first()
                 if existing is None and file_enr:
-                    existing = Student.objects.filter(enrollment_no=file_enr).first()
+                    existing = Student.objects.select_for_update().filter(enrollment_no=file_enr).first()
 
                 # Data-driven department resolution (same rule as staging).
                 dept, _ = resolve_department(
@@ -984,17 +1023,8 @@ def commit_import_batch(batch_id):
                     existing_enr_query = existing_enr_query.exclude(application_id=app_id)
                 existing_enr = existing_enr_query.first()
                 if existing_enr:
-                    counter = 1
-                    base = enrollment_val
-                    while True:
-                        q = Student.objects.filter(enrollment_no=enrollment_val)
-                        if app_id:
-                            q = q.exclude(application_id=app_id)
-                        if not q.exists():
-                            break
-                        enrollment_val = f'{base}_{counter}'
-                        counter += 1
-                    login_id = enrollment_val if file_enr else (app_id or enrollment_val)
+                    # F-S6-003: Fail row on enrollment collision for manual review instead of fabricating PRNs (ADR-008)
+                    raise ValueError(f"enrollment conflict — manual review: enrollment_no '{enrollment_val}' already held by student {existing_enr.id}")
 
                 if existing is not None:
                     student = existing

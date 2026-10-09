@@ -29,6 +29,7 @@ class Command(BaseCommand):
 
     @transaction.atomic
     def handle(self, *args, **options):
+        from django.conf import settings
         self.stdout.write(self.style.NOTICE('Seeding roles and permissions...'))
 
         # 1. Define Permissions
@@ -201,6 +202,19 @@ class Command(BaseCommand):
         )
 
         # 4. Optional: Create default admin user
+        # SECURITY (F-S2-001): Admin auto-creation is ONLY allowed in local
+        # development (DEBUG=True). On production, run:
+        #   python manage.py createsuperuser
+        # then assign the SYSADMIN role via the admin panel.
+        if not settings.DEBUG:
+            self.stdout.write(self.style.WARNING(
+                '[PROD] Admin auto-creation skipped (DEBUG=False). '
+                'Create admins explicitly via `python manage.py createsuperuser` '
+                'and assign the SYSADMIN role. Do NOT enable DEBUG in production.'
+            ))
+            self.stdout.write(self.style.SUCCESS('Role and permission seeding completed successfully.'))
+            return
+
         if options.get('create_admin') or not User.objects.filter(is_superuser=True).exists():
             admin_user, created = User.objects.get_or_create(
                 username='admin',
@@ -209,14 +223,26 @@ class Command(BaseCommand):
                     'user_type': User.UserType.SYSADMIN,
                     'is_staff': True,
                     'is_superuser': True,
-                    'must_change_password': False,
+                    'must_change_password': True,
                 },
             )
             if created:
-                admin_user.set_password('Admin@Gceok2026!')
+                # Generate a cryptographically random password; never hardcoded.
+                # The admin MUST change it on first login (must_change_password=True).
+                import secrets
+                import string
+                _alphabet = string.ascii_letters + string.digits + '!@#$%^&*'
+                random_password = ''.join(secrets.choice(_alphabet) for _ in range(16))
+                admin_user.set_password(random_password)
+                admin_user.must_change_password = True
                 admin_user.save()
+                # Security: password value is NEVER printed to stdout/logs.
                 self.stdout.write(
-                    self.style.SUCCESS('Created default sysadmin user: admin / Admin@Gceok2026!')
+                    self.style.SUCCESS(
+                        '[DEV] Created default sysadmin user: admin (random password set — '
+                        'change it on first login via the UI, or reset via '
+                        '`python manage.py changepassword admin`).'
+                    )
                 )
 
             # Assign SYSADMIN role
@@ -229,3 +255,4 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS('Assigned SYSADMIN role to admin user.'))
 
         self.stdout.write(self.style.SUCCESS('Role and permission seeding completed successfully.'))
+

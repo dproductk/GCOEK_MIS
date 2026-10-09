@@ -30,6 +30,15 @@ class Command(BaseCommand):
 
     @transaction.atomic
     def handle(self, *args, **options):
+        from django.conf import settings
+        # F-S6-001: This command creates known accounts — development only.
+        if not settings.DEBUG:
+            self.stderr.write(self.style.ERROR(
+                '[SECURITY] seed_faculty refused: DEBUG=False. '
+                'This command must never run against a production database. '
+                'Onboard real faculty via administrator onboarding workflows.'
+            ))
+            raise SystemExit(1)
         self.stdout.write('Seeding faculty records...')
 
         role_faculty = Role.objects.get(codename='FACULTY')
@@ -121,7 +130,10 @@ class Command(BaseCommand):
                 },
             )
             if created:
-                user.set_password('Faculty@Gceok2026!')
+                import secrets, string
+                _alpha = string.ascii_letters + string.digits + '!@#$%^&*'
+                user.set_password(''.join(secrets.choice(_alpha) for _ in range(16)))
+                user.must_change_password = True
                 user.save()
 
             # Ensure role assignment

@@ -145,7 +145,9 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
             'enrollments__semester',
             'enrollments__division',
             'enrollments__academic_year',
+            'enrollments__program',  # F-S4-003: eliminates ~50 extra queries per page
         ).filter(is_active=True)
+
 
         scopes = get_user_scopes(user)
 

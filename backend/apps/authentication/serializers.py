@@ -238,6 +238,17 @@ class RoleAssignmentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'assigned_at', 'revoked_at']
 
+    def validate(self, attrs):
+        # F-S3-004: Validate scope for CLASS_TEACHER
+        role = attrs.get('role') or getattr(self.instance, 'role', None)
+        if role and getattr(role, 'codename', '') == 'CLASS_TEACHER':
+            div_id = attrs.get('division_id') if 'division_id' in attrs else getattr(self.instance, 'division_id', None)
+            if not div_id:
+                raise serializers.ValidationError({
+                    'division_id': 'Division is required when assigning the CLASS_TEACHER role.'
+                })
+        return attrs
+
 
 class UserAdminSerializer(serializers.ModelSerializer):
     roles = serializers.SerializerMethodField()

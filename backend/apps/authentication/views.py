@@ -113,9 +113,12 @@ class TokenRefreshView(APIView):
     Refresh expired access token using the HttpOnly refresh cookie.
 
     POST /api/v1/auth/refresh/
+    Rate-limited to 5/min to prevent token refresh abuse (F-S4-002).
     """
 
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'login'
 
     def post(self, request):
         refresh_token = request.COOKIES.get('refresh_token') or request.data.get('refresh')
@@ -198,9 +201,12 @@ class ChangePasswordView(APIView):
     Change user password with minimum length and history validation.
 
     POST /api/v1/auth/change-password/
+    Rate-limited to prevent brute-force against own account (F-S4-001).
     """
 
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'login'
 
     def post(self, request):
         serializer = ChangePasswordSerializer(
@@ -288,19 +294,29 @@ class RoleAssignmentViewSet(viewsets.ModelViewSet):
         return bool(scopes.get('is_system_wide'))
 
     def _is_hod_ct_create_allowed(self, request):
-        """HOD may assign CLASS_TEACHER only within their own department."""
+        """HOD may assign CLASS_TEACHER only within their own department.
+
+        Security: the target user MUST be FACULTY type — granting CT to a
+        student or sysadmin is a privilege-escalation vector (F-S3-003).
+        """
         from apps.authentication.permissions import get_user_scopes
         try:
             data = request.data or {}
             role_id = data.get('role')
             department_id = data.get('department_id')
             division_id = data.get('division_id')
+            user_id = data.get('user')
             if not (role_id and department_id and division_id):
                 return False
             from apps.authentication.models import Role as _Role
             role = _Role.objects.filter(id=role_id).first()
             if not role or role.codename != 'CLASS_TEACHER':
                 return False
+            # F-S3-003: Target user must be FACULTY, never a STUDENT.
+            if user_id:
+                target_user = User.objects.filter(id=user_id).first()
+                if not target_user or target_user.user_type != User.UserType.FACULTY:
+                    return False
             scopes = get_user_scopes(request.user)
             if 'HOD' not in scopes.get('roles', []):
                 return False
@@ -457,6 +473,10 @@ class RoleAssignmentViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         label = f"{instance.user.username} -> {instance.role.name}" if instance.user and instance.role else str(instance.id)
         aid = str(instance.id)
+        # F-S3-002: Clear stale Division.class_teacher before deletion.
+        if instance.role and instance.role.codename == 'CLASS_TEACHER' and instance.user_id:
+            from apps.academic_structure.models import Division
+            Division.objects.filter(class_teacher_id=instance.user_id).update(class_teacher=None)
         instance.delete()
         audit_log(
             request=self.request,
@@ -478,6 +498,11 @@ class RoleAssignmentViewSet(viewsets.ModelViewSet):
         assignment.status = RoleAssignment.Status.REVOKED
         assignment.revoked_at = timezone.now()
         assignment.save(update_fields=['status', 'revoked_at', 'updated_at'])
+
+        # F-S3-002: Clear stale Division.class_teacher on CT revocation.
+        if assignment.role and assignment.role.codename == 'CLASS_TEACHER' and assignment.user_id:
+            from apps.academic_structure.models import Division
+            Division.objects.filter(class_teacher_id=assignment.user_id).update(class_teacher=None)
 
         audit_log(
             request=request,

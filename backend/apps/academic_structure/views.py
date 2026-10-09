@@ -107,6 +107,43 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         )
 
     def perform_destroy(self, instance):
+        from rest_framework.exceptions import ValidationError
+
+        # F-S4-001: Guard department deletion against cascading wipe of related records
+        in_use = []
+        checks = [
+            ('programs', instance.programs.count(), 'degree program(s)'),
+            ('divisions', instance.divisions.count(), 'division(s)'),
+        ]
+        try:
+            from apps.faculty.models import Faculty
+            n = Faculty.objects.filter(department=instance).count()
+            checks.append(('faculty', n, 'faculty member(s)'))
+        except Exception:
+            pass
+        try:
+            from apps.students.models import StudentEnrollment
+            n = StudentEnrollment.objects.filter(department=instance).count()
+            checks.append(('enrollments', n, 'student enrollment(s)'))
+        except Exception:
+            pass
+        try:
+            from apps.curriculum.models import Scheme
+            n = Scheme.objects.filter(department=instance).count()
+            checks.append(('schemes', n, 'curriculum scheme(s)'))
+        except Exception:
+            pass
+
+        for label, count, desc in checks:
+            if count > 0:
+                in_use.append(f"{count} {desc}")
+
+        if in_use:
+            raise ValidationError(
+                f"Cannot delete department '{instance.name}' ({instance.code}) because it is in use by: "
+                f"{', '.join(in_use)}. Deactivate it instead."
+            )
+
         name = instance.name
         code = instance.code
         dept_id = str(instance.id)
@@ -165,6 +202,40 @@ class ProgramViewSet(viewsets.ModelViewSet):
         )
 
     def perform_destroy(self, instance):
+        from rest_framework.exceptions import ValidationError
+
+        # F-S4-001: Guard program deletion against cascading wipe of fee heads, enrollments, schemes
+        in_use = []
+        checks = []
+        try:
+            from apps.students.models import StudentEnrollment
+            n = StudentEnrollment.objects.filter(program=instance).count()
+            checks.append(('enrollments', n, 'student enrollment(s)'))
+        except Exception:
+            pass
+        try:
+            from apps.finance.models import FeeHead
+            n = FeeHead.objects.filter(program=instance).count()
+            checks.append(('fee_heads', n, 'fee head(s)'))
+        except Exception:
+            pass
+        try:
+            from apps.curriculum.models import Scheme
+            n = Scheme.objects.filter(program=instance).count()
+            checks.append(('schemes', n, 'curriculum scheme(s)'))
+        except Exception:
+            pass
+
+        for label, count, desc in checks:
+            if count > 0:
+                in_use.append(f"{count} {desc}")
+
+        if in_use:
+            raise ValidationError(
+                f"Cannot delete program '{instance.name}' ({instance.code}) because it is in use by: "
+                f"{', '.join(in_use)}. Deactivate it instead."
+            )
+
         name, code, pid = instance.name, instance.code, str(instance.id)
         instance.delete()
         audit_log(
@@ -898,13 +969,25 @@ class DivisionViewSet(viewsets.ModelViewSet):
                 target_semester=target_sem).order_by('-final_eligible').first()
 
             if ev is not None and ev.final_eligible and ev.target_semester_id == target_sem.id:
+                # F-S5-001: Scope fee check to the COMPLETING academic year only.
+                # Accepting a prior-year PAID ledger would allow a student with
+                # unpaid current-year fees to be promoted. Filter to the year
+                # that the division belongs to (the year being completed).
+                completing_year = division.academic_year
                 paid = PaymentLedger.objects.filter(
-                    student=student, status=PaymentLedger.PaymentStatus.PAID).first()
+                    student=student,
+                    academic_year=completing_year,
+                    status=PaymentLedger.PaymentStatus.PAID,
+                ).first()
                 if not paid:
                     paid = PaymentLedger.objects.filter(
-                        student=student, total_fee_due__gt=0, balance_due__lte=0).first()
+                        student=student,
+                        academic_year=completing_year,
+                        total_fee_due__gt=0,
+                        balance_due__lte=0,
+                    ).first()
                 if not paid:
-                    return 'fees_pending', 'Fees not fully paid.'
+                    return 'fees_pending', 'Fees not fully paid for the current academic year.'
                 return 'ready_to_move', ''
 
             if ev is not None and ev.hod_status == _EV.StageStatus.REJECTED:
@@ -1030,16 +1113,27 @@ class DivisionViewSet(viewsets.ModelViewSet):
 
         from apps.students.services import check_and_promote_student
         promoted = []
+        promotion_errors = []
         moved_to_repeater = []
         with transaction.atomic():
             # Lock division row
             division = Division.objects.select_for_update().get(id=division.id)
 
-            # 1. Promote ready students
+            # 1. Promote ready students (F-S7-004: per-student savepoint to isolate failures)
             for s in ready_to_move:
-                ok, msg = check_and_promote_student(s['id'], actor=user, request=request)
-                if ok:
-                    promoted.append(s['id'])
+                sid = s['id']
+                sid_sp = transaction.savepoint()
+                try:
+                    ok, msg = check_and_promote_student(sid, actor=user, request=request)
+                    if ok:
+                        promoted.append(sid)
+                        transaction.savepoint_commit(sid_sp)
+                    else:
+                        promotion_errors.append({'student_id': str(sid), 'error': msg or 'Promotion check returned false'})
+                        transaction.savepoint_rollback(sid_sp)
+                except Exception as exc:
+                    transaction.savepoint_rollback(sid_sp)
+                    promotion_errors.append({'student_id': str(sid), 'error': str(exc)})
 
             # 2. Repeater class creation and student move
             repeater_div = None
@@ -1105,6 +1199,7 @@ class DivisionViewSet(viewsets.ModelViewSet):
                     'successor_division_id': str(dest_div.id),
                     'repeater_division_id': str(repeater_div.id) if repeater_div else None,
                     'promoted': promoted,
+                    'promotion_errors': promotion_errors,
                     'moved_to_repeater': moved_to_repeater,
                     'staying': [s for s in fees_pending + failed if s['id'] not in repeater_student_ids],
                 }, status=status.HTTP_200_OK)
@@ -1143,6 +1238,7 @@ class DivisionViewSet(viewsets.ModelViewSet):
                 'successor_created': created,
                 'repeater_division_id': str(repeater_div.id) if repeater_div else None,
                 'promoted': promoted,
+                'promotion_errors': promotion_errors,
                 'moved_to_repeater': moved_to_repeater,
                 'staying': [s for s in fees_pending + failed if s['id'] not in repeater_student_ids],
             }, status=status.HTTP_200_OK)

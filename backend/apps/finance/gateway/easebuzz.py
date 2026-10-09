@@ -113,7 +113,10 @@ class EasebuzzGateway:
         ]
         calculated_string = '|'.join(hash_sequence)
         calculated_hash = hashlib.sha512(calculated_string.encode('utf-8')).hexdigest().lower()
-        return calculated_hash == received_hash
+        # F-S5-006: Use hmac.compare_digest for constant-time comparison to
+        # prevent timing-based side-channel leakage of the expected hash.
+        import hmac as _hmac
+        return _hmac.compare_digest(calculated_hash, received_hash)
 
     def calculate_retrieve_hash(self, txnid, amount, email, phone):
         """

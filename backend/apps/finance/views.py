@@ -37,7 +37,7 @@ from apps.finance.serializers import (
 )
 from apps.finance.services import apply_gateway_result, generate_next_receipt_no
 from apps.results.models import EligibilityVerification
-from apps.students.models import Student
+from apps.students.models import Student, StudentEnrollment
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +234,27 @@ class PaymentLedgerViewSet(viewsets.ModelViewSet):
         if amount_paid is None or Decimal(str(amount_paid)) != assessment.total_fee:
             raise ValidationError(
                 {'detail': f'Marked payment must equal the assessed fee ₹{assessment.total_fee}.'})
+
+        # F-S5-003: Check for in-flight online payment attempts within 15 minutes to prevent race with bank.
+        cutoff = timezone.now() - datetime.timedelta(minutes=15)
+        in_flight = OnlinePaymentAttempt.objects.filter(
+            student=student,
+            academic_year=academic_year,
+            status__in=[
+                OnlinePaymentAttempt.Status.INITIATED,
+                OnlinePaymentAttempt.Status.REDIRECTED,
+                OnlinePaymentAttempt.Status.PENDING,
+            ],
+            initiated_at__gte=cutoff,
+        ).order_by('-initiated_at').first()
+        if in_flight:
+            from rest_framework.exceptions import APIException
+            class PaymentConflict(APIException):
+                status_code = 409
+            raise PaymentConflict(
+                f'An online payment attempt ({in_flight.transaction_id}) is currently in-flight. '
+                'Please wait for the transaction to complete or reconcile via online tracker before collecting cash.'
+            )
         # University rule: full payment only — partial payments are rejected
         # above (amount_paid must equal assessed total). No half-payment path.
         # Receipt numbers are ALWAYS backend-generated (GCOEK/<year>/FEE/<nnnn>).
@@ -554,9 +575,16 @@ def _is_gateway_ip_allowed(request):
     Spoof-safe: trust REMOTE_ADDR (direct peer) first. X-Forwarded-For is
     only honored when the direct peer is a local proxy, and then the
     rightmost hop is used (closest untrusted hop), not index [0].
+    F-S5-005: In production (EASEBUZZ_ENV == 'production' and not settings.DEBUG),
+    an empty allowlist fails closed (returns False).
     """
     allowed = getattr(settings, 'EASEBUZZ_WEBHOOK_ALLOWED_IPS', [])
+    easebuzz_env = getattr(settings, 'EASEBUZZ_ENV', 'sandbox')
+    is_debug = getattr(settings, 'DEBUG', False)
     if not allowed:
+        if easebuzz_env == 'production' and not is_debug:
+            logger.warning("F-S5-005: EASEBUZZ_WEBHOOK_ALLOWED_IPS empty in production. Rejecting webhook.")
+            return False
         return True
     allowed_set = {str(ip).strip() for ip in allowed if str(ip).strip()}
     remote = (request.META.get('REMOTE_ADDR') or '').strip()
@@ -601,9 +629,17 @@ class OnlinePaymentStatusView(APIView):
         assessment = StudentFeeAssessment.objects.filter(student=student, academic_year=ay).first()
         paid_ledger = PaymentLedger.objects.filter(student=student, academic_year=ay, status=PaymentLedger.PaymentStatus.PAID).first()
 
-        # Check progression eligibility
-        eligibility = EligibilityVerification.objects.filter(student=student, final_eligible=True).first()
-        is_eligible = eligibility is not None or not student.is_direct_second_year
+        # F-S5-002: Enforce ADR-017 eligibility predicate \u2014 same rule as initiate.
+        # A division-less FY student in semester 1 does not need verification, but
+        # any student in a year-change semester (3, 5, 7) MUST have HOD-approved
+        # eligibility (final_eligible=True) before can_pay is True.
+        eligibility = EligibilityVerification.objects.filter(student=student, academic_year=ay, final_eligible=True).first()
+        needs_eligibility = StudentEnrollment.objects.filter(
+            student=student, is_current=True,
+            semester__number__in=[3, 5, 7],
+        ).exists()
+        is_eligible = (not needs_eligibility) or (eligibility is not None)
+
 
         # Check for in-flight active attempt
         in_flight = OnlinePaymentAttempt.objects.filter(
@@ -616,7 +652,7 @@ class OnlinePaymentStatusView(APIView):
             ],
         ).order_by('-initiated_at').first()
 
-        gateway_enabled = getattr(settings, 'EASEBUZZ_ENABLED', True)
+        gateway_enabled = getattr(settings, 'EASEBUZZ_ENABLED', False)
         has_assessment = assessment is not None and assessment.total_fee > 0
         allow_online = assessment.allow_online_payment if assessment else False
         is_paid = paid_ledger is not None
@@ -670,7 +706,7 @@ class OnlinePaymentInitiateView(APIView):
     throttle_scope = 'payment_initiate'
 
     def post(self, request):
-        if not getattr(settings, 'EASEBUZZ_ENABLED', True):
+        if not getattr(settings, 'EASEBUZZ_ENABLED', False):
             return Response(
                 {'detail': 'Online payment gateway is currently disabled by administration.'},
                 status=status.HTTP_403_FORBIDDEN,
@@ -695,6 +731,26 @@ class OnlinePaymentInitiateView(APIView):
 
         if not assessment.allow_online_payment:
             return Response({'detail': 'Online payment not enabled for this candidate.'}, status=status.HTTP_403_FORBIDDEN)
+
+        # F-S5-002: Enforce eligibility prerequisite (same rule as desk payment).
+        # Student must have HOD-approved eligibility (final_eligible=True) for the
+        # current academic year before online payment is allowed.
+        eligibility = EligibilityVerification.objects.filter(
+            student=student,
+            academic_year=ay,
+            final_eligible=True,
+        ).first()
+        # First-year / direct-admission students without an eligibility cycle
+        # (no year-change verification needed) are exempt.
+        needs_eligibility = StudentEnrollment.objects.filter(
+            student=student, is_current=True,
+            semester__number__in=[3, 5, 7],
+        ).exists()
+        if needs_eligibility and not eligibility:
+            return Response(
+                {'detail': 'Academic progression verification must be approved by HOD before online payment.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         # 3. In-flight attempt check (prevents double clicks & parallel charge races)
         # Failed / cancelled / expired attempts never block: student can retry immediately.
@@ -853,18 +909,35 @@ class OnlinePaymentInitiateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        attempt = OnlinePaymentAttempt.objects.create(
-            student=student,
-            academic_year=ay,
-            assessment=assessment,
-            transaction_id=txnid,
-            idempotency_key=idempotency_key,
-            amount=assessment.total_fee,
-            status=OnlinePaymentAttempt.Status.INITIATED,
-            gateway_provider='EASEBUZZ',
-            customer_email=customer_email,
-            customer_phone=customer_phone,
-        )
+        # F-S7-001: Handle concurrent same-key race: catch IntegrityError and re-fetch existing attempt
+        from django.db import IntegrityError
+        try:
+            attempt = OnlinePaymentAttempt.objects.create(
+                student=student,
+                academic_year=ay,
+                assessment=assessment,
+                transaction_id=txnid,
+                idempotency_key=idempotency_key,
+                amount=assessment.total_fee,
+                status=OnlinePaymentAttempt.Status.INITIATED,
+                gateway_provider='EASEBUZZ',
+                customer_email=customer_email,
+                customer_phone=customer_phone,
+            )
+        except IntegrityError:
+            attempt = OnlinePaymentAttempt.objects.filter(
+                student=student,
+                idempotency_key=idempotency_key,
+            ).first()
+            if attempt:
+                return Response({
+                    'attempt_id': str(attempt.id),
+                    'transaction_id': attempt.transaction_id,
+                    'checkout_url': attempt.checkout_url,
+                    'access_key': attempt.access_key,
+                    'amount': str(attempt.amount),
+                }, status=status.HTTP_200_OK)
+            raise
 
         audit_log(
             request=request,
@@ -1033,6 +1106,9 @@ class EasebuzzCallbackView(APIView):
     throttle_scope = 'payment_callback'
 
     def post(self, request):
+        if not getattr(settings, 'EASEBUZZ_ENABLED', False):
+            return Response({'error': 'Online payment gateway is disabled'}, status=status.HTTP_404_NOT_FOUND)
+
         data = request.data or {}
         try:
             payload = data.dict() if hasattr(data, 'dict') else dict(data)
@@ -1055,8 +1131,14 @@ class EasebuzzCallbackView(APIView):
         )
 
         gateway = EasebuzzGateway()
-        # Verify hash strictly unless in mock test runner mode
-        is_mock = getattr(settings, 'EASEBUZZ_KEY', '') in ('mock', 'TEST_KEY', 'test_key') or getattr(settings, 'EASEBUZZ_MOCK_MODE', False)
+        # F-S5-004: Mock mode is ONLY active in local development (DEBUG=True).
+        # A prod misconfiguration (wrong key name or EASEBUZZ_MOCK_MODE=True
+        # in .env) must never allow unsigned callbacks to pass hash verification.
+        _is_dev_env = getattr(settings, 'DEBUG', False)
+        is_mock = _is_dev_env and (
+            getattr(settings, 'EASEBUZZ_KEY', '') in ('mock', 'TEST_KEY', 'test_key')
+            or getattr(settings, 'EASEBUZZ_MOCK_MODE', False)
+        )
         is_verified = is_mock or gateway.verify_response_hash(payload)
 
         raw_event.is_verified = is_verified
@@ -1114,6 +1196,9 @@ class EasebuzzWebhookView(APIView):
     throttle_scope = 'payment_callback'
 
     def post(self, request):
+        if not getattr(settings, 'EASEBUZZ_ENABLED', False):
+            return Response({'error': 'Online payment gateway is disabled'}, status=status.HTTP_404_NOT_FOUND)
+
         data = request.data or {}
         try:
             payload = data.dict() if hasattr(data, 'dict') else dict(data)
@@ -1148,7 +1233,12 @@ class EasebuzzWebhookView(APIView):
             return Response({'error': 'Blocked'}, status=status.HTTP_403_FORBIDDEN)
 
         gateway = EasebuzzGateway()
-        is_mock = getattr(settings, 'EASEBUZZ_KEY', '') in ('mock', 'TEST_KEY', 'test_key') or getattr(settings, 'EASEBUZZ_MOCK_MODE', False)
+        # F-S5-004: Same DEBUG+key double-gate for the webhook handler.
+        _is_dev_env = getattr(settings, 'DEBUG', False)
+        is_mock = _is_dev_env and (
+            getattr(settings, 'EASEBUZZ_KEY', '') in ('mock', 'TEST_KEY', 'test_key')
+            or getattr(settings, 'EASEBUZZ_MOCK_MODE', False)
+        )
         is_verified = is_mock or gateway.verify_response_hash(payload)
 
         raw_event.is_verified = is_verified

@@ -608,6 +608,15 @@ class ElectiveOptionViewSet(_SysadminWriteMixin, viewsets.ModelViewSet):
         denied = self._deny_unless_manager()
         if denied:
             return denied
+        # F-S3-005: Mirror published-scheme guard.
+        instance = self.get_object()
+        grp = getattr(instance, 'elective_group', None)
+        scheme = getattr(grp, 'scheme', None) if grp else None
+        if scheme and not scheme.is_mutable:
+            return Response(
+                {'detail': 'Parent scheme is published/retired and immutable. Create a new version.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         return super().destroy(request, *args, **kwargs)
 
     def perform_create(self, serializer):

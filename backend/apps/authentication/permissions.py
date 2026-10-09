@@ -278,3 +278,25 @@ class IsSysadmin(permissions.BasePermission):
             and request.user.is_active
             and (request.user.is_superuser or user_has_role(request.user, 'SYSADMIN'))
         )
+
+
+class MustChangePasswordPermission(permissions.BasePermission):
+    """Denies access if user has must_change_password=True, unless on allowed endpoints."""
+
+    message = 'You must change your password before accessing this resource.'
+    code = 'must_change_password'
+
+    def has_permission(self, request, view):
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
+            return True
+        if getattr(user, 'must_change_password', False):
+            if request.path in [
+                '/api/v1/auth/change-password/',
+                '/api/v1/auth/logout/',
+                '/api/v1/auth/refresh/',
+                '/api/v1/auth/me/',
+            ]:
+                return True
+            return False
+        return True

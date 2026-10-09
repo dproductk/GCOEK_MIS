@@ -10,6 +10,11 @@ django.setup()
 from apps.authentication.models import User, Role, RoleAssignment
 from apps.academic_structure.models import Department, Division
 
+from django.conf import settings
+if not settings.DEBUG:
+    print('ERROR: This script is for development only. Set DEBUG=True to use it.')
+    sys.exit(1)
+
 def setup_users():
     password = 'Password123!'
     cse_dept = Department.objects.filter(code='CSE').first()

@@ -220,6 +220,16 @@ class SemesterResultViewSet(viewsets.ReadOnlyModelViewSet):
         student_id = request.data.get('student_id')
         if student_id and (scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles'] or 'FACULTY' in scopes['roles']):
             student = Student.objects.filter(id=student_id).first()
+            # F-S3-001: Scoped staff must only write marks for students in their department.
+            if student and not scopes['is_system_wide'] and 'ADMIN_HEAD' not in scopes['roles']:
+                enr = student.enrollments.filter(is_current=True).first()
+                if enr:
+                    user_dept_ids = {str(d) for d in scopes.get('department_ids', [])}
+                    if str(enr.department_id) not in user_dept_ids:
+                        return Response(
+                            {'detail': 'You do not have permission to submit marks for a student outside your department.'},
+                            status=status.HTTP_403_FORBIDDEN,
+                        )
         elif hasattr(user, 'student_profile'):
             student = user.student_profile
         else:
@@ -371,7 +381,8 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
             elif scopes['department_ids']:
                 filtered_qs = qs.filter(department_id__in=scopes['department_ids'])
             else:
-                filtered_qs = qs
+                # F-S3-004: Deny by default if CLASS_TEACHER has no division or department scope
+                filtered_qs = qs.none()
         elif 'STUDENT' in scopes['roles']:
             return qs.filter(student__user_id=user.id)
         else:
@@ -457,6 +468,45 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
         divisions = list(div_qs.order_by('department__name', 'semester__number', 'name'))
         data = []
 
+        # F-S4-002: Bulk pre-fetch all counts in constant (~4) queries instead of looping per division
+        valid_divs = [d for d in divisions if d.semester is not None]
+        valid_div_ids = [d.id for d in valid_divs]
+
+        # 1. Bulk current enrollments
+        div_to_students = {d.id: [] for d in valid_divs}
+        all_student_ids = set()
+        enr_qs = StudentEnrollment.objects.filter(
+            division_id__in=valid_div_ids, is_current=True
+        ).values('division_id', 'student_id')
+        for e in enr_qs:
+            div_to_students[e['division_id']].append(e['student_id'])
+            all_student_ids.add(e['student_id'])
+
+        # 2. Bulk promoted counts
+        promoted_counts_qs = StudentEnrollment.objects.filter(
+            division_id__in=valid_div_ids, status=StudentEnrollment.Status.PROMOTED
+        ).values('division_id').annotate(count=models.Count('id'))
+        div_to_promoted_count = {p['division_id']: p['count'] for p in promoted_counts_qs}
+
+        # 3. Bulk published semester results
+        sem_res_qs = SemesterResult.objects.filter(
+            student_id__in=all_student_ids,
+            is_published=True,
+        ).exclude(result_status=SemesterResult.ResultStatus.NOT_YET_HELD).values('student_id', 'semester_id')
+        published_results = {(r['student_id'], r['semester_id']) for r in sem_res_qs}
+
+        # 4. Bulk eligibility verifications
+        ev_qs = EligibilityVerification.objects.filter(
+            student_id__in=all_student_ids,
+        ).values(
+            'student_id', 'target_semester__number',
+            'class_teacher_status', 'hod_status', 'final_eligible'
+        )
+        student_target_to_evs = {}
+        for ev in ev_qs:
+            key = (ev['student_id'], ev['target_semester__number'])
+            student_target_to_evs[key] = ev
+
         for div in divisions:
             try:
                 if div.semester is None:
@@ -466,35 +516,39 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
                 is_year_change = sem_num in [2, 4, 6]
                 target_sem_num = sem_num + 1 if is_year_change else sem_num
 
-                enrollments = list(StudentEnrollment.objects.filter(division=div, is_current=True).values_list('student_id', flat=True))
+                enrollments = div_to_students.get(div.id, [])
                 total_students = len(enrollments)
-                promoted_count = StudentEnrollment.objects.filter(
-                    division=div, status=StudentEnrollment.Status.PROMOTED
-                ).count()
+                promoted_count = div_to_promoted_count.get(div.id, 0)
                 if total_students == 0 and promoted_count == 0:
                     continue
 
-                results_filled_count = SemesterResult.objects.filter(
-                    student_id__in=enrollments,
-                    semester=div.semester,
-                    is_published=True,
-                ).exclude(result_status=SemesterResult.ResultStatus.NOT_YET_HELD).count()
-
-                ev_qs = EligibilityVerification.objects.filter(
-                    student_id__in=enrollments,
-                    target_semester__number=target_sem_num,
+                results_filled_count = sum(
+                    1 for sid in enrollments if (sid, div.semester_id) in published_results
                 )
-                ev_count = ev_qs.count()
-                teacher_approved_count = ev_qs.filter(class_teacher_status=EligibilityVerification.StageStatus.APPROVED).count()
-                hod_approved_count = ev_qs.filter(hod_status=EligibilityVerification.StageStatus.APPROVED).count()
-                final_eligible_count = ev_qs.filter(final_eligible=True).count()
-                flagged_count = ev_qs.filter(
-                    models.Q(class_teacher_status=EligibilityVerification.StageStatus.FLAGGED) |
-                    models.Q(hod_status=EligibilityVerification.StageStatus.FLAGGED)
-                ).count()
 
-                # Verification requires a teacher to review it: a class with
-                # no assigned class teacher can never start verification.
+                matched_evs = [
+                    student_target_to_evs[(sid, target_sem_num)]
+                    for sid in enrollments
+                    if (sid, target_sem_num) in student_target_to_evs
+                ]
+                ev_count = len(matched_evs)
+                teacher_approved_count = sum(
+                    1 for e in matched_evs
+                    if e['class_teacher_status'] == EligibilityVerification.StageStatus.APPROVED
+                )
+                hod_approved_count = sum(
+                    1 for e in matched_evs
+                    if e['hod_status'] == EligibilityVerification.StageStatus.APPROVED
+                )
+                final_eligible_count = sum(
+                    1 for e in matched_evs if e['final_eligible']
+                )
+                flagged_count = sum(
+                    1 for e in matched_evs
+                    if e['class_teacher_status'] == EligibilityVerification.StageStatus.FLAGGED
+                    or e['hod_status'] == EligibilityVerification.StageStatus.FLAGGED
+                )
+
                 has_teacher = div.class_teacher_id is not None
 
                 can_start = (
@@ -1100,7 +1154,9 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
             # Optional render dependency missing -> 503, never a 500 trace.
             return Response({'detail': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-        safe_prn = str(data.get('prn_number') or 'STUDENT').replace('/', '_')
+        # F-S6-005: Sanitize PRN to prevent header injection in Content-Disposition.
+        import re as _re
+        safe_prn = _re.sub(r'[^A-Za-z0-9_]', '_', str(data.get('prn_number') or 'STUDENT'))
         filename = f"Admission_Verification_Form_{safe_prn}.pdf"
         response = HttpResponse(pdf_bytes, content_type='application/pdf')
         response['Content-Disposition'] = f'attachment; filename="{filename}"'

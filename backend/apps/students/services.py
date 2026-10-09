@@ -52,15 +52,20 @@ def check_and_promote_student(student_id, actor=None, request=None):
             return True, f'Student already active in Semester {current_enrollment.semester.number}.'
 
         # 2 & 3. Fees Set and Fees Paid Check
-        # Check if there is a payment ledger where fees are set and fully paid
+        # F-S5-001: Year-scoped — only a PAID ledger for the SAME academic year
+        # as the eligibility record counts. Stale prior-year payments must not
+        # trigger promotion.
+        fee_year = latest_eligibility.academic_year or current_enrollment.academic_year
         paid_ledger = PaymentLedger.objects.filter(
             student=student,
+            academic_year=fee_year,
             status=PaymentLedger.PaymentStatus.PAID,
         ).first()
 
         if not paid_ledger:
             paid_ledger = PaymentLedger.objects.filter(
                 student=student,
+                academic_year=fee_year,
                 total_fee_due__gt=0,
                 balance_due__lte=0,
             ).first()

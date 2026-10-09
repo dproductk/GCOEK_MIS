@@ -29,7 +29,16 @@ class Command(BaseCommand):
 
     @transaction.atomic
     def handle(self, *args, **options):
-        self.stdout.write('Seeding student records...')
+        from django.conf import settings
+        # F-S6-001: This command creates known accounts — development only.
+        if not settings.DEBUG:
+            self.stderr.write(self.style.ERROR(
+                '[SECURITY] seed_students refused: DEBUG=False. '
+                'This command must never run against a production database. '
+                'Onboard real students via the admission import workflow.'
+            ))
+            raise SystemExit(1)
+        self.stdout.write('[DEV] Seeding student records...')
 
         role_student = Role.objects.get(codename='STUDENT')
         curr_year = AcademicYear.objects.filter(is_current=True).first()
@@ -198,6 +207,10 @@ class Command(BaseCommand):
             },
         ]
 
+        import secrets
+        import string
+        _pw_alphabet = string.ascii_letters + string.digits + '!@#$%'
+
         for sdata in students_data:
             user, created = User.objects.get_or_create(
                 username=sdata['username'],
@@ -205,11 +218,15 @@ class Command(BaseCommand):
                     'email': sdata['email'],
                     'user_type': User.UserType.STUDENT,
                     'is_active': True,
-                    'must_change_password': False,
+                    # F-S6-001: random password, must change on first login.
+                    'must_change_password': True,
                 },
             )
             if created:
-                user.set_password('Student@Gceok2026!')
+                # Random 16-char password — never echoed to stdout.
+                _pw = ''.join(secrets.choice(_pw_alphabet) for _ in range(16))
+                user.set_password(_pw)
+                user.must_change_password = True
                 user.save()
                 RoleAssignment.objects.create(
                     user=user,

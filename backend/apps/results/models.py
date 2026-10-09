@@ -27,9 +27,10 @@ class SemesterResult(BaseModel):
         NOT_YET_HELD = 'NOT_YET_HELD', 'Examination Not Yet Held'
         WITHHELD = 'WITHHELD', 'Result Withheld'
 
+    # F-S4-004: PROTECT backstop so academic history is never silently deleted
     student = models.ForeignKey(
         'students.Student',
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='semester_results',
     )
     academic_year = models.ForeignKey(
@@ -130,9 +131,10 @@ class EligibilityVerification(BaseModel):
         FLAGGED = 'FLAGGED', 'Flagged with Remarks'
         REJECTED = 'REJECTED', 'Rejected'
 
+    # F-S4-004: PROTECT backstop so eligibility records are never silently cascaded
     student = models.ForeignKey(
         'students.Student',
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='eligibility_records',
     )
     department = models.ForeignKey(

@@ -332,8 +332,9 @@ def submit_semester_marks(student, semester_number, exam_session, subjects_data,
         if is_backlog_submit:
             target_sem = Semester.objects.filter(number=cur_sem_num + 1).first() or target_sem
 
-        # Check existing eligibility lock
-        existing_ev = EligibilityVerification.objects.filter(
+        # F-S7-002: Check existing eligibility lock with select_for_update to prevent
+        # race conditions between student marks submission and teacher approval.
+        existing_ev = EligibilityVerification.objects.select_for_update().filter(
             student=student,
             academic_year=academic_year,
             target_semester=target_sem,
@@ -393,12 +394,56 @@ def submit_semester_marks(student, semester_number, exam_session, subjects_data,
             else:
                 tot = float(s.get('total_marks') or 0.0)
 
+            # F-S6-002: Marks range validation against scheme maxima.
+            # Maxima resolve server-side from the Subject record; client-supplied
+            # maxima are discarded to prevent bypassing validation. Codes with no
+            # Subject record keep generic defaults BUT are warning-logged with
+            # student context: hard rejection here broke legitimate flows
+            # (scheme setup often lags marks entry), so unknown codes stay
+            # observable rather than blocking (W0 over W1 per contract).
+            import logging as _logging
+            from apps.curriculum.models import Subject
+            subj = Subject.objects.filter(code=code).first()
+            if subj is None:
+                _logging.getLogger(__name__).warning(
+                    'submit_marks: no Subject record for code %s (student %s); '
+                    'validating against generic defaults 100/50/100. Register it.',
+                    code, getattr(student, 'id', '?'),
+                )
+            if subj is not None:
+                _max_theory = float(subj.ese_max_marks or 100)
+                _ise_calc = float((subj.ca_max_marks or 0) + (subj.mse_max_marks or 0))
+                _max_ise = _ise_calc if _ise_calc > 0 else 50.0
+                _max_prac = float(subj.practical_total) if subj.practical_total else 100.0
+                _max_total = float(subj.exam_total) if subj.exam_total else (_max_theory + _max_ise + _max_prac)
+            else:
+                _max_theory, _max_ise, _max_prac = 100.0, 50.0, 100.0
+                _max_total = _max_theory + _max_ise + _max_prac
+
+            if th < 0 or th > _max_theory:
+                raise ValidationError(
+                    f'Subject {code}: theory_ese_marks {th} is out of range [0, {_max_theory}].'
+                )
+            if ise < 0 or ise > _max_ise:
+                raise ValidationError(
+                    f'Subject {code}: theory_ise_marks {ise} is out of range [0, {_max_ise}].'
+                )
+            if prac < 0 or prac > _max_prac:
+                raise ValidationError(
+                    f'Subject {code}: practical_marks {prac} is out of range [0, {_max_prac}].'
+                )
+            if tot < 0 or tot > _max_total:
+                raise ValidationError(
+                    f'Subject {code}: total_marks {tot} is out of range [0, {_max_total}].'
+                )
+
             # Scheme passing rule (fallback: Theory >= 20 AND Total >= 40)
             is_pass = (th >= min_theory and tot >= min_total)
             if is_pass:
                 grade_letter, grade_point, is_backlog = grade_for_marks(tot)
             else:
                 grade_letter, grade_point, is_backlog = 'F', 0, True
+
 
             old_row = SubjectResult.objects.filter(
                 semester_result=sem_res, course_code=code).first()
