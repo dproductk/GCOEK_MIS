@@ -355,9 +355,19 @@ export default function FeeDeskPage() {
       await fetchData();
 
       const receiptNo = created.data?.receipt_no || 'issued';
-      setSuccessMsg(`Fee marked and receipt ${receiptNo} issued for ${markingStudent.display_name}!`);
+      // Promotion outcome rides the receipt response: a non-promoted result
+      // after payment is a visible deferral, never a silent misfire.
+      const promo = created.data?.promotion;
+      if (promo && promo.attempted && !promo.promoted) {
+        setSuccessMsg(
+          `Fee marked and receipt ${receiptNo} issued for ${markingStudent.display_name}. ` +
+          `Note: auto-promotion deferred (${promo.message || 'requirements pending'}) — use Promote Class.`
+        );
+      } else {
+        setSuccessMsg(`Fee marked and receipt ${receiptNo} issued for ${markingStudent.display_name}!`);
+      }
       setShowMarkModal(false);
-      setTimeout(() => setSuccessMsg(''), 4000);
+      setTimeout(() => setSuccessMsg(''), 6000);
     } catch (err) {
       console.error('Error recording fee:', err);
       // Surface the real backend error (e.g. duplicate blocked) — never fake success.

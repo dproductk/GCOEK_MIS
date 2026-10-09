@@ -507,6 +507,35 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
             key = (ev['student_id'], ev['target_semester__number'])
             student_target_to_evs[key] = ev
 
+        # 5. Bulk stuck-unpromoted: endorsed + paid for the completing year,
+        # yet still seated below the target semester (auto-promotion misfired
+        # or is pending HOD action). Same completing-year rule as
+        # check_and_promote_student. +3 queries total, not per division.
+        from apps.finance.models import PaymentLedger
+        cur_qs = StudentEnrollment.objects.filter(
+            student_id__in=all_student_ids, is_current=True
+        ).values('student_id', 'semester__number', 'division_id')
+        cur_by_student = {c['student_id']: c for c in cur_qs}
+        final_qs = EligibilityVerification.objects.filter(
+            student_id__in=all_student_ids, final_eligible=True,
+        ).values('student_id', 'target_semester__number')
+        paid_years = set(PaymentLedger.objects.filter(
+            student_id__in=all_student_ids,
+            status=PaymentLedger.PaymentStatus.PAID,
+        ).values_list('student_id', 'academic_year_id'))
+        div_ay = {d.id: d.academic_year_id for d in valid_divs}
+        div_to_stuck = {d.id: 0 for d in valid_divs}
+        for fev in final_qs:
+            sid = fev['student_id']
+            cur = cur_by_student.get(sid)
+            if not cur or not cur['division_id']:
+                continue
+            if (fev['target_semester__number'] or 0) <= (cur['semester__number'] or 0):
+                continue
+            if (sid, div_ay.get(cur['division_id'])) not in paid_years:
+                continue
+            div_to_stuck[cur['division_id']] = div_to_stuck.get(cur['division_id'], 0) + 1
+
         for div in divisions:
             try:
                 if div.semester is None:
@@ -596,6 +625,7 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
                     'total_students': total_students,
                     'active_students_count': total_students,
                     'promoted_count': promoted_count,
+                    'stuck_unpromoted_count': div_to_stuck.get(div.id, 0),
                     'results_filled_count': results_filled_count,
                     'teacher_approved_count': teacher_approved_count,
                     'hod_approved_count': hod_approved_count,
@@ -1091,7 +1121,11 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
                 remarks=remarks,
                 request=request,
             )
-            return Response(EligibilityVerificationSerializer(updated_ev).data, status=status.HTTP_200_OK)
+            data = EligibilityVerificationSerializer(updated_ev).data
+            outcome = getattr(updated_ev, '_promotion_outcome', None)
+            if outcome is not None:
+                data['promotion'] = outcome
+            return Response(data, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 

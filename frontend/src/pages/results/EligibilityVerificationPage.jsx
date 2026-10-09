@@ -572,6 +572,40 @@ export default function EligibilityVerificationPage() {
                         </div>
                       </div>
 
+                      {/* Promotion outcome chips: promoted count (already in API payload)
+                          + stuck-unpromoted warning (endorsed + paid but still seated
+                          below target — auto-promotion misfired or pending). */}
+                      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.6rem', flexWrap: 'wrap' }}>
+                        <span
+                          style={{
+                            fontSize: '0.72rem',
+                            fontWeight: 700,
+                            padding: '0.2rem 0.6rem',
+                            borderRadius: '9999px',
+                            backgroundColor: '#f0fdf4',
+                            color: '#15803d',
+                            border: '1px solid #bbf7d0',
+                          }}
+                        >
+                          Promoted: {cls.promoted_count ?? 0}
+                        </span>
+                        {(cls.stuck_unpromoted_count ?? 0) > 0 && (
+                          <span
+                            style={{
+                              fontSize: '0.72rem',
+                              fontWeight: 700,
+                              padding: '0.2rem 0.6rem',
+                              borderRadius: '9999px',
+                              backgroundColor: '#fffbeb',
+                              color: '#b45309',
+                              border: '1px solid #fde68a',
+                            }}
+                          >
+                            {cls.stuck_unpromoted_count} stuck (paid + eligible, not promoted) — open Promote
+                          </span>
+                        )}
+                      </div>
+
                       {/* Progress Bar */}
                       <div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.73rem', color: '#64748b', marginBottom: '0.25rem' }}>
@@ -886,9 +920,9 @@ export default function EligibilityVerificationPage() {
                 { label: '2. Teacher Approved', value: rosterData?.students?.filter((s) => s.class_teacher_status === 'APPROVED').length || 0 },
                 { label: '3. HOD Endorsed', value: rosterData?.students?.filter((s) => s.hod_status === 'APPROVED').length || 0 },
                 { label: '4. Added to Eligible List', value: rosterData?.students?.filter((s) => s.final_eligible).length || 0 },
-                ...((rosterData?.promoted_students || []).length > 0
-                  ? [{ label: `5. Promoted to Sem ${rosterData.target_semester_number}`, value: rosterData.promoted_students.length }]
-                  : []),
+                // Promoted card is ALWAYS shown (even at 0): promotion visibility
+                // must not depend on there being something to show.
+                { label: `5. Promoted to Sem ${rosterData?.target_semester_number ?? '—'}`, value: rosterData?.promoted_count ?? rosterData?.promoted_students?.length ?? 0 },
               ].map((stat, idx) => (
                 <div
                   key={idx}

@@ -321,14 +321,31 @@ class PaymentLedgerViewSet(viewsets.ModelViewSet):
         # Rare case: unexpected exception (missing semester, audit failure) ->
         # log it and still return payment success. The receipt is already committed.
         if ledger.status == PaymentLedger.PaymentStatus.PAID or ledger.balance_due <= 0:
+            self._promotion_outcome = {'attempted': True, 'promoted': False, 'message': ''}
             try:
                 from apps.students.services import check_and_promote_student
-                check_and_promote_student(ledger.student_id, actor=self.request.user, request=self.request)
+                ok, msg = check_and_promote_student(ledger.student_id, actor=self.request.user, request=self.request)
+                self._promotion_outcome.update(promoted=bool(ok), message=msg or '')
             except Exception:
                 logger.exception(
                     "Promotion check failed after manual payment for ledger %s; payment stays PAID.",
                     ledger.receipt_no,
                 )
+                self._promotion_outcome.update(
+                    promoted=False,
+                    message='Auto-promotion deferred by an unexpected error; payment stays PAID. Use Promote Class.',
+                )
+        else:
+            self._promotion_outcome = {'attempted': False, 'promoted': False, 'message': ''}
+
+    def create(self, request, *args, **kwargs):
+        """Record payment; the response carries the promotion outcome so a
+        deferred auto-promotion is visible to the desk instead of silent."""
+        resp = super().create(request, *args, **kwargs)
+        outcome = getattr(self, '_promotion_outcome', None)
+        if outcome is not None and isinstance(resp.data, dict):
+            resp.data['promotion'] = outcome
+        return resp
 
     @action(detail=False, methods=['get'], url_path='my-payments')
     def my_payments(self, request):

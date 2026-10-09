@@ -314,3 +314,169 @@ def test_item9_gateway_retirement_kill_switch(api_client, monkeypatch):
 
     resp_wh = api_client.post('/api/v1/finance/online-payment/webhook/', {'txnid': 'test'})
     assert resp_wh.status_code == status.HTTP_404_NOT_FOUND
+
+
+def _backfill_setup(year_code_suffix=''):
+    """Backfill cohort: enrollment + EV anchored on a stale batch year while
+    the running class (division) and fee collection live in the current year."""
+    import datetime
+    old = AcademicYear.objects.create(
+        code=f'2024-25{year_code_suffix}', name='Academic Year 2024-2025',
+        start_date=datetime.date(2024, 7, 1), end_date=datetime.date(2025, 6, 30),
+        is_current=False)
+    cur = AcademicYear.objects.create(
+        code=f'2026-27{year_code_suffix}', name='Academic Year 2026-2027',
+        start_date=datetime.date(2026, 7, 1), end_date=datetime.date(2027, 6, 30),
+        is_current=True)
+    dept = Department.objects.create(name=f'Backfill Dept{year_code_suffix}', code=f'BKF{year_code_suffix or "X"}')
+    sem4 = Semester.objects.create(number=4, name='Semester 4', year_level=2, term_type=Semester.TermType.EVEN)
+    sem5 = Semester.objects.create(number=5, name='Semester 5', year_level=3, term_type=Semester.TermType.ODD)
+    div4 = Division.objects.create(department=dept, academic_year=cur, semester=sem4, name='A')
+    Division.objects.create(department=dept, academic_year=cur, semester=sem5, name='A')
+    prog = Program.objects.create(department=dept, name='B.Tech B', code=f'BTBKF{year_code_suffix or "X"}')
+    stu = Student.objects.create(first_name='Back', last_name='Fill', enrollment_no=f'PRN-BKF-{year_code_suffix or "X"}')
+    StudentEnrollment.objects.create(
+        student=stu, academic_year=old, department=dept, program=prog,
+        semester=sem4, division=div4, status='ACTIVE', is_current=True)
+    EligibilityVerification.objects.create(
+        student=stu, academic_year=old, target_semester=sem5, department=dept,
+        active_backlog_count=0,
+        calculated_status=EligibilityVerification.CalculatedStatus.ELIGIBLE,
+        class_teacher_status=EligibilityVerification.StageStatus.APPROVED,
+        hod_status=EligibilityVerification.StageStatus.APPROVED,
+        final_eligible=True)
+    return {'old': old, 'cur': cur, 'dept': dept, 'sem4': sem4, 'sem5': sem5,
+            'div4': div4, 'prog': prog, 'stu': stu}
+
+
+@pytest.mark.django_db
+def test_promote_backfill_paid_in_completing_year_succeeds():
+    """F-S5-001 follow-up: fee PAID in the completing (division) year promotes
+    even when enrollment/EV carry a stale batch year."""
+    import datetime
+    from apps.students.services import check_and_promote_student
+    s = _backfill_setup('A')
+    PaymentLedger.objects.create(
+        student=s['stu'], academic_year=s['cur'], receipt_no='R-BKF-A',
+        total_fee_due=1000, amount_paid=1000, balance_due=0,
+        status=PaymentLedger.PaymentStatus.PAID,
+        payment_date=datetime.date(2026, 8, 1))
+    ok, msg = check_and_promote_student(s['stu'].id)
+    assert ok is True, msg
+    old_enr = s['stu'].enrollments.filter(semester=s['sem4']).first()
+    assert old_enr.status == 'PROMOTED' and old_enr.is_current is False
+    new_enr = s['stu'].enrollments.filter(is_current=True).first()
+    assert new_enr.semester.number == 5
+    assert new_enr.academic_year.code == s['cur'].code
+    assert new_enr.division is not None and new_enr.division.semester.number == 5
+    assert new_enr.placement_confirmed is True
+
+
+@pytest.mark.django_db
+def test_promote_prior_year_only_payment_stays_blocked():
+    """F-S5-001 preserved: a PAID ledger ONLY in an unrelated past year never
+    promotes, even for backfill cohorts."""
+    import datetime
+    from apps.students.services import check_and_promote_student
+    s = _backfill_setup('B')
+    PaymentLedger.objects.create(
+        student=s['stu'], academic_year=s['old'], receipt_no='R-BKF-B',
+        total_fee_due=1000, amount_paid=1000, balance_due=0,
+        status=PaymentLedger.PaymentStatus.PAID,
+        payment_date=datetime.date(2024, 8, 1))
+    ok, msg = check_and_promote_student(s['stu'].id)
+    assert ok is False and 'Fees' in msg
+    enr = s['stu'].enrollments.filter(is_current=True).first()
+    assert enr.semester.number == 4 and enr.status == 'ACTIVE'
+
+
+def _promo_visibility_setup(suffix=''):
+    """Division in current year + endorsed student + optional ledger."""
+    import datetime
+    cur = AcademicYear.objects.create(
+        code=f'2026-27{suffix}', name='Academic Year 2026-2027',
+        start_date=datetime.date(2026, 7, 1), end_date=datetime.date(2027, 6, 30),
+        is_current=True)
+    dept = Department.objects.create(name=f'Promo Vis{suffix}', code=f'PV{suffix or "X"}')
+    sem4 = Semester.objects.create(number=4, name='Semester 4', year_level=2, term_type=Semester.TermType.EVEN)
+    sem5 = Semester.objects.create(number=5, name='Semester 5', year_level=3, term_type=Semester.TermType.ODD)
+    div4 = Division.objects.create(department=dept, academic_year=cur, semester=sem4, name='A')
+    prog = Program.objects.create(department=dept, name='B.Tech P', code=f'BTPV{suffix or "X"}')
+    hod = User.objects.create_user(username=f'hod_pv{suffix or "x"}', password='Password123!')
+    role_hod, _ = Role.objects.get_or_create(codename='HOD', defaults={'name': 'HOD'})
+    RoleAssignment.objects.create(user=hod, role=role_hod, department_id=dept.id,
+                                  status=RoleAssignment.Status.ACTIVE)
+    stu = Student.objects.create(first_name='Vis', last_name='Promo', enrollment_no=f'PRN-PV-{suffix or "X"}')
+    StudentEnrollment.objects.create(
+        student=stu, academic_year=cur, department=dept, program=prog,
+        semester=sem4, division=div4, status='ACTIVE', is_current=True)
+    ev = EligibilityVerification.objects.create(
+        student=stu, academic_year=cur, target_semester=sem5, department=dept,
+        active_backlog_count=0,
+        calculated_status=EligibilityVerification.CalculatedStatus.ELIGIBLE,
+        class_teacher_status=EligibilityVerification.StageStatus.APPROVED,
+        hod_status=EligibilityVerification.StageStatus.APPROVED,
+        final_eligible=True)
+    return {'cur': cur, 'dept': dept, 'sem4': sem4, 'sem5': sem5,
+            'div4': div4, 'prog': prog, 'hod': hod, 'stu': stu, 'ev': ev}
+
+
+@pytest.mark.django_db
+def test_classes_exposes_promoted_and_stuck_counts(api_client):
+    """Visibility: class cards carry promoted_count + stuck_unpromoted_count."""
+    import datetime
+    s = _promo_visibility_setup('C')
+    PaymentLedger.objects.create(
+        student=s['stu'], academic_year=s['cur'], receipt_no='R-PV-C',
+        total_fee_due=1000, amount_paid=1000, balance_due=0,
+        status=PaymentLedger.PaymentStatus.PAID,
+        payment_date=datetime.date(2026, 8, 1))
+    api_client.force_authenticate(user=s['hod'])
+    res = api_client.get('/api/v1/results/eligibility/classes/')
+    assert res.status_code == status.HTTP_200_OK, res.data
+    cards = res.data if isinstance(res.data, list) else res.data.get('results', [])
+    card = next(c for c in cards if c['division_id'] == str(s['div4'].id))
+    assert card['promoted_count'] == 0
+    assert card['stuck_unpromoted_count'] == 1
+
+
+@pytest.mark.django_db
+def test_endorse_response_carries_promotion_outcome(api_client):
+    """Endorse announces a deferred promotion instead of swallowing it."""
+    s = _promo_visibility_setup('D')
+    api_client.force_authenticate(user=s['hod'])
+    res = api_client.post(
+        f"/api/v1/results/eligibility/{s['ev'].id}/endorse-hod/",
+        {'status': 'APPROVED', 'remarks': 'ok'}, format='json')
+    assert res.status_code == status.HTTP_200_OK, res.data
+    promo = res.data.get('promotion')
+    assert promo is not None and promo['attempted'] is True
+    assert promo['promoted'] is False and 'Fees' in promo['message']
+
+
+@pytest.mark.django_db
+def test_desk_receipt_carries_promotion_outcome(api_client):
+    """Desk receipt announces a deferred promotion instead of silent success."""
+    import datetime
+    s = _promo_visibility_setup('E')
+    acc = User.objects.create_user(username='acc_pv_e', password='Password123!')
+    role_acc, _ = Role.objects.get_or_create(codename='ACCOUNTANT', defaults={'name': 'Accountant'})
+    RoleAssignment.objects.create(user=acc, role=role_acc, status=RoleAssignment.Status.ACTIVE)
+    api_client.force_authenticate(user=acc)
+    head = FeeHead.objects.create(
+        name='Tuition', code='TF-PV-E', academic_year=s['cur'], program=s['prog'],
+        category_quota=FeeHead.CategoryQuota.OPEN, amount=1000,
+        allowed_amounts=[1000])
+    ok = api_client.post('/api/v1/finance/assessments/', {
+        'student': str(s['stu'].id), 'academic_year': str(s['cur'].id),
+        'fee_breakdown': {'Tuition': 1000}, 'total_fee': '1000'}, format='json')
+    assert ok.status_code in (200, 201), ok.data
+    res = api_client.post('/api/v1/finance/ledger/', {
+        'student': str(s['stu'].id), 'academic_year': str(s['cur'].id),
+        'total_fee_due': '1000.00', 'amount_paid': '1000.00',
+        'payment_mode': PaymentLedger.PaymentMode.CASH,
+        'transaction_ref': 'CASH-PV-E', 'payment_date': datetime.date.today().isoformat(),
+    }, format='json')
+    assert res.status_code == status.HTTP_201_CREATED, res.data
+    promo = res.data.get('promotion')
+    assert promo is not None and promo['attempted'] is True

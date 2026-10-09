@@ -395,7 +395,10 @@ export default function HODDivisionsBatchesPage() {
       name: nextDivisionName(curYear?.id || '', semId),
       seat_capacity: 60,
       class_teacher: '',
-      intakeKey: firstGroup?.key || '',
+      // Import select always opens empty ("Create empty, place later") — the HOD
+      // picks an intake deliberately. Prefilling the first group caused wrong-slice
+      // placements when the chosen semester differed from the group's semester.
+      intakeKey: '',
     });
     setCreateError('');
     setShowCreateModal(true);
@@ -414,6 +417,15 @@ export default function HODDivisionsBatchesPage() {
       if (!used.has(divisionLetter(i))) return divisionLetter(i);
     }
     return 'A';
+  };
+
+  // Render backend per-student skip reasons so a skipped placement is never
+  // silent (e.g. semester mismatch vs already-placed). Pure display helper.
+  const formatSkipped = (skippedList) => {
+    const list = Array.isArray(skippedList) ? skippedList : [];
+    if (list.length === 0) return '';
+    const reasons = list.slice(0, 5).map((s) => s?.reason || 'skipped').join(' | ');
+    return ` Skipped ${list.length}: ${reasons}${list.length > 5 ? ` (+${list.length - 5} more)` : ''}`;
   };
 
   const handleCreateDivision = async (e) => {
@@ -452,11 +464,38 @@ export default function HODDivisionsBatchesPage() {
       if (group && newId) {
         const payload = { student_ids: group.students.map((s) => s.id) };
         if (group.batchId) payload.source_batch_id = group.batchId;
+        // Semester correction: the pending group carries the students' OWN
+        // semester (group.sem). If the HOD chose a different semester for the
+        // new division, the backend skips every cross-semester seat unless
+        // semester_id carries the deliberate correction (recorded as
+        // detention with repeat_count+1). Confirm before sending; identical
+        // semesters behave exactly as before.
+        const groupSem = Number(group.sem);
+        const divSemObj = semesters.find((s) => String(s.id) === String(createForm.semester));
+        const divSem = divSemObj ? Number(divSemObj.number) : NaN;
+        if (groupSem && divSem && groupSem !== divSem) {
+          const ok = window.confirm(
+            `${group.students.length} student(s) are in Semester ${groupSem}, but this class is Semester ${divSem}. ` +
+            `Place them here as detained (repeat count +1)? Cancel to leave them unplaced.`
+          );
+          if (!ok) {
+            setActionMsg(
+              `Division ${createForm.name.trim().toUpperCase()} created (empty). ` +
+              `${group.students.length} student(s) left unplaced — re-run placement with the intended semester to seat them.`
+            );
+            setActionError(null);
+            setShowCreateModal(false);
+            await loadAll();
+            return;
+          }
+          payload.semester_id = createForm.semester;
+        }
         const res = await academicApi.assignStudents(newId, payload);
         const movedCount = res.data?.moved?.length ?? group.students.length;
-        const skippedCount = res.data?.skipped?.length || 0;
+        const skippedList = res.data?.skipped || [];
         setActionMsg(
-          `Division ${createForm.name.trim().toUpperCase()} created — ${movedCount} student(s) placed${group.fileName ? ` from ${group.fileName}` : ''}.${skippedCount ? ` ${skippedCount} skipped (already placed elsewhere).` : ''} This import slice is now consumed.`
+          `Division ${createForm.name.trim().toUpperCase()} created — ${movedCount} student(s) placed${group.fileName ? ` from ${group.fileName}` : ''}.` +
+          formatSkipped(skippedList)
         );
       } else {
         setActionMsg(`Division ${createForm.name.trim().toUpperCase()} created.`);
@@ -485,8 +524,8 @@ export default function HODDivisionsBatchesPage() {
     setMerging(true);
     try {
       const res = await academicApi.assignStudents(addDivId, { student_ids: addSelected });
-      const skipped = res.data?.skipped?.length || 0;
-      setActionMsg(`${res.data?.detail || 'Students placed.'}${skipped ? ` ${skipped} skipped.` : ''}`);
+      const skipped = res.data?.skipped || [];
+      setActionMsg(`${res.data?.detail || 'Students placed.'}${formatSkipped(skipped)}`);
       setActionError(null);
       setShowAddModal(false);
       setAddDivId(null);
@@ -520,8 +559,8 @@ export default function HODDivisionsBatchesPage() {
       const payload = { student_ids: group.students.map((s) => s.id) };
       if (group.batchId) payload.source_batch_id = group.batchId;
       const res = await academicApi.assignStudents(placeDivId, payload);
-      const skipped = res.data?.skipped?.length || 0;
-      setActionMsg(`${res.data?.detail || 'Students placed.'}${skipped ? ` ${skipped} skipped (already placed elsewhere).` : ''}`);
+      const skipped = res.data?.skipped || [];
+      setActionMsg(`${res.data?.detail || 'Students placed.'}${formatSkipped(skipped)}`);
       setActionError(null);
       setPlaceTargetKey(null);
       setPlaceDivId('');

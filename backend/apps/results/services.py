@@ -268,10 +268,24 @@ def hod_endorse_eligibility(eligibility_id, hod_user, status_decision, remarks='
             and status_decision == EligibilityVerification.StageStatus.APPROVED
         ):
             ev.final_eligible = True
-            from apps.students.services import check_and_promote_student
-            check_and_promote_student(ev.student_id, actor=hod_user, request=request)
+            # Promotion is best-effort and must NEVER fail endorsement: capture
+            # the outcome on the instance so the view can surface a deferral
+            # instead of failing silently (stuck-but-paid trap).
+            ev._promotion_outcome = {'attempted': True, 'promoted': False, 'message': ''}
+            try:
+                from apps.students.services import check_and_promote_student
+                ok, msg = check_and_promote_student(ev.student_id, actor=hod_user, request=request)
+                ev._promotion_outcome.update(promoted=bool(ok), message=msg or '')
+            except Exception:
+                import logging as _logging
+                _logging.getLogger(__name__).exception(
+                    'Auto-promotion failed after HOD endorsement for EV %s; endorsement stands.', ev.id)
+                ev._promotion_outcome.update(
+                    promoted=False,
+                    message='Auto-promotion deferred by an unexpected error; endorsement stands. Use Promote Class.')
         else:
             ev.final_eligible = False
+            ev._promotion_outcome = {'attempted': False, 'promoted': False, 'message': ''}
 
         ev.save()
         from apps.audit.models import AuditLog as _AuditLog

@@ -774,14 +774,16 @@ class TestUploadThrottle:
 
 @pytest.mark.django_db
 class TestLandingDivisionUsesCurrentYear:
-    """Senior/backfill imports land in the CURRENT year's Division A.
+    """Senior/backfill imports land UNSEATED for HOD placement (owner-ordered).
 
-    Regression: a 2024-25 DSY file stranded a second Sem-7 Div A under the
-    past year that the HOD had to merge by hand. Fresh files (batch year ==
-    current year) behave exactly as before.
+    Former behavior auto-created a current-year Division A at commit; that
+    caused wrong-class placements the HOD had to delete and redo. Commit now
+    records semester + admission year only — division stays None and
+    placement_confirmed False until the HOD creates a class and places the
+    student (create/merge flows, incl. semester correction).
     """
 
-    def test_old_batch_lands_in_current_year_division(self):
+    def test_old_batch_lands_unseated_for_hod_placement(self):
         import datetime
         from apps.admissions.services import commit_import_batch, stage_admission_file
         cur = AcademicYear.objects.create(
@@ -820,7 +822,7 @@ class TestLandingDivisionUsesCurrentYear:
         # Admission truth stays on the old year...
         assert enr.academic_year.code == '2023-24'
         assert s.admission_year.code == '2023-24'
-        # ...but the class the student studies in runs now.
-        assert enr.division is not None
-        assert enr.division.academic_year.code == '2026-27'
-        assert Division.objects.filter(academic_year=old).count() == 0
+        # ...and NO class is auto-created: the HOD places the student.
+        assert enr.division is None
+        assert enr.placement_confirmed is False
+        assert Division.objects.count() == 0

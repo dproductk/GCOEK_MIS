@@ -52,10 +52,19 @@ def check_and_promote_student(student_id, actor=None, request=None):
             return True, f'Student already active in Semester {current_enrollment.semester.number}.'
 
         # 2 & 3. Fees Set and Fees Paid Check
-        # F-S5-001: Year-scoped — only a PAID ledger for the SAME academic year
-        # as the eligibility record counts. Stale prior-year payments must not
-        # trigger promotion.
-        fee_year = latest_eligibility.academic_year or current_enrollment.academic_year
+        # F-S5-001: Year-scoped — the fee must be PAID for the year being
+        # COMPLETED (the student's current division year), not merely any
+        # year. Stale prior-year payments must not trigger promotion.
+        # Completing-year-first resolution: backfill cohorts carry a stale
+        # enrollment/EV year from their import file while fees are assessed
+        # and collected in the running year. Normal cohorts are unaffected
+        # (division, EV and enrollment years coincide there).
+        completing_ay = (
+            (current_enrollment.division.academic_year if current_enrollment.division else None)
+            or latest_eligibility.academic_year
+            or current_enrollment.academic_year
+        )
+        fee_year = completing_ay
         paid_ledger = PaymentLedger.objects.filter(
             student=student,
             academic_year=fee_year,
@@ -73,8 +82,9 @@ def check_and_promote_student(student_id, actor=None, request=None):
         if not paid_ledger:
             return False, 'Fees have not been fully paid.'
 
-        # Determine target academic year
-        target_ay = latest_eligibility.academic_year or current_enrollment.academic_year
+        # Target academic year = the year being completed (running class year),
+        # so the new enrollment lives in the current cycle, not a stale batch year.
+        target_ay = completing_ay
 
         # Determine target division (preserve same division name if available)
         # Prefer a division in the SAME target semester, in the same academic

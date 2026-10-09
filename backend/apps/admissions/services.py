@@ -29,7 +29,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.academic_structure.models import (
-    AcademicContext, AcademicYear, Department, Division, Program, Semester,
+    AcademicContext, AcademicYear, Department, Program, Semester,
 )
 from apps.admissions.models import ImportBatch, ImportRow, StudentAdmission
 from apps.authentication.models import Role, RoleAssignment, User
@@ -845,31 +845,6 @@ def stage_admission_file(file_bytes, file_name, academic_year, user, uploaded_fi
     return batch
 
 
-def _get_or_create_division(dept, academic_year, sem1):
-    """Scoped Division A lookup for freshers; created if missing."""
-    if not (dept and academic_year and sem1):
-        return None
-    div, _ = Division.objects.get_or_create(
-        department=dept,
-        academic_year=academic_year,
-        semester=sem1,
-        name='A',
-        defaults={'seat_capacity': dept.seat_capacity or 60},
-    )
-    return div
-
-
-def _landing_year(batch_year):
-    """Academic year whose divisions receive fresh imports.
-
-    Classes run in the CURRENT year: landing senior/backfill imports under
-    their old admission year would strand a duplicate past-year Div A that
-    the HOD must merge by hand. Fresh files (batch == current) are
-    unaffected. Falls back to the batch year when no current year exists.
-    """
-    return AcademicYear.objects.filter(is_current=True).first() or batch_year
-
-
 def commit_import_batch(batch_id):
     """
     Commit all VALID rows into core records (Student + Enrollment + Login).
@@ -1007,10 +982,8 @@ def commit_import_batch(batch_id):
                         f"Program Code '{norm.get('program_code', '')}'."
                     )
                 prog = programs.get(dept.id) or Program.objects.filter(department=dept).first()
-                # Division is per-row: senior DSE rows land in a different
-                # semester than FY rows, so each gets its own Div A.
-                # (Resolved fully after row_is_dsy is known below; see div fixup.)
-                div = None
+                # No division at commit: HOD places students explicitly.
+                # Semester remains per-row (senior DSE rows keep their own sem).
 
                 # Sec 13: username = enrollment_no if available else application_id;
                 # initial password = same identifier.
@@ -1098,7 +1071,11 @@ def commit_import_batch(batch_id):
                 row_target_sem = (
                     Semester.objects.filter(number=_row_no).first() or target_sem
                 )
-                div = _get_or_create_division(dept, _landing_year(batch.academic_year), row_target_sem)
+                # No auto-seating at commit: the HOD creates the division and
+                # places students explicitly (create/merge flows). Auto-created
+                # landing divisions caused wrong-class placements that had to
+                # be deleted and redone. Enrollment lands division-less and
+                # unconfirmed; pending-intakes drives HOD placement.
 
                 # 2. Student identity (stable internal UUID PK; govt IDs unique cols).
                 name_parts = full_name.split()
@@ -1246,7 +1223,7 @@ def commit_import_batch(batch_id):
                         defaults={
                             'department': dept,
                             'program': prog,
-                            'division': div,
+                            'division': None,
                             'scheme': enrollment_scheme,
                             'status': StudentEnrollment.Status.ACTIVE,
                             'is_current': True,
