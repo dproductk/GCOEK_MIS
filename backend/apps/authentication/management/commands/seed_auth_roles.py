@@ -106,6 +106,11 @@ class Command(BaseCommand):
                 'Teaching staff with access to own profile, assigned courses, student directory, and academic schemes.',
             ),
             (
+                'EMPLOYEE',
+                'Employee (Non-Teaching)',
+                'Non-teaching staff with same access as faculty except student directory/results and teaching assignments.',
+            ),
+            (
                 'ACCOUNTANT',
                 'Accountant',
                 'Financial operations: candidate fee desk, fee collection, receipt recording, and payment ledgers.',
@@ -168,6 +173,12 @@ class Command(BaseCommand):
                 'academic.view',
                 'curriculum.view',
                 'results.view',
+            ],
+            'EMPLOYEE': [
+                'faculty.view',
+                'faculty.edit',
+                'academic.view',
+                'curriculum.view',
             ],
             'ACCOUNTANT': [
                 'student.view',

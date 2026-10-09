@@ -143,6 +143,7 @@ export function AuthProvider({ children }) {
     'CLASS_TEACHER',
     'ACCOUNTANT',
     'FACULTY',
+    'EMPLOYEE',
     'STUDENT',
   ];
 

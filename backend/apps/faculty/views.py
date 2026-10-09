@@ -120,7 +120,8 @@ class FacultyViewSet(viewsets.ModelViewSet):
                 reason='Sysadmin faculty onboarding',
             )
             # HOD / CLASS_TEACHER / ACCOUNTANT / ADMIN_HEAD also hold base FACULTY.
-            if data['initial_role'] != 'FACULTY':
+            # EMPLOYEE must NOT get base FACULTY — it carries student.view/results.view.
+            if data['initial_role'] not in ('FACULTY', 'EMPLOYEE'):
                 base_role = Role.objects.filter(codename='FACULTY').first()
                 if base_role:
                     RoleAssignment.objects.get_or_create(

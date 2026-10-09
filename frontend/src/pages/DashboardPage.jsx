@@ -24,6 +24,7 @@ export default function DashboardPage() {
 
   if (
     activeRole?.codename === 'FACULTY' ||
+    activeRole?.codename === 'EMPLOYEE' ||
     activeRole?.codename === 'CLASS_TEACHER' ||
     user?.user_type === 'FACULTY'
   ) {

@@ -171,7 +171,8 @@ export default function HODDashboardPage() {
       ]);
       setDivisions(divRes.data?.results || divRes.data || []);
       setDepartments(deptRes.data?.results || deptRes.data || []);
-      setFaculties(facRes.data?.results || facRes.data || []);
+      const _allFac = facRes.data?.results || facRes.data || [];
+      setFaculties(_allFac.filter((f) => !['DEPUTED', 'TEMPORARY_USANWARI'].includes(f.employment_type)));
       setStudents(stuRes.data?.results || stuRes.data || []);
       setEligibilities(eligRes.data?.results || eligRes.data || []);
       setSemesters(semRes.data?.results || semRes.data || []);
@@ -330,13 +331,14 @@ export default function HODDashboardPage() {
       })
     : divisions;
 
-  const deptFaculties = hodDeptId
+  const deptFaculties = (hodDeptId
     ? faculties.filter((f) => {
         if (f.department_id && String(f.department_id) === String(hodDeptId)) return true;
         if (hodDeptCode && f.department_code === hodDeptCode) return true;
         return !f.department_id && !f.department_code ? true : false;
       })
-    : faculties;
+    : faculties
+  ).filter((f) => !['DEPUTED', 'TEMPORARY_USANWARI'].includes(f.employment_type));
 
   const deptStudents = hodDeptCode
     ? students.filter((s) => s.department_code === hodDeptCode)

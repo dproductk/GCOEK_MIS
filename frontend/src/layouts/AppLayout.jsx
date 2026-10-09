@@ -86,6 +86,19 @@ const NAV_CONFIG = {
       },
     ],
   },
+  EMPLOYEE: {
+    sections: [
+      {
+        label: 'EMPLOYEE PORTAL',
+        links: [
+          { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+          { to: '/departments', label: 'Academic Structure', icon: Building2 },
+          { to: '/schemes', label: 'Schemes & Subjects', icon: BookOpen },
+          { to: '/profile', label: 'Profile', icon: UserCircle },
+        ],
+      },
+    ],
+  },
   CLASS_TEACHER: {
     sections: [
       {
@@ -173,6 +186,7 @@ function getNavRole(activeRole, user) {
     'CLASS_TEACHER',
     'ACCOUNTANT',
     'FACULTY',
+    'EMPLOYEE',
     'STUDENT',
   ];
   const activeCodenames = new Set(

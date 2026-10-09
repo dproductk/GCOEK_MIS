@@ -317,6 +317,13 @@ class RoleAssignmentViewSet(viewsets.ModelViewSet):
                 target_user = User.objects.filter(id=user_id).first()
                 if not target_user or target_user.user_type != User.UserType.FACULTY:
                     return False
+                try:
+                    from apps.faculty.models import Faculty
+                    fac = Faculty.objects.filter(user_id=target_user.id).first()
+                    if fac and getattr(fac, 'employment_type', '') in Faculty.NON_TEACHING_EMPLOYMENT_TYPES:
+                        return False
+                except Exception:
+                    pass
             scopes = get_user_scopes(request.user)
             if 'HOD' not in scopes.get('roles', []):
                 return False

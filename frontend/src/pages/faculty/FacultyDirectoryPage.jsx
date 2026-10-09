@@ -384,11 +384,31 @@ export default function FacultyDirectoryPage() {
                     onChange={(e) => setSelectedDesig(e.target.value)}
                   >
                     <option value="">All Designations</option>
-                    <option value="HOD">Head of Department (HOD)</option>
-                    <option value="PROFESSOR">Professor</option>
-                    <option value="ASSOCIATE_PROFESSOR">Associate Professor</option>
                     <option value="ASSISTANT_PROFESSOR">Assistant Professor</option>
+                    <option value="ASSOCIATE_PROFESSOR">Associate Professor</option>
+                    <option value="PROFESSOR">Professor</option>
                     <option value="LECTURER">Lecturer</option>
+                    <option value="HOD">Head of Department</option>
+                    <option value="PRINCIPAL">Principal</option>
+                    <option value="ADJUNCT_PROFESSOR">Adjunct Professor</option>
+                    <option value="ADMINISTRATIVE_OFFICER">Administrative Officer</option>
+                    <option value="OFFICE_SUPERINTENDENT">Office Superintendent</option>
+                    <option value="STENOGRAPHER">Stenographer</option>
+                    <option value="STENO_CUM_TYPIST">Steno-cum-Typist</option>
+                    <option value="HEAD_CLERK">Head Clerk</option>
+                    <option value="SENIOR_CLERK">Senior Clerk</option>
+                    <option value="JUNIOR_CLERK">Junior Clerk</option>
+                    <option value="INSTRUCTOR_MOLDER">Instructor (Molder)</option>
+                    <option value="INSTRUCTOR_TLA">Instructor (T.L.A.)</option>
+                    <option value="LAB_ASSISTANT">Lab Assistant</option>
+                    <option value="NON_TEACHING_LAB_ASSISTANT">Non-Teaching Lab Assistant</option>
+                    <option value="LAB_ATTENDANT">Lab Attendant</option>
+                    <option value="STORE_KEEPER">Store Keeper</option>
+                    <option value="LIBRARY_ASSISTANT">Library Assistant</option>
+                    <option value="PEON">Peon</option>
+                    <option value="HAMAL">Hamal</option>
+                    <option value="COORDINATOR">Co-ordinator</option>
+                    <option value="OTHER">Other</option>
                   </select>
                 </FormField>
 
@@ -505,6 +525,24 @@ export default function FacultyDirectoryPage() {
                 <option value="HOD">Head of Department</option>
                 <option value="PRINCIPAL">Principal</option>
                 <option value="ADJUNCT_PROFESSOR">Adjunct Professor</option>
+                <option value="ADMINISTRATIVE_OFFICER">Administrative Officer</option>
+                <option value="OFFICE_SUPERINTENDENT">Office Superintendent</option>
+                <option value="STENOGRAPHER">Stenographer</option>
+                <option value="STENO_CUM_TYPIST">Steno-cum-Typist</option>
+                <option value="HEAD_CLERK">Head Clerk</option>
+                <option value="SENIOR_CLERK">Senior Clerk</option>
+                <option value="JUNIOR_CLERK">Junior Clerk</option>
+                <option value="INSTRUCTOR_MOLDER">Instructor (Molder)</option>
+                <option value="INSTRUCTOR_TLA">Instructor (T.L.A.)</option>
+                <option value="LAB_ASSISTANT">Lab Assistant</option>
+                <option value="NON_TEACHING_LAB_ASSISTANT">Non-Teaching Lab Assistant</option>
+                <option value="LAB_ATTENDANT">Lab Attendant</option>
+                <option value="STORE_KEEPER">Store Keeper</option>
+                <option value="LIBRARY_ASSISTANT">Library Assistant</option>
+                <option value="PEON">Peon</option>
+                <option value="HAMAL">Hamal</option>
+                <option value="COORDINATOR">Co-ordinator</option>
+                <option value="OTHER">Other</option>
               </select>
             </FormField>
             <FormField label="Employment Type" error={fieldErrors.employment_type}>
@@ -514,6 +552,8 @@ export default function FacultyDirectoryPage() {
                 <option value="CONTRACT">Contractual</option>
                 <option value="AD_HOC">Ad-hoc</option>
                 <option value="VISITING">Visiting</option>
+                <option value="DEPUTED">Deputed</option>
+                <option value="TEMPORARY_USANWARI">Temporary / Usanwari</option>
               </select>
             </FormField>
             <FormField label="Date of Joining" required error={fieldErrors.date_of_joining}>
@@ -521,10 +561,11 @@ export default function FacultyDirectoryPage() {
                 value={form.date_of_joining} onChange={(e) => setFormField('date_of_joining', e.target.value)} />
             </FormField>
             <FormField label="Initial Role" required error={fieldErrors.initial_role}
-              help="Operational role; base FACULTY is auto-added">
+              help="Operational role; base FACULTY is auto-added except EMPLOYEE">
               <select className="edvana-input" style={{ width: '100%' }}
                 value={form.initial_role} onChange={(e) => setFormField('initial_role', e.target.value)}>
                 <option value="FACULTY">Faculty</option>
+                <option value="EMPLOYEE">Employee (Non-Teaching)</option>
                 <option value="HOD">HOD</option>
                 <option value="CLASS_TEACHER">Class Teacher</option>
                 <option value="ACCOUNTANT">Accountant</option>

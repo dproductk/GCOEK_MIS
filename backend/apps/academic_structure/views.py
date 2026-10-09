@@ -629,6 +629,10 @@ class DivisionViewSet(viewsets.ModelViewSet):
             raise ValidationError(
                 {'class_teacher': f"{faculty.display_name} has no login account yet. Create one first."}
             )
+        if getattr(faculty, 'employment_type', '') in Faculty.NON_TEACHING_EMPLOYMENT_TYPES:
+            raise ValidationError(
+                {'class_teacher': f"{faculty.display_name} is non-teaching ({faculty.employment_type}) and cannot be a class teacher."}
+            )
         mutable = data.copy() if hasattr(data, 'copy') else dict(data)
         mutable['class_teacher'] = str(faculty.user_id)
         request._full_data = mutable

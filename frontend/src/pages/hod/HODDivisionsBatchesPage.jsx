@@ -260,7 +260,7 @@ export default function HODDivisionsBatchesPage() {
       setSemesters(semList);
       setDivisions(divList);
       setStudents(stuList);
-      setFaculties(facList);
+      setFaculties(facList.filter((f) => !['DEPUTED', 'TEMPORARY_USANWARI'].includes(f.employment_type)));
       setSchemes(schemeList);
       setIntakes(Array.isArray(intakeList) ? intakeList : null);
     } catch (err) {

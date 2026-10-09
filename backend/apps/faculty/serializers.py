@@ -253,7 +253,7 @@ class FacultyCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError({'department_id': 'Department not found.'})
 
         role_code = (attrs.get('initial_role') or 'FACULTY').strip().upper() or 'FACULTY'
-        allowed_roles = {'FACULTY', 'HOD', 'CLASS_TEACHER', 'ACCOUNTANT', 'ADMIN_HEAD'}
+        allowed_roles = {'FACULTY', 'EMPLOYEE', 'HOD', 'CLASS_TEACHER', 'ACCOUNTANT', 'ADMIN_HEAD'}
         if role_code not in allowed_roles:
             raise serializers.ValidationError(
                 {'initial_role': f"Must be one of: {', '.join(sorted(allowed_roles))}."}
@@ -335,6 +335,10 @@ class TeachingAssignmentWriteSerializer(serializers.ModelSerializer):
         faculty = attrs.get('faculty') or (self.instance.faculty if self.instance else None)
         if not faculty:
             raise serializers.ValidationError({'faculty': 'A teacher is required.'})
+        # Production guard: non-teaching staff can never hold teaching slots.
+        if getattr(faculty, 'employment_type', '') in Faculty.NON_TEACHING_EMPLOYMENT_TYPES:
+            raise serializers.ValidationError(
+                {'faculty': f'{faculty.display_name} is non-teaching ({faculty.employment_type}) and cannot be a subject teacher.'})
         code = (attrs.get('subject_code') or (self.instance.subject_code if self.instance else '') or '').strip().upper()
         role = attrs.get('role') or (self.instance.role if self.instance else TeachingAssignment.Role.PRIMARY_FACULTY)
         if not code:

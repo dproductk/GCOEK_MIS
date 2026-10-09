@@ -6,7 +6,7 @@ import { LoadingState } from '../../components/common/StateDisplays';
 import PageHeader from '../../components/common/PageHeader';
 
 export default function FacultyDashboardPage() {
-  const { user, activeRole } = useAuth();
+  const { user, activeRole, hasRole } = useAuth();
   const navigate = useNavigate();
 
   const [profile, setProfile] = useState(null);
@@ -41,9 +41,12 @@ export default function FacultyDashboardPage() {
     );
   }
 
+  const isEmployeeOnly = hasRole('EMPLOYEE') && !hasRole('FACULTY');
   const hubLinks = [
     { text: 'View and update your personal information, address, contact details, and bank details, etc.', to: '/profile' },
-    { text: 'Browse the student directory and verify student profiles.', to: '/students' },
+    ...(!isEmployeeOnly
+      ? [{ text: 'Browse the student directory and verify student profiles.', to: '/students' }]
+      : []),
     ...(activeRole?.codename === 'CLASS_TEACHER' || activeRole?.codename === 'HOD'
       ? [{ text: 'Review your class, verify results and endorse promotions.', to: '/my-class' }]
       : []),

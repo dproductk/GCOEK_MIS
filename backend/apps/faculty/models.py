@@ -28,18 +28,42 @@ class Faculty(BaseModel):
         LECTURER = 'LECTURER', 'Lecturer'
         HOD = 'HOD', 'Head of Department'
         PRINCIPAL = 'PRINCIPAL', 'Principal'
+        ADMINISTRATIVE_OFFICER = 'ADMINISTRATIVE_OFFICER', 'Administrative Officer'
+        OFFICE_SUPERINTENDENT = 'OFFICE_SUPERINTENDENT', 'Office Superintendent'
+        STENOGRAPHER = 'STENOGRAPHER', 'Stenographer'
+        STENO_CUM_TYPIST = 'STENO_CUM_TYPIST', 'Steno-cum-Typist'
+        HEAD_CLERK = 'HEAD_CLERK', 'Head Clerk'
+        SENIOR_CLERK = 'SENIOR_CLERK', 'Senior Clerk'
+        JUNIOR_CLERK = 'JUNIOR_CLERK', 'Junior Clerk'
+        INSTRUCTOR_MOLDER = 'INSTRUCTOR_MOLDER', 'Instructor (Molder)'
+        INSTRUCTOR_TLA = 'INSTRUCTOR_TLA', 'Instructor (T.L.A.)'
+        LAB_ASSISTANT = 'LAB_ASSISTANT', 'Lab Assistant'
+        NON_TEACHING_LAB_ASSISTANT = 'NON_TEACHING_LAB_ASSISTANT', 'Non-Teaching Lab Assistant'
+        LAB_ATTENDANT = 'LAB_ATTENDANT', 'Lab Attendant'
+        STORE_KEEPER = 'STORE_KEEPER', 'Store Keeper'
+        LIBRARY_ASSISTANT = 'LIBRARY_ASSISTANT', 'Library Assistant'
+        PEON = 'PEON', 'Peon'
+        HAMAL = 'HAMAL', 'Hamal'
+        COORDINATOR = 'COORDINATOR', 'Co-ordinator'
+        OTHER = 'OTHER', 'Other'
 
     class EmploymentType(models.TextChoices):
         REGULAR = 'REGULAR', 'Regular / Permanent'
         CONTRACT = 'CONTRACT', 'Contractual'
         AD_HOC = 'AD_HOC', 'Ad-hoc'
         VISITING = 'VISITING', 'Visiting Faculty'
+        DEPUTED = 'DEPUTED', 'Deputed'
+        TEMPORARY_USANWARI = 'TEMPORARY_USANWARI', 'Temporary / Usanwari'
 
     class EmploymentStatus(models.TextChoices):
         ACTIVE = 'ACTIVE', 'Active'
         ON_LEAVE = 'ON_LEAVE', 'On Leave'
         RELIEVED = 'RELIEVED', 'Relieved / Resigned'
         RETIRED = 'RETIRED', 'Retired'
+
+    #: Employment types that are non-teaching and must never hold
+    #: subject-teacher / class-teacher slots. App-level only, no DB change.
+    NON_TEACHING_EMPLOYMENT_TYPES = frozenset({'DEPUTED', 'TEMPORARY_USANWARI'})
 
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,

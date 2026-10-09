@@ -247,6 +247,20 @@ class RoleAssignmentSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'division_id': 'Division is required when assigning the CLASS_TEACHER role.'
                 })
+        # Production guard: non-teaching staff can never hold teaching roles.
+        if role and getattr(role, 'codename', '') in ('CLASS_TEACHER', 'HOD'):
+            user = attrs.get('user') or getattr(self.instance, 'user', None)
+            if user is not None:
+                try:
+                    from apps.faculty.models import Faculty
+                    fac = Faculty.objects.filter(user_id=getattr(user, 'id', user)).first()
+                    if fac and getattr(fac, 'employment_type', '') in Faculty.NON_TEACHING_EMPLOYMENT_TYPES:
+                        raise serializers.ValidationError(
+                            'Non-teaching staff cannot hold teaching roles (CLASS_TEACHER/HOD).')
+                except serializers.ValidationError:
+                    raise
+                except Exception:
+                    pass
         return attrs
 
 

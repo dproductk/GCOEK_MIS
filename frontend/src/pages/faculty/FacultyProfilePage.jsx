@@ -39,12 +39,31 @@ const DEPARTMENTS = [
 ];
 
 const DESIGNATIONS = [
-  'Lecturer',
   'Assistant Professor',
   'Associate Professor',
   'Professor',
-  'Head of Department (HOD)',
+  'Lecturer',
+  'Head of Department',
   'Principal',
+  'Adjunct Professor',
+  'Administrative Officer',
+  'Office Superintendent',
+  'Stenographer',
+  'Steno-cum-Typist',
+  'Head Clerk',
+  'Senior Clerk',
+  'Junior Clerk',
+  'Instructor (Molder)',
+  'Instructor (T.L.A.)',
+  'Lab Assistant',
+  'Non-Teaching Lab Assistant',
+  'Lab Attendant',
+  'Store Keeper',
+  'Library Assistant',
+  'Peon',
+  'Hamal',
+  'Co-ordinator',
+  'Other',
 ];
 
 const CATEGORIES = [
