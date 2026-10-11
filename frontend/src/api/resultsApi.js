@@ -24,10 +24,10 @@ export const resultsApi = {
       remarks,
     }),
 
-  bulkFlagSemesters: (studentId, targetSemesterNumbers, remarks) =>
+  bulkFlagSemesters: (studentId, semesterNumbers, remarks) =>
     client.post('/results/eligibility/bulk-flag/', {
       student_id: studentId,
-      target_semester_numbers: targetSemesterNumbers,
+      semester_numbers: semesterNumbers,
       remarks,
     }),
 

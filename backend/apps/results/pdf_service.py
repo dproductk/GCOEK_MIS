@@ -200,7 +200,9 @@ def get_student_admission_form_data(student, eligibility=None):
         ct_name = 'Class Teacher'
 
     ct_time = getattr(eligibility, 'class_teacher_reviewed_at', None) if eligibility else None
-    ct_time_str = ct_time.strftime('%d-%b-%Y %I:%M %p IST') if ct_time else ('Pending' if eligibility else '—')
+    # Timestamps are stored in UTC (USE_TZ): convert to local IST before
+    # labelling — strftime alone would print the UTC wall-clock as "IST".
+    ct_time_str = timezone.localtime(ct_time).strftime('%d-%b-%Y %I:%M %p IST') if ct_time else ('Pending' if eligibility else '—')
 
     # HOD Approval Resolution
     hod_status = getattr(eligibility, 'hod_status', 'PENDING') if eligibility else 'PENDING'
@@ -217,7 +219,7 @@ def get_student_admission_form_data(student, eligibility=None):
         hod_name = 'Head of Department'
 
     hod_time = getattr(eligibility, 'hod_reviewed_at', None) if eligibility else None
-    hod_time_str = hod_time.strftime('%d-%b-%Y %I:%M %p IST') if hod_time else ('Pending' if eligibility else '—')
+    hod_time_str = timezone.localtime(hod_time).strftime('%d-%b-%Y %I:%M %p IST') if hod_time else ('Pending' if eligibility else '—')
 
     final_eligible = bool(eligibility and eligibility.final_eligible)
     has_verification = eligibility is not None

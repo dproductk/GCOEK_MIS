@@ -127,6 +127,8 @@ export default function StudentDashboardPage() {
                       ? 'Verification initiated by Department — Under review by Class Teacher'
                       : admissionForm.verification_stage === 'FLAGGED'
                       ? `Clarification needed: "${admissionForm.remarks || 'Check with Class Teacher'}"`
+                      : admissionForm.verification_stage === 'REJECTED'
+                      ? 'Not Eligible — rejected after review. Contact department.'
                       : 'Verification in progress'}
                   </div>
                 </div>

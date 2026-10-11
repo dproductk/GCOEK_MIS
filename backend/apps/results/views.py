@@ -133,8 +133,8 @@ class SemesterResultViewSet(viewsets.ReadOnlyModelViewSet):
                     student__enrollments__division_id__in=list(_ct_div_ids) or [],
                 )
             elif 'FACULTY' in scopes['roles']:
-                # Read-only directory view (existing behavior).
-                qs = qs.filter(student_id=student_param)
+                # Faculty has no direct result access; use class roster via CT/HOD.
+                return SemesterResult.objects.none()
             else:
                 return SemesterResult.objects.none()
         elif not (scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']):
@@ -149,7 +149,7 @@ class SemesterResultViewSet(viewsets.ReadOnlyModelViewSet):
             elif 'STUDENT' in scopes['roles']:
                 qs = qs.filter(student__user_id=user.id, is_published=True)
             else:
-                # Plain FACULTY and unknown roles get nothing without student_id.
+                # FACULTY and any other role: no college-wide dump.
                 return SemesterResult.objects.none()
 
         semester_param = self.request.query_params.get('semester_number') or self.request.query_params.get('semester')
@@ -428,6 +428,10 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
                 )
             else:
                 return EligibilityVerification.objects.none()
+            # Fix 13: honour department filter even with student_id.
+            dept_param_early = self.request.query_params.get('department_id') or self.request.query_params.get('department')
+            if dept_param_early:
+                qs = qs.filter(department_id=dept_param_early)
             return qs.distinct().order_by('target_semester__number')
 
         dept_param = self.request.query_params.get('department_id') or self.request.query_params.get('department')
@@ -442,7 +446,12 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
         if scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles'] or 'ACCOUNTANT' in scopes['roles']:
             filtered_qs = qs
         elif 'HOD' in scopes['roles']:
-            filtered_qs = qs.filter(department_id__in=scopes['department_ids'])
+            # Fix 14: use live current enrollment dept, not snapshot,
+            # so transferred students move to new HOD and old HOD loses access.
+            filtered_qs = qs.filter(
+                student__enrollments__department_id__in=scopes['department_ids'],
+                student__enrollments__is_current=True,
+            )
         elif 'CLASS_TEACHER' in scopes['roles']:
             # Assigned divisions only (matches classes()/roster). No dept fallback.
             from apps.academic_structure.models import Division as _Division
@@ -889,6 +898,7 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
                 'enrollment_no': stu.enrollment_no,
                 'roll_number': roll_number,
                 'current_semester': current_sem_num,
+                'is_direct_second_year': _dsy,
                 'target_semester': target_sem_num,
                 'moved_up': moved_up,
                 'result_filled': has_result,
@@ -1208,6 +1218,27 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
                 remarks=remarks,
                 request=request,
             )
+            # Keep per-semester correction flags in sync with the cycle
+            # decision: a single FLAG reopens every published semester (the
+            # remark may point at any of them), while APPROVE/REJECTED closes
+            # all corrections. Bulk flag (below) narrows to ticked semesters.
+            from apps.results.models import SemesterResult as _SemesterResult
+            if decision == EligibilityVerification.StageStatus.FLAGGED:
+                _SemesterResult.objects.filter(
+                    student_id=ev.student_id, is_published=True,
+                ).exclude(
+                    result_status=_SemesterResult.ResultStatus.NOT_YET_HELD,
+                ).update(
+                    correction_requested=True,
+                    correction_remarks=str(remarks or '')[:500],
+                )
+            elif decision in (
+                EligibilityVerification.StageStatus.APPROVED,
+                EligibilityVerification.StageStatus.REJECTED,
+            ):
+                _SemesterResult.objects.filter(
+                    student_id=ev.student_id, correction_requested=True,
+                ).update(correction_requested=False, correction_remarks='')
             return Response(EligibilityVerificationSerializer(updated_ev).data, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -1216,11 +1247,19 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
     def bulk_flag(self, request):
         """Flag corrections for one student across several semesters at once.
 
-        Body: {student_id, target_semester_numbers: [2, 3, ...], remarks}.
+        Two input shapes (one required):
+        - {student_id, semester_numbers: [3, 4, ...], remarks}: teacher ticks
+          RESULT semesters 1..current in the review modal. Only those
+          semesters reopen for the student; the current verification cycle
+          is flagged alongside so re-review is queued. Each successful
+          student resubmit clears its own semester only.
+        - {student_id, target_semester_numbers: [2, 3, ...], remarks}:
+          legacy direct verification-row flagging (kept for compatibility).
+
         The teacher ticks semesters in the review modal, writes ONE remarks
         note, and flags all chosen rows in a single atomic transaction:
         either every chosen row is flagged or none is (no partial flags).
-        Only FLAGGED is allowed here — approvals stay single-row so each
+        Only FLAGGED is allowed here - approvals stay single-row so each
         decision keeps its own audit trail. Only the flagged rows reopen
         for student correction; every other row keeps its state.
         Same scope + prerequisite gates as single review, per row.
@@ -1243,6 +1282,10 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(
                 {'detail': 'Remarks must be 500 characters or fewer (audit record limit).'},
                 status=status.HTTP_400_BAD_REQUEST)
+        # New per-semester path: the teacher ticks RESULT semesters
+        # 1..current; only those reopen for the student.
+        if request.data.get('semester_numbers') is not None:
+            return self._bulk_flag_by_semester(request)
         if not isinstance(raw_numbers, list) or not raw_numbers:
             return Response(
                 {'detail': 'target_semester_numbers list is required (e.g. [2, 3]).'},
@@ -1333,6 +1376,150 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
             status=status.HTTP_200_OK,
         )
 
+    def _bulk_flag_by_semester(self, request):
+        """Per-semester flagging: teacher ticks RESULT semesters 1..current.
+
+        Only the ticked semesters reopen for the student (each keeps its own
+        correction flag, cleared independently on resubmit). The student's
+        current verification cycle is flagged alongside so the roster shows
+        FLAGGED and re-review is queued. All-or-nothing like the legacy path.
+        """
+        from django.db import transaction as _transaction
+        from apps.academic_structure.models import Semester as _Semester
+        from apps.results.services import evaluate_student_eligibility
+
+        student_id = request.data.get('student_id')
+        raw_numbers = request.data.get('semester_numbers') or []
+        remarks = str(request.data.get('remarks') or '').strip()
+        if not student_id:
+            return Response({'detail': 'student_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not remarks:
+            return Response(
+                {'detail': 'Remarks are required — they become the permanent audit record.'},
+                status=status.HTTP_400_BAD_REQUEST)
+        if len(remarks) > 500:
+            return Response(
+                {'detail': 'Remarks must be 500 characters or fewer (audit record limit).'},
+                status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(raw_numbers, list) or not raw_numbers:
+            return Response(
+                {'detail': 'semester_numbers list is required (e.g. [3, 4]).'},
+                status=status.HTTP_400_BAD_REQUEST)
+        try:
+            numbers = sorted({int(n) for n in raw_numbers})
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'semester_numbers must be integers 1-8.'},
+                status=status.HTTP_400_BAD_REQUEST)
+        if any(n < 1 or n > 8 for n in numbers):
+            return Response(
+                {'detail': 'semester_numbers must be integers 1-8.'},
+                status=status.HTTP_400_BAD_REQUEST)
+        if len(numbers) > 8:
+            return Response({'detail': 'Too many semesters at once.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        student = Student.objects.filter(id=student_id).first()
+        if student is None:
+            return Response({'detail': 'Student not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Same teacher scope gate as the legacy path.
+        scopes = get_user_scopes(request.user)
+        allowed = scopes['is_system_wide'] or request.user.is_superuser
+        if not allowed and user_has_role(request.user, 'CLASS_TEACHER'):
+            enr = student.enrollments.filter(is_current=True).select_related('division').first()
+            div_id = enr.division_id if enr and enr.division_id else None
+            if div_id:
+                from apps.academic_structure.models import Division
+                div = Division.objects.filter(id=div_id).first()
+                if div and div.class_teacher_id == request.user.id:
+                    allowed = True
+                elif str(div_id) in {str(d) for d in scopes.get('division_ids', [])}:
+                    allowed = True
+            elif enr and str(enr.department_id) in {str(d) for d in scopes.get('department_ids', [])}:
+                allowed = True
+        if not allowed:
+            return Response(
+                {'detail': 'Only the assigned class teacher of this student may bulk-flag. '
+                           'HODs flag semesters back one at a time via endorse-hod.'},
+                status=status.HTTP_403_FORBIDDEN)
+
+        enr = student.enrollments.filter(is_current=True).select_related('semester').first()
+        cur_num = enr.semester.number if enr and enr.semester else None
+        if cur_num is None:
+            return Response(
+                {'detail': 'Student has no active enrollment. Review is blocked.'},
+                status=status.HTTP_400_BAD_REQUEST)
+        _row = Student.objects.filter(id=student.id).values(
+            'is_direct_second_year', 'admission_type').first() or {}
+        _dsy = bool(_row.get('is_direct_second_year')) or str(
+            _row.get('admission_type') or '').upper() == 'DSE'
+        _start = 3 if _dsy else 1
+        out_of_range = [n for n in numbers if n < _start or n > cur_num]
+        if out_of_range:
+            return Response(
+                {'detail': f"Semester {', '.join(str(n) for n in out_of_range)} is out of range — "
+                           f"this student is in Sem {cur_num} (corrections open Sem {_start}..{cur_num})."},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        # Every ticked semester must have a filled, published result to correct.
+        rows = SemesterResult.objects.filter(
+            student=student, semester__number__in=numbers, is_published=True,
+        ).exclude(
+            result_status=SemesterResult.ResultStatus.NOT_YET_HELD,
+        ).select_related('semester', 'academic_year').order_by(
+            '-academic_year__start_date', '-created_at')
+        by_num = {}
+        for r in rows:
+            by_num.setdefault(r.semester.number, r)
+        missing = [n for n in numbers if n not in by_num]
+        if missing:
+            return Response(
+                {'detail': f"Sem {', '.join(str(n) for n in missing)} has no filled result to correct yet."},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        # The student's current verification cycle rides along so the roster
+        # shows FLAGGED and the teacher re-review is queued.
+        target_num = cur_num + 1 if cur_num in (2, 4, 6) else cur_num
+        target_sem = _Semester.objects.filter(number=target_num).first()
+        if target_sem is None:
+            return Response(
+                {'detail': f'Semester {target_num} not found.'},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with _transaction.atomic():
+                ev = EligibilityVerification.objects.filter(
+                    student=student, target_semester=target_sem,
+                ).select_related('academic_year').order_by(
+                    '-academic_year__start_date', '-created_at').first()
+                if ev is None:
+                    ev = evaluate_student_eligibility(student, target_sem)
+                locked_ev = EligibilityVerification.objects.select_for_update().get(id=ev.id)
+                updated = class_teacher_review_eligibility(
+                    eligibility_id=str(locked_ev.id),
+                    reviewer_user=request.user,
+                    status_decision=EligibilityVerification.StageStatus.FLAGGED,
+                    remarks=remarks,
+                    request=request,
+                )
+                flagged = []
+                for num in numbers:
+                    locked_row = SemesterResult.objects.select_for_update().get(id=by_num[num].id)
+                    locked_row.correction_requested = True
+                    locked_row.correction_remarks = remarks[:500]
+                    locked_row.save(update_fields=['correction_requested', 'correction_remarks', 'updated_at'])
+                    flagged.append({
+                        'semester_number': num,
+                        'class_teacher_status': updated.class_teacher_status,
+                    })
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {'detail': f"Flagged {len(flagged)} semester(s) for correction. Only those semesters reopen for the student.",
+             'flagged': flagged},
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=True, methods=['post'], url_path='endorse-hod')
     def endorse_hod(self, request, pk=None):
         """HOD approves or flags/rejects candidate eligibility."""
@@ -1344,7 +1531,13 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
         if not (scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']):
             if 'HOD' in scopes['roles']:
                 allowed = {str(d) for d in scopes.get('department_ids', [])}
-                if str(ev.department_id) not in allowed:
+                # Fix 14: prefer live current enrollment dept so transfers move
+                # to new HOD; snapshot is fallback only when no live enrollment.
+                live_enr = ev.student.enrollments.filter(is_current=True).first()
+                if live_enr and live_enr.department_id:
+                    if str(live_enr.department_id) not in allowed:
+                        return Response({'detail': 'HOD may only endorse eligibility for their own department.'}, status=status.HTTP_403_FORBIDDEN)
+                elif str(ev.department_id) not in allowed:
                     return Response({'detail': 'HOD may only endorse eligibility for their own department.'}, status=status.HTTP_403_FORBIDDEN)
             else:
                 return Response({'detail': 'Only the HOD or Admin can endorse departmental eligibility.'}, status=status.HTTP_403_FORBIDDEN)
@@ -1360,6 +1553,18 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
                 remarks=remarks,
                 request=request,
             )
+            # Any HOD decision closes outstanding per-semester corrections:
+            # APPROVE/REJECTED finalise the cycle, and FLAGGED-back hands the
+            # cycle to the teacher, who re-flags the exact semesters afresh.
+            from apps.results.models import SemesterResult as _SemesterResult
+            if decision in (
+                EligibilityVerification.StageStatus.APPROVED,
+                EligibilityVerification.StageStatus.FLAGGED,
+                EligibilityVerification.StageStatus.REJECTED,
+            ):
+                _SemesterResult.objects.filter(
+                    student_id=ev.student_id, correction_requested=True,
+                ).update(correction_requested=False, correction_remarks='')
             data = EligibilityVerificationSerializer(updated_ev).data
             outcome = getattr(updated_ev, '_promotion_outcome', None)
             if outcome is not None:

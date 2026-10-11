@@ -26,6 +26,17 @@ export default function FacultyDirectoryPage() {
   const { hasRole } = useAuth();
   const isSysadmin = hasRole('SYSADMIN');
 
+  // Option A (strict): student-only logins get no faculty directory.
+  const isStudentOnly =
+    hasRole('STUDENT') &&
+    !hasRole('SYSADMIN') &&
+    !hasRole('ADMIN_HEAD') &&
+    !hasRole('HOD') &&
+    !hasRole('CLASS_TEACHER') &&
+    !hasRole('FACULTY') &&
+    !hasRole('EMPLOYEE') &&
+    !hasRole('ACCOUNTANT');
+
   const [faculties, setFaculties] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -79,6 +90,13 @@ export default function FacultyDirectoryPage() {
   };
 
   const loadFaculties = async () => {
+    // Staff-only gate (UX). Backend also returns 403 for student-only.
+    if (isStudentOnly) {
+      setLoading(false);
+      setFaculties([]);
+      setError('Not allowed. Faculty directory is staff-only.');
+      return;
+    }
     try {
       setLoading(true);
       setError(null);
@@ -271,6 +289,32 @@ export default function FacultyDirectoryPage() {
       ),
     },
   ];
+
+  if (isStudentOnly) {
+    return (
+      <>
+        <PageHeader
+          breadcrumbs={[
+            { label: 'Home', to: '/dashboard' },
+            { label: 'Faculty & Staff' },
+            { label: 'Faculty Directory' },
+          ]}
+          title="Faculty & Staff Directory"
+          subtitle="Academic professors, department heads, and instructional staff."
+        />
+        <div className="edvana-banner-overlap">
+          <div className="edvana-card">
+            <div className="edvana-card-body" style={{ padding: '2rem', textAlign: 'center' }}>
+              <h3 style={{ fontSize: '1rem', fontWeight: 700, color: '#0f172a' }}>Not allowed</h3>
+              <p style={{ fontSize: '0.875rem', color: '#64748b', marginTop: '0.5rem' }}>
+                Faculty directory is staff-only. Student logins cannot view faculty contact details.
+              </p>
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
 
   return (
     <>

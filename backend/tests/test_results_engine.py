@@ -1060,6 +1060,116 @@ class TestBulkFlagSemesters:
         assert ev2.class_teacher_status == 'PENDING'
 
 
+@pytest.mark.django_db
+class TestBulkFlagBySemester:
+    """Teacher ticks RESULT semesters 1..current; only those reopen."""
+
+    def _sem4_setup(self, result_setup):
+        from apps.academic_structure.models import Semester
+        student = result_setup['student']
+        sem4, _ = Semester.objects.get_or_create(
+            number=4, defaults={'name': 'Semester 4', 'year_level': 2,
+                                'term_type': Semester.TermType.EVEN})
+        sem5, _ = Semester.objects.get_or_create(
+            number=5, defaults={'name': 'Semester 5', 'year_level': 3,
+                                'term_type': Semester.TermType.ODD})
+        enr = student.enrollments.filter(is_current=True).first()
+        enr.semester = sem4
+        enr.save(update_fields=['semester'])
+        _make_review_ready(student, result_setup['year'], sem4)
+        return student, sem4, sem5
+
+    def _flag_3_4(self, api_client, result_setup):
+        student, _, _ = self._sem4_setup(result_setup)
+        api_client.force_authenticate(user=result_setup['user_ct'])
+        res = api_client.post(
+            '/api/v1/results/eligibility/bulk-flag/',
+            {'student_id': str(student.id), 'semester_numbers': [3, 4],
+             'remarks': 'Correct Sem 3 and 4 marksheets.'}, format='json')
+        assert res.status_code == status.HTTP_200_OK, res.data
+        return student, res
+
+    def test_flags_only_ticked_semesters(self, api_client, result_setup):
+        from apps.results.models import EligibilityVerification
+        student, res = self._flag_3_4(api_client, result_setup)
+        assert {f['semester_number'] for f in res.data['flagged']} == {3, 4}
+        flags = dict(SemesterResult.objects.filter(
+            student=student, is_published=True,
+        ).values_list('semester__number', 'correction_requested'))
+        assert flags == {1: False, 2: False, 3: True, 4: True}
+        ev5 = EligibilityVerification.objects.filter(
+            student=student, target_semester__number=5).first()
+        assert ev5 is not None and ev5.class_teacher_status == 'FLAGGED'
+
+    def test_resubmit_clears_only_own_flag(self, api_client, result_setup):
+        from apps.results.models import EligibilityVerification
+        student, _ = self._flag_3_4(api_client, result_setup)
+        api_client.force_authenticate(user=result_setup['user_stu'])
+        payload = {
+            'semester_number': 3, 'exam_session': 'Winter 2026',
+            'subjects': [
+                {'course_code': 'C301', 'course_name': 'Sub 1', 'credits': 3,
+                 'theory_marks': 45, 'mid1_marks': 15, 'mid2_marks': 15},
+            ],
+        }
+        res = api_client.post('/api/v1/results/semester-results/submit-marks/', payload, format='json')
+        assert res.status_code == status.HTTP_200_OK, res.data
+        flags = dict(SemesterResult.objects.filter(
+            student=student, is_published=True,
+        ).values_list('semester__number', 'correction_requested'))
+        assert flags[3] is False
+        assert flags[4] is True
+        ev5 = EligibilityVerification.objects.filter(
+            student=student, target_semester__number=5).first()
+        assert ev5.class_teacher_status == 'PENDING'
+
+    def test_unticked_published_resubmit_rejected(self, api_client, result_setup):
+        student, _ = self._flag_3_4(api_client, result_setup)
+        api_client.force_authenticate(user=result_setup['user_stu'])
+        payload = {
+            'semester_number': 2, 'exam_session': 'Winter 2026',
+            'subjects': [
+                {'course_code': 'C201', 'course_name': 'Sub 1', 'credits': 3,
+                 'theory_marks': 45, 'mid1_marks': 15, 'mid2_marks': 15},
+            ],
+        }
+        res = api_client.post('/api/v1/results/semester-results/submit-marks/', payload, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'not flagged' in res.data['detail']
+
+    def test_out_of_range_rejected(self, api_client, result_setup):
+        student, _, _ = self._sem4_setup(result_setup)
+        api_client.force_authenticate(user=result_setup['user_ct'])
+        res = api_client.post(
+            '/api/v1/results/eligibility/bulk-flag/',
+            {'student_id': str(student.id), 'semester_numbers': [5],
+             'remarks': 'Too far.'}, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'out of range' in res.data['detail']
+
+    def test_unfilled_semester_rejected(self, api_client, result_setup):
+        from apps.academic_structure.models import Semester
+        student = result_setup['student']
+        sem4 = Semester.objects.get(number=4) if Semester.objects.filter(number=4).exists() else None
+        if sem4 is None:
+            sem4 = Semester.objects.create(number=4, name='Semester 4', year_level=2,
+                                           term_type=Semester.TermType.EVEN)
+        enr = student.enrollments.filter(is_current=True).first()
+        enr.semester = sem4
+        enr.save(update_fields=['semester'])
+        # Only Sem 1-3 filled; Sem 4 has no result to correct.
+        _make_review_ready(student, result_setup['year'], result_setup['sem3'])
+        student.profile_locked = True
+        student.save(update_fields=['profile_locked', 'updated_at'])
+        api_client.force_authenticate(user=result_setup['user_ct'])
+        res = api_client.post(
+            '/api/v1/results/eligibility/bulk-flag/',
+            {'student_id': str(student.id), 'semester_numbers': [4],
+             'remarks': 'Nothing there.'}, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'no filled result' in res.data['detail']
+
+
 class TestClassVerificationWorkflow:
     """Tests for class cards, roster pipeline stages, and per-class verification start."""
 

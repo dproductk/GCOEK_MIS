@@ -61,6 +61,21 @@ class SemesterResult(BaseModel):
     )
     is_published = models.BooleanField(default=False)
     published_at = models.DateTimeField(null=True, blank=True)
+    # Per-semester correction scope: set when a class teacher ticks this
+    # semester for correction (single flag opens every published semester,
+    # bulk flag opens only the ticked ones). The student may resubmit only
+    # flagged semesters while any flag is outstanding; each successful
+    # resubmit clears its own flag so one save never locks the others.
+    correction_requested = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text='True while the class teacher wants this semester re-corrected.',
+    )
+    correction_remarks = models.TextField(
+        blank=True,
+        default='',
+        help_text='Teacher correction note for this semester.',
+    )
 
     class Meta:
         db_table = 'results_semester_results'

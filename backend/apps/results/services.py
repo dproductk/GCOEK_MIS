@@ -135,6 +135,11 @@ def calculate_semester_metrics(sem_result_id):
         from apps.curriculum.services import get_thresholds
         _, _, max_backlogs = get_thresholds(sem_res.student)
     except Exception:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            'calculate_semester_metrics: no scheme for student %s; using fallback max_backlogs=4',
+            getattr(getattr(sem_res, 'student', None), 'id', '?'),
+        )
         max_backlogs = 4
 
     total_credits = 0
@@ -347,6 +352,12 @@ def hod_endorse_eligibility(eligibility_id, hod_user, status_decision, remarks='
         if status_decision not in allowed:
             raise _ValidationError(
                 f'Invalid decision {status_decision!r}. Use APPROVED, FLAGGED or REJECTED (fail).')
+        # Fix 16: HOD APPROVE requires teacher APPROVE first. Prevents
+        # stuck half-approved (HOD approved + teacher pending/flagged).
+        if status_decision == EligibilityVerification.StageStatus.APPROVED:
+            if ev.class_teacher_status != EligibilityVerification.StageStatus.APPROVED:
+                raise _ValidationError(
+                    'Class Teacher must APPROVE first. HOD cannot approve while teacher is pending, flagged or failed.')
         if (status_decision == EligibilityVerification.StageStatus.APPROVED
                 and ev.class_teacher_status == EligibilityVerification.StageStatus.REJECTED):
             raise _ValidationError(
@@ -456,6 +467,35 @@ def submit_semester_marks(student, semester_number, exam_session, subjects_data,
             target_semester=target_sem,
         ).first()
 
+        # Per-semester correction scoping (flag contract: only ticked
+        # semesters reopen for the student). While ANY published result
+        # carries a correction flag, resubmitting a published-but-unflagged
+        # semester is rejected. First fills (no published row yet) always
+        # pass, and staff actors bypass so admin corrections never deadlock.
+        _published_row = SemesterResult.objects.filter(
+            student=student,
+            semester=semester,
+            is_published=True,
+        ).exclude(
+            result_status=SemesterResult.ResultStatus.NOT_YET_HELD
+        ).order_by('-academic_year__start_date', '-created_at').first()
+        if _published_row is not None and not _published_row.correction_requested:
+            _is_staff_actor = (
+                actor is not None
+                and getattr(student, 'user_id', None) != getattr(actor, 'id', None)
+            )
+            if not _is_staff_actor and SemesterResult.objects.filter(
+                student=student,
+                correction_requested=True,
+                is_published=True,
+            ).exclude(
+                result_status=SemesterResult.ResultStatus.NOT_YET_HELD
+            ).exists():
+                raise ValidationError(
+                    f'Semester {semester_number} was not flagged for correction by your '
+                    f'class teacher. Only the flagged semesters can be resubmitted right now.'
+                )
+
         if existing_ev and existing_ev.is_locked_for_student:
             raise ValidationError(
                 'Your semester marks have already been confirmed by your Class Teacher and locked. '
@@ -492,10 +532,16 @@ def submit_semester_marks(student, semester_number, exam_session, subjects_data,
         subjects_data = list(_deduped.values())
 
         # Process each subject score with scheme passing criteria
+        # Fix 25: log scheme fallback so silent 20/40 never hides missing scheme.
         try:
             from apps.curriculum.services import get_thresholds
             min_theory, min_total, _ = get_thresholds(student)
         except Exception:
+            import logging as _logging2
+            _logging2.getLogger(__name__).warning(
+                'submit_semester_marks: no scheme for student %s; using fallback Theory>=20 Total>=40',
+                getattr(student, 'id', '?'),
+            )
             min_theory, min_total = 20.0, 40.0
         for s in subjects_data:
             code = (s.get('course_code') or s.get('code') or '').strip()
@@ -637,9 +683,22 @@ def submit_semester_marks(student, semester_number, exam_session, subjects_data,
             ev = evaluate_student_eligibility(student, target_sem)
 
             # If student corrected previously flagged result, reset teacher status to PENDING
+            # Fix 19: HOD-flagged also reopens teacher queue on student resubmit
+            # (HOD->teacher->student flow: student edit means teacher must re-check).
             if existing_ev and existing_ev.class_teacher_status == EligibilityVerification.StageStatus.FLAGGED:
                 ev.class_teacher_status = EligibilityVerification.StageStatus.PENDING
                 ev.final_eligible = False
                 ev.save(update_fields=['class_teacher_status', 'final_eligible'])
+            elif existing_ev and existing_ev.hod_status == EligibilityVerification.StageStatus.FLAGGED:
+                ev.class_teacher_status = EligibilityVerification.StageStatus.PENDING
+                ev.final_eligible = False
+                ev.save(update_fields=['class_teacher_status', 'final_eligible'])
+
+        # A successful resubmit resolves this semester's own correction flag
+        # only — other flagged semesters stay open, so correcting one never
+        # locks the rest.
+        if sem_res.correction_requested:
+            SemesterResult.objects.filter(pk=sem_res.pk).update(
+                correction_requested=False, correction_remarks='')
 
         return sem_res, ev

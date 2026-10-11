@@ -349,10 +349,10 @@
    ============================================================ */
 .login-form-side {
   background: #ffffff;
-  padding: 1.75rem 2.25rem 1.5rem 2.25rem;
+  padding: 4.75rem 2.25rem 1.5rem 2.25rem;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: space-between;
   overflow-y: auto;
 }
 

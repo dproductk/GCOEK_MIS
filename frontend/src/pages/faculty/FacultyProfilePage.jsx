@@ -102,7 +102,18 @@ const UNIVERSITIES = [
 export default function FacultyProfilePage() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
+
+  // Option A (strict): student-only logins cannot open any faculty portfolio.
+  const isStudentOnly =
+    hasRole('STUDENT') &&
+    !hasRole('SYSADMIN') &&
+    !hasRole('ADMIN_HEAD') &&
+    !hasRole('HOD') &&
+    !hasRole('CLASS_TEACHER') &&
+    !hasRole('FACULTY') &&
+    !hasRole('EMPLOYEE') &&
+    !hasRole('ACCOUNTANT');
 
   const [activeTab, setActiveTab] = useState('profile-info');
   const [loading, setLoading] = useState(true);
@@ -243,6 +254,12 @@ export default function FacultyProfilePage() {
   }, [id]);
 
   const loadFacultyData = async () => {
+    // Staff-only gate (UX). Backend also returns 403 for student-only.
+    if (id && isStudentOnly) {
+      setLoading(false);
+      setErrorMessage('Not allowed. Faculty directory is staff-only.');
+      return;
+    }
     try {
       setLoading(true);
       let res;
@@ -787,6 +804,33 @@ export default function FacultyProfilePage() {
   // Class Teacher, HOD, Accountant, Admin Head and Sysadmin, since all of
   // them render through ProfileDispatcher → FacultyProfilePage.
   const isOwnProfile = !id;
+  // Option A (strict): student-only cannot open directory portfolios.
+  // Backend also returns 403. Own-profile path (!id) never happens for
+  // students (ProfileDispatcher sends them to StudentProfilePage).
+  if (id && isStudentOnly) {
+    return (
+      <>
+        <PageHeader
+          breadcrumbs={[
+            { label: 'Home', to: '/dashboard' },
+            { label: 'Faculty Directory', to: '/admin/faculty' },
+            { label: 'Faculty Profile' },
+          ]}
+          title="Faculty Profile"
+        />
+        <div className="edvana-banner-overlap">
+          <div className="edvana-card">
+            <div className="edvana-card-body" style={{ padding: '2rem', textAlign: 'center' }}>
+              <h3 style={{ fontSize: '1rem', fontWeight: 700, color: '#0f172a' }}>Not allowed</h3>
+              <p style={{ fontSize: '0.875rem', color: '#64748b', marginTop: '0.5rem' }}>
+                Faculty directory is staff-only. Student logins cannot view faculty contact details.
+              </p>
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
   // Edit-lock: directory views are always read-only; own profile starts
   // locked and only unlocks after Edit is clicked. Accounts with no Faculty
   // row (404) can never edit — Security tab stays available.

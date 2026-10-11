@@ -132,7 +132,8 @@ export default function ResultHistoryPage() {
         resultsApi.getEligibilities(),
       ]);
       if (resultsRes.status === 'fulfilled') {
-        setResults(resultsRes.value.data || []);
+        const rd = resultsRes.value.data;
+        setResults(rd?.results || (Array.isArray(rd) ? rd : []));
       }
       if (profileRes.status === 'fulfilled') {
         setProfile(profileRes.value.data);
@@ -165,6 +166,8 @@ export default function ResultHistoryPage() {
           isLocked: true,
           isExemptedDSY: true,
           isFlaggedByTeacher: false,
+          isCorrectionOpen: false,
+          correctionRemarks: '',
           teacherRemarks: '',
           isFinalEligible: false,
           examSession: '—',
@@ -192,30 +195,47 @@ export default function ResultHistoryPage() {
         ? eligibilityRecords.find(e => e.target_semester_number === currentSemNumber + 1)
         : null;
       const isVerificationStarted = Boolean(targetSemEligibility || windowEligibility);
-      const isFlaggedByTeacher = targetSemEligibility?.class_teacher_status === 'FLAGGED';
+      // Per-semester correction scope: a row reopens only when the teacher
+      // flagged THIS semester (bulk flag ticks it directly; single flag
+      // opens every published semester). The cycle-mapped EV is a fallback
+      // for flagged cycles without per-semester state.
+      const isCorrectionOpen = result?.correction_requested === true;
+      const isFlaggedByTeacher = Boolean(
+        isCorrectionOpen || targetSemEligibility?.class_teacher_status === 'FLAGGED'
+      );
+      const isRejectedByTeacher = targetSemEligibility?.class_teacher_status === 'REJECTED';
       const isConfirmedByTeacher = targetSemEligibility?.class_teacher_status === 'APPROVED';
       const isFinalEligible = targetSemEligibility?.final_eligible === true;
       const teacherRemarks = targetSemEligibility?.class_teacher_remarks || '';
+      const correctionRemarks = result?.correction_remarks || '';
 
-      const isLocked = Boolean((isConfirmedByTeacher && !isFlaggedByTeacher) || (backendResult && !isFlaggedByTeacher));
+      // Fix 20: lock only when teacher decided (APPROVED/REJECTED) and not flagged.
+      // Matches backend is_locked_for_student. Mere row existence never locks.
+      const isLocked = Boolean((isConfirmedByTeacher || isRejectedByTeacher) && !isFlaggedByTeacher);
 
       // Current even semesters (2, 4, 6) require HOD/Teacher to initiate verification before current marks can be uploaded
       const isEvenSem = sem % 2 === 0;
       const isUploadAllowed = !isCurrent || !isEvenSem || isVerificationStarted;
 
-      // Semester outcome mirrors the authoritative backend result_status
-      // (PASS / ATKT / FAIL from backlog counts), never a local heuristic.
+      // Fix 27: keep result outcome and verification separate.
+      // Result badge (PASS/ATKT/FAIL) never implies final admission eligible.
       let eligibility = 'pending';
+      let resultOutcome = null;
+      if (result && result.result_status && result.result_status !== 'NOT_YET_HELD') {
+        if (result.result_status === 'PASS') resultOutcome = 'pass';
+        else if (result.result_status === 'ATKT') resultOutcome = 'atkt';
+        else if (result.result_status === 'FAIL') resultOutcome = 'fail';
+      }
       if (isFinalEligible) {
         eligibility = 'final_eligible';
+      } else if (isRejectedByTeacher) {
+        eligibility = 'teacher_rejected';
       } else if (isConfirmedByTeacher) {
         eligibility = 'teacher_approved';
       } else if (isFlaggedByTeacher) {
         eligibility = 'teacher_flagged';
-      } else if (result && result.result_status && result.result_status !== 'NOT_YET_HELD') {
-        if (result.result_status === 'PASS') eligibility = 'pass';
-        else if (result.result_status === 'ATKT') eligibility = 'atkt';
-        else eligibility = 'fail';
+      } else if (resultOutcome) {
+        eligibility = resultOutcome;
       }
 
       rows.push({
@@ -225,8 +245,12 @@ export default function ResultHistoryPage() {
         isUploadAllowed,
         isVerificationStarted,
         isFlaggedByTeacher,
+        isCorrectionOpen,
+        correctionRemarks,
+        isRejectedByTeacher,
         teacherRemarks,
         isFinalEligible,
+        resultOutcome,
         examSession: result?.exam_session || (isCurrent ? 'Result Awaited' : '—'),
         totalCredits: result?.total_credits_registered ?? '—',
         creditsEarned: result?.total_credits_earned ?? '—',
@@ -266,13 +290,37 @@ export default function ResultHistoryPage() {
     // 1. Check if backend results has this semester
     const backendRes = results.find((r) => r.semester_number === semNumber);
 
+    // Fix 32: never show AI-only hardcoded subjects to other departments.
+    // If scheme fetch failed/empty and no backend marks, return empty with a
+    // clear message instead of wrong subjects.
     const curriculumSubjects = (schemeList && schemeList.length > 0)
-      ? schemeList.map((s) => ({
-          code: s.course_code,
-          name: s.subject_title || s.subject_code,
+      ? schemeList.map((s) => {
+          // Practical detection: lab category, practical hours, or practical
+          // maxima on the scheme entry. Column appears only when at least one
+          // subject in the sem has it — theory-only sems render unchanged.
+          const pca = Number(s.subject_practical_ca_max_marks);
+          const pese = Number(s.subject_practical_ese_max_marks);
+          const hasPracMax = !isNaN(pca) || !isNaN(pese);
+          const isPractical = String(s.subject_category || '').toUpperCase().includes('LAB')
+            || Number(s.subject_practical_hours || 0) > 0
+            || hasPracMax;
+          return {
+            code: s.course_code,
+            name: s.subject_title || s.subject_code,
+            credits: s.credits,
+            isPractical,
+            practicalMax: hasPracMax
+              ? (isNaN(pca) ? 0 : pca) + (isNaN(pese) ? 0 : pese)
+              : 100,
+          };
+        })
+      : (backendRes?.subjects?.map((s) => ({
+          code: s.course_code || s.code,
+          name: s.course_name || s.name,
           credits: s.credits,
-        }))
-      : (CURRICULUM[semNumber] || []);
+          isPractical: Number(s.practical_marks || 0) > 0,
+          practicalMax: 100,
+        })) || []);
 
     return curriculumSubjects.map((cur) => {
       const fromBackend = backendRes?.subjects?.find((s) => (s.course_code || s.code) === cur.code);
@@ -280,6 +328,7 @@ export default function ResultHistoryPage() {
       let m1 = '';
       let m2 = '';
       let th = '';
+      let pr = '';
 
       if (fromBackend) {
         if (fromBackend.mid1_marks !== undefined && fromBackend.mid1_marks !== null && fromBackend.mid1_marks !== '') {
@@ -292,6 +341,9 @@ export default function ResultHistoryPage() {
           th = fromBackend.theory_marks;
         } else if (fromBackend.theory_ese_marks !== undefined && fromBackend.theory_ese_marks !== null && fromBackend.theory_ese_marks !== '') {
           th = fromBackend.theory_ese_marks;
+        }
+        if (fromBackend.practical_marks !== undefined && fromBackend.practical_marks !== null && fromBackend.practical_marks !== '') {
+          pr = fromBackend.practical_marks;
         }
       }
 
@@ -314,9 +366,12 @@ export default function ResultHistoryPage() {
         code: cur.code,
         name: cur.name,
         credits: cur.credits,
+        isPractical: Boolean(cur.isPractical),
+        practicalMax: Number(cur.practicalMax) || 100,
         mid1_marks: formatVal(m1),
         mid2_marks: formatVal(m2),
         theory_marks: formatVal(th),
+        practical_marks: formatVal(pr),
       };
     });
   };
@@ -327,9 +382,11 @@ export default function ResultHistoryPage() {
     // If published on the backend and not flagged, open in view mode directly.
     // Exact target-semester match only — no fallback: a stale first-record
     // fallback previously misread other semesters' FLAGGED status.
+    // Per-semester scope: the row's own correction flag decides first.
     const targetSemEligibility = eligibilityRecords.find(e => e.target_semester_number === semNumber + 1);
-    const isFlagged = targetSemEligibility?.class_teacher_status === 'FLAGGED';
     const publishedRes = results.find((r) => r.semester_number === semNumber);
+    const isFlagged = publishedRes?.correction_requested === true
+      || targetSemEligibility?.class_teacher_status === 'FLAGGED';
 
     if (!forceEdit && !isFlagged && publishedRes) {
       setViewResult(publishedRes);
@@ -354,13 +411,20 @@ export default function ResultHistoryPage() {
     setFormSubjects(initialSubjects);
   };
 
+  // Practical column appears only when the sem's scheme has lab subjects;
+  // theory-only sems render and validate exactly as before.
+  const hasPracticalColumn = formSubjects.some((s) => s.isPractical);
+
   const handleFillSubmit = async () => {
-    // Validate each subject has numbers entered
+    // Validate each subject has numbers entered (practical only for lab rows)
     const incomplete = formSubjects.some(
       (s) => s.mid1_marks === '' || s.mid2_marks === '' || s.theory_marks === ''
+        || (s.isPractical && s.practical_marks === '')
     );
     if (incomplete) {
-      setFormError('Please enter Mid Sem 1, Mid Sem 2, and Theory marks for all subjects.');
+      setFormError(hasPracticalColumn
+        ? 'Please enter Mid Sem 1, Mid Sem 2, Theory, and Practical marks for all subjects.'
+        : 'Please enter Mid Sem 1, Mid Sem 2, and Theory marks for all subjects.');
       return;
     }
 
@@ -382,7 +446,8 @@ export default function ResultHistoryPage() {
           theory_marks: Number(s.theory_marks) || 0,
           mid1_marks: Number(s.mid1_marks) || 0,
           mid2_marks: Number(s.mid2_marks) || 0,
-          total_marks: (Number(s.mid1_marks) || 0) + (Number(s.mid2_marks) || 0) + (Number(s.theory_marks) || 0),
+          practical_marks: Number(s.practical_marks) || 0,
+          total_marks: (Number(s.mid1_marks) || 0) + (Number(s.mid2_marks) || 0) + (Number(s.theory_marks) || 0) + (Number(s.practical_marks) || 0),
         }))
       });
 
@@ -411,9 +476,19 @@ export default function ResultHistoryPage() {
     openFillForm(semNumber, true);
   };
 
-  /* ──────────────── Eligibility Badge ──────────────── */
+  /* ──────────────── Eligibility Badge (Fix 27+33: split Result vs Verification) ──────────────── */
 
-  const renderEligibilityBadge = (eligibility) => {
+  const renderEligibilityBadge = (eligibility, row = null) => {
+    // If row has both a result outcome and a verification state, show both stacked
+    // so PASS waiting HOD never looks fully eligible.
+    if (row && row.resultOutcome && ['final_eligible', 'teacher_approved', 'teacher_flagged', 'teacher_rejected'].includes(eligibility)) {
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', alignItems: 'center' }}>
+          {renderEligibilityBadge(row.resultOutcome)}
+          {renderEligibilityBadge(eligibility)}
+        </div>
+      );
+    }
     switch (eligibility) {
       case 'exempted':
         return (
@@ -430,14 +505,21 @@ export default function ResultHistoryPage() {
         return (
           <Badge variant="info">
             <Lock size={12} />
-            <span>Teacher Confirmed</span>
+            <span>Teacher Confirmed — HOD Pending</span>
           </Badge>
         );
       case 'teacher_flagged':
         return (
           <Badge variant="danger">
             <AlertCircle size={12} />
-            <span>Flagged by Teacher</span>
+            <span>Flagged by Teacher — Correct Marks</span>
+          </Badge>
+        );
+      case 'teacher_rejected':
+        return (
+          <Badge variant="danger">
+            <XCircle size={12} />
+            <span>Not Eligible (Teacher Rejected)</span>
           </Badge>
         );
       case 'pass':
@@ -490,13 +572,12 @@ export default function ResultHistoryPage() {
   }
 
   const semesterRows = buildSemesterRows();
-  // A teacher flag opens correction everywhere: the remark may point at any
-  // semester (e.g. "sem 2 result" on the Sem-6 cycle), so every row with a
-  // result gets a Correct Marks button while flagged. The backend agrees —
-  // flagged cycles are unlocked for student edits and any resubmit sends
-  // the cycle back to PENDING for re-review.
-  const anyCorrectionOpen = semesterRows.some((r) => r.isFlaggedByTeacher);
-  const flaggedRow = anyCorrectionOpen ? semesterRows.find((r) => r.isFlaggedByTeacher) : null;
+  // Only semesters the teacher flagged reopen for correction — every other
+  // row keeps its state. Each successful resubmit clears its own semester,
+  // so correcting one never locks the rest.
+  const flaggedRows = semesterRows.filter((r) => r.isFlaggedByTeacher && !r.isExemptedDSY);
+  const anyCorrectionOpen = flaggedRows.length > 0;
+  const flaggedRow = anyCorrectionOpen ? flaggedRows[0] : null;
   const formTotalCredits = formSubjects.reduce((sum, s) => sum + (Number(s.credits) || 0), 0);
 
   /* ──────────────── Main Render ──────────────── */
@@ -632,13 +713,14 @@ export default function ResultHistoryPage() {
                   Action Required: Result Flagged by Class Teacher
                 </div>
                 <div style={{ fontSize: '0.84rem', color: '#b91c1c', marginTop: '0.25rem', lineHeight: 1.5 }}>
-                  {flaggedRow?.teacherRemarks ? (
-                    <><strong>Teacher Remark:</strong> "{flaggedRow.teacherRemarks}"</>
-                  ) : (
-                    <>Flagged by teacher — no remark recorded. Please correct and re-submit.</>
-                  )}
+                  {flaggedRows.map((fr) => (
+                    <div key={fr.semester} style={{ marginTop: '0.15rem' }}>
+                      <strong>Sem {fr.semester}:</strong>{' '}
+                      "{fr.correctionRemarks || fr.teacherRemarks || 'Flagged by teacher — no remark recorded.'}"
+                    </div>
+                  ))}
                   <div style={{ marginTop: '0.25rem', color: '#991b1b' }}>
-                    While flagged, you can correct marks for any semester below — re-submitting sends it back for teacher review.
+                    Correct only the flagged semester{flaggedRows.length === 1 ? '' : 's'} above — other semesters stay locked. Re-submitting sends it back for teacher review.
                   </div>
                 </div>
                 <div style={{ marginTop: '0.65rem' }}>
@@ -750,9 +832,9 @@ export default function ResultHistoryPage() {
                         {row.sgpa}
                       </td>
 
-                      {/* Eligibility */}
+                      {/* Eligibility: split result vs verification (Fix 27) */}
                       <td style={{ textAlign: 'center' }}>
-                        {renderEligibilityBadge(row.eligibility)}
+                        {renderEligibilityBadge(row.eligibility, row)}
                       </td>
 
                       {/* Action */}
@@ -761,7 +843,7 @@ export default function ResultHistoryPage() {
                           <span style={{ color: '#94a3b8', fontWeight: 600, fontSize: '0.875rem' }}>—</span>
                         ) : (
                           <div style={{ display: 'inline-flex', gap: '0.4rem', justifyContent: 'center' }}>
-                            {(row.isFlaggedByTeacher || (anyCorrectionOpen && row.result && !row.isExemptedDSY)) && (
+                            {(row.isFlaggedByTeacher && !row.isExemptedDSY) && (
                               <button
                                 onClick={() => {
                                   openFillForm(row.semester, true);
@@ -938,6 +1020,9 @@ export default function ResultHistoryPage() {
                         <th style={{ textAlign: 'center', width: 95 }}>Mid Sem 1 (20)</th>
                         <th style={{ textAlign: 'center', width: 95 }}>Mid Sem 2 (20)</th>
                         <th style={{ textAlign: 'center', width: 110 }}>Theory (60)</th>
+                        {hasPracticalColumn && (
+                          <th style={{ textAlign: 'center', width: 110 }}>Practical</th>
+                        )}
                         <th style={{ textAlign: 'center', width: 95 }}>Total Marks</th>
                         <th style={{ textAlign: 'center', width: 75 }}>Credits</th>
                         <th style={{ textAlign: 'center', width: 95 }}>Pass / Fail</th>
@@ -948,9 +1033,12 @@ export default function ResultHistoryPage() {
                         const m1 = subject.mid1_marks !== '' ? Number(subject.mid1_marks) : null;
                         const m2 = subject.mid2_marks !== '' ? Number(subject.mid2_marks) : null;
                         const th = subject.theory_marks !== '' ? Number(subject.theory_marks) : null;
-                        const hasEntered = m1 !== null || m2 !== null || th !== null;
-                        const total = (m1 || 0) + (m2 || 0) + (th || 0);
-                        const isComplete = m1 !== null && m2 !== null && th !== null;
+                        const pr = subject.practical_marks !== '' ? Number(subject.practical_marks) : null;
+                        const pracMax = Number(subject.practicalMax) || 100;
+                        const hasEntered = m1 !== null || m2 !== null || th !== null || pr !== null;
+                        const total = (m1 || 0) + (m2 || 0) + (th || 0) + (pr || 0);
+                        const isComplete = m1 !== null && m2 !== null && th !== null
+                          && (!subject.isPractical || pr !== null);
                         const isPass = isComplete ? (total >= PASSING_RULES.MIN_TOTAL && th >= PASSING_RULES.MIN_THEORY) : null;
 
                         return (
@@ -1066,6 +1154,37 @@ export default function ResultHistoryPage() {
                                 }}
                               />
                             </td>
+
+                            {/* Practical Marks (lab subjects only, clamped 0-max) */}
+                            {hasPracticalColumn && (
+                              <td style={{ textAlign: 'center' }}>
+                                {subject.isPractical ? (
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    max={pracMax}
+                                    step="any"
+                                    value={subject.practical_marks ?? ''}
+                                    onChange={(e) => handleMarksInputChange(idx, 'practical_marks', e.target.value, pracMax)}
+                                    placeholder={`0–${pracMax}`}
+                                    style={{
+                                      width: '80px',
+                                      padding: '0.4rem 0.4rem',
+                                      fontSize: '0.8rem',
+                                      fontWeight: 600,
+                                      textAlign: 'center',
+                                      border: '1px solid #e2e8f0',
+                                      borderRadius: '6px',
+                                      outline: 'none',
+                                      background: '#ffffff',
+                                      color: '#0f172a',
+                                    }}
+                                  />
+                                ) : (
+                                  <span style={{ color: '#cbd5e1', fontSize: '0.8rem' }}>—</span>
+                                )}
+                              </td>
+                            )}
 
                             {/* Total Marks (Auto Calculated) */}
                             <td style={{ textAlign: 'center' }}>

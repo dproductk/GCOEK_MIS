@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import studentApi from '../../api/studentApi';
@@ -138,6 +138,14 @@ export default function StudentProfilePage() {
   const [lockEmptyFields, setLockEmptyFields] = useState([]);
   const [isLocking, setIsLocking] = useState(false);
   const [lockError, setLockError] = useState('');
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
+  // Ref mirror of isEditing so the async fetchProfile closure never
+  // overwrites unsaved typing with stale DB values (e.g. after a
+  // document upload bumps retryCount mid-edit).
+  const isEditingRef = useRef(false);
+  useEffect(() => {
+    isEditingRef.current = isEditing;
+  }, [isEditing]);
 
   // Switching between own profile and directory records always re-locks.
   useEffect(() => {
@@ -163,7 +171,11 @@ export default function StudentProfilePage() {
         }
         if (ignore) return;
         const data = res.data;
+        // Always refresh server metadata (docs list, lock flag) but never
+        // clobber unsaved typing mid-edit — a refetch (doc upload, retry)
+        // would otherwise overwrite formData with stale DB empties.
         setStudent(data);
+        if (isEditingRef.current) return;
 
         const p = data.personal_details || {};
         const addrs = data.addresses || [];
@@ -282,6 +294,9 @@ export default function StudentProfilePage() {
   };
 
   const cancelEditing = () => {
+    // Snapshot restore wipes everything typed since Edit — confirm so a
+    // misclick never silently discards the student's filled fields.
+    if (isEditing && !window.confirm('Discard unsaved changes and revert to the last saved values?')) return;
     if (snapshot) setFormData(snapshot);
     setIsEditing(false);
     setSnapshot(null);
@@ -563,6 +578,43 @@ export default function StudentProfilePage() {
   // Kept for compatibility: the old Save entry now opens the lock warning.
   const handleSaveProfile = () => openLockModal();
 
+  // Keep Editing: persist what the student already typed as a draft
+  // (no lock), then close the modal. formData is never cleared here —
+  // even if the save fails the modal stays open with the reason and the
+  // typing stays on screen. Success also bumps the snapshot so a later
+  // top-bar Cancel can't revert the just-saved draft.
+  const handleKeepEditing = async () => {
+    if (!canEdit || isLocking || isSavingDraft) return;
+    const { payload, error } = buildSavePayload();
+    if (error) {
+      setLockError(error);
+      return;
+    }
+    setIsSavingDraft(true);
+    setLockError('');
+    try {
+      await studentApi.updateMyProfile(payload);
+      setSnapshot({ ...formData });
+      try {
+        const res = await studentApi.getMyProfile();
+        if (res?.data) setStudent(res.data);
+      } catch {
+        // Draft is already saved — a refresh failure must not wipe typing.
+      }
+      setShowLockModal(false);
+      showFeedback('Draft saved. Keep editing — nothing was locked.');
+    } catch (err) {
+      const data = err.response?.data;
+      setLockError(
+        data?.detail ||
+        (data && typeof data === 'object' ? Object.entries(data).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(' ') : v}`).join(' ') : null) ||
+        'Could not save draft. Your typing is kept — fix the values and try again.'
+      );
+    } finally {
+      setIsSavingDraft(false);
+    }
+  };
+
   // Step 2: student confirms "Lock" inside the modal — save first, then
   // lock permanently. Any failure keeps the modal open with the reason;
   // nothing is locked on failure (no accidental / partial lock).
@@ -682,7 +734,7 @@ export default function StudentProfilePage() {
                 <button
                   className="edvana-btn edvana-btn-secondary"
                   onClick={cancelEditing}
-                  disabled={isLocking}
+                  disabled={isLocking || isSavingDraft}
                   style={{
                     backgroundColor: 'rgba(255, 255, 255, 0.18)',
                     color: '#ffffff',
@@ -2698,7 +2750,7 @@ export default function StudentProfilePage() {
       {/* One-time lock warning modal — explicit confirm, no accidental lock */}
       <Modal
         isOpen={showLockModal}
-        onClose={() => { if (!isLocking) setShowLockModal(false); }}
+        onClose={() => { if (!isLocking && !isSavingDraft) setShowLockModal(false); }}
         title="Lock Profile Permanently?"
         maxWidth="560px"
       >
@@ -2737,16 +2789,17 @@ export default function StudentProfilePage() {
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', borderTop: '1px solid #e2e8f0', paddingTop: '1.25rem' }}>
           <button
             type="button"
-            onClick={() => setShowLockModal(false)}
-            disabled={isLocking}
+            onClick={handleKeepEditing}
+            disabled={isLocking || isSavingDraft}
             className="edvana-btn edvana-btn-secondary"
+            title="Save what you typed and keep editing — nothing gets locked"
           >
-            Keep Editing
+            {isSavingDraft ? 'Saving…' : 'Keep Editing'}
           </button>
           <button
             type="button"
             onClick={handleConfirmLock}
-            disabled={isLocking}
+            disabled={isLocking || isSavingDraft}
             className="edvana-btn edvana-btn-primary"
             style={{ backgroundColor: '#dc2626', borderColor: '#dc2626', color: '#ffffff', fontWeight: 700 }}
           >

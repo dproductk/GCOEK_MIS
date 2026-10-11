@@ -68,6 +68,11 @@ export default function EligibilityVerificationPage() {
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [studentResults, setStudentResults] = useState([]);
   const [loadingStudentResults, setLoadingStudentResults] = useState(false);
+  // Collapsed/expanded marksheet cards in the review modal.
+  const [expandedSems, setExpandedSems] = useState({});
+  const toggleExpandedSem = (id) => {
+    setExpandedSems((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
   // Bulk flag-a-cross-semesters state (one remarks, many rows, atomic).
   const [studentEVs, setStudentEVs] = useState([]);
   const [loadingStudentEVs, setLoadingStudentEVs] = useState(false);
@@ -230,6 +235,7 @@ export default function EligibilityVerificationPage() {
     setBulkSelected([]);
     setBulkRemarks('');
     setBulkError(null);
+    setExpandedSems({});
 
     // Fetch complete semester results for this student
     setLoadingStudentResults(true);
@@ -259,7 +265,7 @@ export default function EligibilityVerificationPage() {
   const handleBulkFlagSubmit = async () => {
     if (!selectedStudent) return;
     if (bulkSelected.length === 0) {
-      setBulkError('Tick at least one semester to flag.');
+      setBulkError('Select at least one semester to flag.');
       return;
     }
     if (!bulkRemarks.trim()) {
@@ -280,6 +286,8 @@ export default function EligibilityVerificationPage() {
       loadClasses();
       const evRes = await resultsApi.getEligibilities({ student_id: selectedStudent.student_id });
       setStudentEVs(evRes.data?.results || evRes.data || []);
+      const srRes = await resultsApi.getSemesterResults({ student_id: selectedStudent.student_id });
+      setStudentResults(srRes.data?.results || srRes.data || []);
     } catch (err) {
       setBulkError(err.response?.data?.detail || 'Failed to flag semesters. Nothing was flagged.');
     } finally {
@@ -1821,75 +1829,101 @@ export default function EligibilityVerificationPage() {
                   No published marksheet found for this student yet.
                 </div>
               ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', maxHeight: '360px', overflowY: 'auto' }}>
-                  {studentResults.map((sr) => (
-                    <div
-                      key={sr.id}
-                      style={{
-                        border: '1px solid #e2e8f0',
-                        borderRadius: '8px',
-                        overflow: 'hidden',
-                      }}
-                    >
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  {studentResults.map((sr) => {
+                    const expanded = Boolean(expandedSems[sr.id]);
+                    return (
                       <div
+                        key={sr.id}
                         style={{
-                          backgroundColor: '#f1f5f9',
-                          padding: '0.65rem 1rem',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          fontSize: '0.8125rem',
-                          fontWeight: 700,
-                          color: '#1e293b',
+                          border: '1px solid #e2e8f0',
+                          borderRadius: '8px',
+                          overflow: 'hidden',
                         }}
                       >
-                        <span>Semester {sr.semester_number} ({sr.exam_session})</span>
-                        <div style={{ display: 'flex', gap: '1rem' }}>
-                          <span>SGPA: <strong style={{ color: '#2563eb' }}>{sr.sgpa ?? '—'}</strong></span>
-                          <span>Earned Credits: <strong>{sr.total_credits_earned} / {sr.total_credits_registered}</strong></span>
-                          <span>Status: <strong>{sr.result_status_display}</strong></span>
+                        <div
+                          onClick={() => toggleExpandedSem(sr.id)}
+                          title={expanded ? 'Click to collapse subject details' : 'Click to expand subject details'}
+                          style={{
+                            backgroundColor: '#f1f5f9',
+                            padding: '0.65rem 1rem',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            fontSize: '0.8125rem',
+                            fontWeight: 700,
+                            color: '#1e293b',
+                            cursor: 'pointer',
+                            userSelect: 'none',
+                          }}
+                        >
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <ChevronRight
+                              size={15}
+                              style={{
+                                transform: expanded ? 'rotate(90deg)' : 'none',
+                                transition: 'transform 0.15s ease',
+                                color: '#64748b',
+                              }}
+                            />
+                            <span>Semester {sr.semester_number} ({sr.exam_session})</span>
+                          </span>
+                          <div style={{ display: 'flex', gap: '1rem' }}>
+                            <span>SGPA: <strong style={{ color: '#2563eb' }}>{sr.sgpa ?? '—'}</strong></span>
+                            <span>Earned Credits: <strong>{sr.total_credits_earned} / {sr.total_credits_registered}</strong></span>
+                            <span>Status: <strong>{sr.result_status_display}</strong></span>
+                          </div>
                         </div>
-                      </div>
 
-                      <table className="edvana-table" style={{ margin: 0, fontSize: '0.78rem' }}>
-                        <thead>
-                          <tr>
-                            <th>Course</th>
-                            <th>Title</th>
-                            <th style={{ textAlign: 'center' }}>Credits</th>
-                            <th style={{ textAlign: 'center' }}>Theory (ESE)</th>
-                            <th style={{ textAlign: 'center' }}>ISE / Mid</th>
-                            <th style={{ textAlign: 'center' }}>Total</th>
-                            <th style={{ textAlign: 'center' }}>Grade</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(sr.subjects || []).map((sub) => (
-                            <tr key={sub.id}>
-                              <td style={{ fontFamily: 'var(--edvana-font-mono)', fontWeight: 600 }}>{sub.course_code}</td>
-                              <td>{sub.course_name}</td>
-                              <td style={{ textAlign: 'center' }}>{sub.credits}</td>
-                              <td style={{ textAlign: 'center', fontWeight: sub.theory_marks < 20 ? 700 : 400, color: sub.theory_marks < 20 ? '#dc2626' : 'inherit' }}>
-                                {sub.theory_marks ?? '—'}
-                              </td>
-                              <td style={{ textAlign: 'center' }}>{sub.theory_ise_marks ?? '—'}</td>
-                              <td style={{ textAlign: 'center', fontWeight: 600 }}>{sub.total_marks ?? '—'}</td>
-                              <td style={{ textAlign: 'center' }}>
-                                <span
-                                  style={{
-                                    fontWeight: 700,
-                                    color: sub.grade_letter === 'F' ? '#dc2626' : '#16a34a',
-                                  }}
-                                >
-                                  {sub.grade_letter}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ))}
+                        {expanded && (
+                          <table className="edvana-table" style={{ margin: 0, fontSize: '0.78rem' }}>
+                            <thead>
+                              <tr>
+                                <th>Course</th>
+                                <th>Title</th>
+                                <th style={{ textAlign: 'center' }}>Credits</th>
+                                <th style={{ textAlign: 'center' }}>Theory (ESE)</th>
+                                <th style={{ textAlign: 'center' }}>ISE / Mid</th>
+                                <th style={{ textAlign: 'center' }}>Total</th>
+                                <th style={{ textAlign: 'center' }}>Grade</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(sr.subjects || []).map((sub) => (
+                                <tr key={sub.id}>
+                                  <td style={{ fontFamily: 'var(--edvana-font-mono)', fontWeight: 600 }}>{sub.course_code}</td>
+                                  <td>{sub.course_name}</td>
+                                  <td style={{ textAlign: 'center' }}>{sub.credits}</td>
+                                  <td style={{ textAlign: 'center', fontWeight: sub.theory_marks < 20 ? 700 : 400, color: sub.theory_marks < 20 ? '#dc2626' : 'inherit' }}>
+                                    {sub.theory_marks ?? '—'}
+                                  </td>
+                                  <td style={{ textAlign: 'center' }}>{sub.theory_ise_marks ?? '—'}</td>
+                                  <td style={{ textAlign: 'center', fontWeight: 600 }}>{sub.total_marks ?? '—'}</td>
+                                  <td style={{ textAlign: 'center' }}>
+                                    <span
+                                      style={{
+                                        fontWeight: 700,
+                                        color: sub.grade_letter === 'F' ? '#dc2626' : '#16a34a',
+                                      }}
+                                    >
+                                      {sub.grade_letter}
+                                    </span>
+                                  </td>
+                                </tr>
+                              ))}
+                              {(sr.subjects || []).length === 0 && (
+                                <tr>
+                                  <td colSpan={7} style={{ textAlign: 'center', color: '#64748b' }}>
+                                    No subject details recorded for this semester.
+                                  </td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1905,32 +1939,42 @@ export default function EligibilityVerificationPage() {
                 }}
               >
                 <h4 style={{ fontSize: '0.9rem', fontWeight: 800, color: '#92400e', margin: '0 0 0.25rem' }}>
-                  Flag corrections for several semesters at once
+                  Select semester with corrections
                 </h4>
                 <p style={{ fontSize: '0.78rem', color: '#78350f', margin: '0 0 0.75rem', lineHeight: 1.5 }}>
-                  Tick the semesters that need correction, write one note, and flag them together.
-                  Only the ticked semesters reopen for the student — everything else keeps its state.
-                  All-or-nothing: if one cannot be flagged, none are.
+                  Only ticked semesters reopen for the student.
                 </p>
-                {loadingStudentEVs ? (
+                {loadingStudentResults ? (
                   <div style={{ fontSize: '0.8125rem', color: '#92400e' }}>Loading semester rows…</div>
-                ) : studentEVs.length === 0 ? (
-                  <div style={{ fontSize: '0.8125rem', color: '#92400e' }}>
-                    No verification rows for this student yet. Start verification first.
-                  </div>
-                ) : (
-                  <>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.75rem' }}>
-                      {[...studentEVs]
-                        .sort((a, b) => (a.target_semester_number || 0) - (b.target_semester_number || 0))
-                        .map((ev) => {
-                          const num = ev.target_semester_number;
-                          const lockedRow = Boolean(ev.is_locked_for_teacher);
+                ) : (() => {
+                  const curSem = Number(selectedStudent?.current_semester) || 0;
+                  const startSem = selectedStudent?.is_direct_second_year ? 3 : 1;
+                  const options = curSem >= startSem
+                    ? Array.from({ length: curSem - startSem + 1 }, (_, i) => startSem + i)
+                    : [];
+                  const filledBySem = {};
+                  (studentResults || []).forEach((r) => {
+                    if (r && r.result_status !== 'NOT_YET_HELD') filledBySem[r.semester_number] = r;
+                  });
+                  if (options.length === 0) {
+                    return (
+                      <div style={{ fontSize: '0.8125rem', color: '#92400e' }}>
+                        No semesters available for this student yet.
+                      </div>
+                    );
+                  }
+                  return (
+                    <>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                        {options.map((num) => {
+                          const filled = filledBySem[num];
+                          const correctionOpen = Boolean(filled?.correction_requested);
                           const checked = bulkSelected.includes(num);
+                          const disabled = !filled || bulkFlagging;
                           return (
                             <label
-                              key={ev.id}
-                              title={lockedRow ? 'Already decided — HOD must flag it back before it can be flagged again' : `Flag Sem ${num} for correction`}
+                              key={num}
+                              title={!filled ? `Sem ${num} has no filled result to correct yet` : `Flag Sem ${num} for correction`}
                               style={{
                                 display: 'inline-flex',
                                 alignItems: 'center',
@@ -1940,71 +1984,74 @@ export default function EligibilityVerificationPage() {
                                 fontSize: '0.8rem',
                                 fontWeight: 700,
                                 backgroundColor: checked ? '#fef3c7' : '#ffffff',
-                                color: lockedRow ? '#94a3b8' : '#92400e',
+                                color: disabled ? '#94a3b8' : '#92400e',
                                 border: checked ? '2px solid #d97706' : '1px solid #fde68a',
-                                cursor: lockedRow ? 'not-allowed' : 'pointer',
-                                opacity: lockedRow ? 0.65 : 1,
+                                cursor: disabled ? 'not-allowed' : 'pointer',
+                                opacity: disabled ? 0.65 : 1,
                               }}
                             >
                               <input
                                 type="checkbox"
                                 checked={checked}
-                                disabled={lockedRow || bulkFlagging}
+                                disabled={disabled}
                                 onChange={() => toggleBulkSemester(num)}
                               />
                               <span>Sem {num}</span>
-                              <span style={{ fontWeight: 500, fontSize: '0.72rem' }}>
-                                ({ev.class_teacher_status_display || ev.class_teacher_status})
-                              </span>
+                              {correctionOpen && (
+                                <span style={{ fontWeight: 500, fontSize: '0.72rem' }}>
+                                  (Correction open)
+                                </span>
+                              )}
                             </label>
                           );
                         })}
-                    </div>
-                    <textarea
-                      className="edvana-input"
-                      rows={2}
-                      placeholder="One correction note for all ticked semesters (e.g. Sem 2 and 3 marksheets need re-upload)…"
-                      value={bulkRemarks}
-                      onChange={(e) => setBulkRemarks(e.target.value)}
-                      disabled={bulkFlagging}
-                      style={{ width: '100%', marginBottom: '0.6rem' }}
-                    />
-                    {bulkError && (
-                      <div style={{ fontSize: '0.8rem', color: '#b91c1c', fontWeight: 600, marginBottom: '0.6rem' }}>
-                        {bulkError}
                       </div>
-                    )}
-                    <button
-                      type="button"
-                      onClick={handleBulkFlagSubmit}
-                      disabled={bulkFlagging || bulkSelected.length === 0}
-                      className="edvana-btn"
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '0.45rem',
-                        padding: '0.55rem 1.1rem',
-                        borderRadius: '8px',
-                        fontSize: '0.83rem',
-                        fontWeight: 700,
-                        backgroundColor: '#b45309',
-                        color: '#ffffff',
-                        border: 'none',
-                        cursor: bulkFlagging || bulkSelected.length === 0 ? 'not-allowed' : 'pointer',
-                        opacity: bulkFlagging || bulkSelected.length === 0 ? 0.6 : 1,
-                      }}
-                    >
-                      <Flag size={14} />
-                      <span>
-                        {bulkFlagging
-                          ? 'Flagging…'
-                          : bulkSelected.length === 0
-                          ? 'Tick semesters to flag'
-                          : `Flag ${bulkSelected.length} semester${bulkSelected.length === 1 ? '' : 's'} together`}
-                      </span>
-                    </button>
-                  </>
-                )}
+                      <textarea
+                        className="edvana-input"
+                        rows={2}
+                        placeholder="Correction note for ticked semesters…"
+                        value={bulkRemarks}
+                        onChange={(e) => setBulkRemarks(e.target.value)}
+                        disabled={bulkFlagging}
+                        style={{ width: '100%', marginBottom: '0.6rem' }}
+                      />
+                      {bulkError && (
+                        <div style={{ fontSize: '0.8rem', color: '#b91c1c', fontWeight: 600, marginBottom: '0.6rem' }}>
+                          {bulkError}
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleBulkFlagSubmit}
+                        disabled={bulkFlagging || bulkSelected.length === 0}
+                        className="edvana-btn"
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '0.45rem',
+                          padding: '0.55rem 1.1rem',
+                          borderRadius: '8px',
+                          fontSize: '0.83rem',
+                          fontWeight: 700,
+                          backgroundColor: '#b45309',
+                          color: '#ffffff',
+                          border: 'none',
+                          cursor: bulkFlagging || bulkSelected.length === 0 ? 'not-allowed' : 'pointer',
+                          opacity: bulkFlagging || bulkSelected.length === 0 ? 0.6 : 1,
+                        }}
+                      >
+                        <Flag size={14} />
+                        <span>
+                          {bulkFlagging
+                            ? 'Flagging…'
+                            : bulkSelected.length === 0
+                            ? 'Select semesters to flag'
+                            : `Flag ${bulkSelected.length} semester${bulkSelected.length === 1 ? '' : 's'}`}
+                        </span>
+                      </button>
+                    </>
+                  );
+                })()}
               </div>
             )}
 
@@ -2033,6 +2080,7 @@ export default function EligibilityVerificationPage() {
                       {actionType === 'HOD_ENDORSE' ? 'HOD Endorsement Action' : 'Class Teacher Verification Action'}
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem' }}>
+                      {actionType === 'HOD_ENDORSE' && (
                       <button
                         type="button"
                         onClick={() => {
@@ -2056,8 +2104,9 @@ export default function EligibilityVerificationPage() {
                         }}
                       >
                         <Flag size={15} />
-                        <span>{actionType === 'HOD_ENDORSE' ? 'Flag Back to Teacher' : 'Flag Discrepancy for Student'}</span>
+                        <span>Flag Back to Teacher</span>
                       </button>
+                      )}
 
                       <button
                         type="button"

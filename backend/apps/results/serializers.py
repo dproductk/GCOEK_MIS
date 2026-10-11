@@ -96,6 +96,8 @@ class SemesterResultSerializer(serializers.ModelSerializer):
             'result_status_display',
             'is_published',
             'published_at',
+            'correction_requested',
+            'correction_remarks',
             'subjects',
         ]
 

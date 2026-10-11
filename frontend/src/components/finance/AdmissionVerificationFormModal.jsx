@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { Download, Printer, CheckCircle2, ShieldCheck, X, FileCheck, Building } from 'lucide-react';
+import { Download, Printer, CheckCircle2, ShieldCheck, FileCheck } from 'lucide-react';
 import Modal from '../common/Modal';
 
 export default function AdmissionVerificationFormModal({
@@ -163,13 +163,13 @@ export default function AdmissionVerificationFormModal({
             </div>
           </div>
 
-          {/* 18 Numbered Form Items - Prefilled identity items and blank underlines for manual handwriting */}
+          {/* 18 Numbered Form Items - fully prefilled, blank only when source missing */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem', marginBottom: '1.25rem' }}>
             <FieldPrefilledRow number="1" label="Full Name of Student:" value={formData.full_name} />
             <FieldPrefilledRow number="2" label="PRN Number :" value={formData.prn_number} />
             <FieldPrefilledRow number="3" label="Branch :" value={formData.branch} />
             <FieldPrefilledRow number="4" label="Caste:" value={formData.caste} />
-            <FieldBlankRow number="5" label="Category (Open/SC/ST/OBC/VJ/NT-1/NT-2/NT-3/SEBC/EWS/TFWS):" />
+            <FieldPrefilledRow number="5" label="Category (Open/SC/ST/OBC/VJ/NT-1/NT-2/NT-3/SEBC/EWS/TFWS):" value={formData.category} />
             
             <div style={{ display: 'grid', gridTemplateColumns: '240px 1fr 140px 1fr', alignItems: 'baseline', fontSize: '0.84rem' }}>
               <span style={{ fontWeight: 600, color: '#1e293b' }}>6. Gender (Male/ Female/Other):</span>
@@ -186,36 +186,23 @@ export default function AdmissionVerificationFormModal({
                 {formData.gender && formData.gender !== '—' ? formData.gender : ''}
               </div>
               <span style={{ fontWeight: 600, color: '#1e293b' }}>7. Religion :</span>
-              <div style={{ borderBottom: '1.5px solid #64748b', height: '1.65rem' }} />
+              <div style={{ borderBottom: '1.5px solid #64748b', height: '1.65rem', fontWeight: 700, display: 'flex', alignItems: 'center', paddingLeft: '0.25rem' }}>
+                {formData.religion && formData.religion !== '—' ? formData.religion : ''}
+              </div>
             </div>
 
-            <FieldBlankRow number="8" label="Whether Student is Physically Disabled (Yes/No):" />
-            <FieldBlankRow number="9" label="Mobile Number of Student:" />
-            <FieldBlankRow number="10" label="Mobile Number of Parent:" />
-            <FieldBlankRow number="11" label="ABC ID of Student:" />
+            <FieldPrefilledRow number="8" label="Whether Student is Physically Disabled (Yes/No):" value={formData.physically_disabled} />
+            <FieldPrefilledRow number="9" label="Mobile Number of Student:" value={formData.mobile_student} />
+            <FieldPrefilledRow number="10" label="Mobile Number of Parent:" value={formData.mobile_parent} />
+            <FieldPrefilledRow number="11" label="ABC ID of Student:" value={formData.abc_id} />
             
-            {/* 12. Local Address (2 lines for ample handwriting space) */}
-            <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', alignItems: 'flex-start', fontSize: '0.84rem' }}>
-              <span style={{ fontWeight: 600, color: '#1e293b', paddingTop: '0.2rem' }}>12. Local Address:</span>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-                <div style={{ borderBottom: '1.5px solid #64748b', height: '1.5rem' }} />
-                <div style={{ borderBottom: '1.5px solid #64748b', height: '1.5rem' }} />
-              </div>
-            </div>
+            <FieldPrefilledRow number="12" label="Local Address:" value={formData.local_address} />
+            <FieldPrefilledRow number="13" label="Permanent Address:" value={formData.permanent_address} />
 
-            {/* 13. Permanent Address (2 lines for ample handwriting space) */}
-            <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', alignItems: 'flex-start', fontSize: '0.84rem' }}>
-              <span style={{ fontWeight: 600, color: '#1e293b', paddingTop: '0.2rem' }}>13. Permanent Address:</span>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-                <div style={{ borderBottom: '1.5px solid #64748b', height: '1.5rem' }} />
-                <div style={{ borderBottom: '1.5px solid #64748b', height: '1.5rem' }} />
-              </div>
-            </div>
-
-            <FieldBlankRow number="14" label="Income Certificate Number:" />
-            <FieldBlankRow number="15" label="Parent's Annual Income:" />
-            <FieldBlankRow number="16" label="Whether Student has Non-Creamy Layer Certificate (Yes/No):" />
-            <FieldBlankRow number="17" label="First Year admission Fees Receipt Number And Date:" />
+            <FieldPrefilledRow number="14" label="Income Certificate Number:" value={formData.income_cert_no} />
+            <FieldPrefilledRow number="15" label="Parent's Annual Income:" value={formData.parent_annual_income} />
+            <FieldPrefilledRow number="16" label="Whether Student has Non-Creamy Layer Certificate (Yes/No):" value={formData.non_creamy_layer} />
+            <FieldPrefilledRow number="17" label="First Year admission Fees Receipt Number And Date:" value={formData.fy_receipt_info} />
             
             {/* 18 Credits with 1st, 2nd, 3rd year and Total */}
             <div style={{
@@ -227,15 +214,11 @@ export default function AdmissionVerificationFormModal({
               <span style={{ fontWeight: 600, color: '#1e293b' }}>
                 18. Total Credits Earned:
               </span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', color: '#1e293b' }}>
-                <span>First Year:</span>
-                <span style={{ borderBottom: '1.5px solid #64748b', display: 'inline-block', width: '65px', height: '1.65rem' }} />
-                <span>Second Year:</span>
-                <span style={{ borderBottom: '1.5px solid #64748b', display: 'inline-block', width: '65px', height: '1.65rem' }} />
-                <span>Third Year:</span>
-                <span style={{ borderBottom: '1.5px solid #64748b', display: 'inline-block', width: '65px', height: '1.65rem' }} />
-                <span>Total Credits:</span>
-                <span style={{ borderBottom: '1.5px solid #64748b', display: 'inline-block', width: '75px', height: '1.65rem' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', color: '#1e293b', fontWeight: 700 }}>
+                <span style={{ fontWeight: 600 }}>First Year: {formData.credits_first_year && formData.credits_first_year !== '—' ? formData.credits_first_year : '____'}</span>
+                <span style={{ fontWeight: 600 }}>Second Year: {formData.credits_second_year && formData.credits_second_year !== '—' ? formData.credits_second_year : '____'}</span>
+                <span style={{ fontWeight: 600 }}>Third Year: ____</span>
+                <span>Total: {formData.total_credits && formData.total_credits !== '—' ? formData.total_credits : '____'}</span>
               </div>
             </div>
           </div>
@@ -358,7 +341,7 @@ export default function AdmissionVerificationFormModal({
                 )}
               </div>
               <div>
-                2. <b>Admission Fee Amount:</b> ___________________________
+                2. <b>Admission Fee Amount:</b> <b>{office.admission_fee_amount && office.admission_fee_amount !== '₹ —' ? office.admission_fee_amount : '___________'}</b>
               </div>
             </div>
 
@@ -368,10 +351,10 @@ export default function AdmissionVerificationFormModal({
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '0.35rem' }}>
               <div>
-                3. <b>Admission Fee Receipt Number:</b> ___________________________
+                3. <b>Admission Fee Receipt Number:</b> <b>{office.receipt_number && office.receipt_number !== '—' ? office.receipt_number : '___________'}</b>
               </div>
               <div>
-                4. <b>UTR No:</b> ___________________________
+                4. <b>UTR No:</b> <b>{office.utr_no && office.utr_no !== '—' ? office.utr_no : '___________'}</b>
               </div>
             </div>
 
@@ -406,26 +389,6 @@ export default function AdmissionVerificationFormModal({
   );
 }
 
-function FieldBlankRow({ number, label }) {
-  return (
-    <div style={{
-      display: 'grid',
-      gridTemplateColumns: '260px 1fr',
-      alignItems: 'baseline',
-      fontSize: '0.84rem',
-      rowGap: '0.2rem',
-    }}>
-      <span style={{ fontWeight: 600, color: '#1e293b' }}>
-        {number}. {label}
-      </span>
-      <div style={{
-        borderBottom: '1.5px solid #64748b',
-        height: '1.65rem',
-      }} />
-    </div>
-  );
-}
-
 function FieldPrefilledRow({ number, label, value }) {
   return (
     <div style={{
@@ -448,32 +411,6 @@ function FieldPrefilledRow({ number, label, value }) {
         paddingLeft: '0.25rem',
       }}>
         {value && value !== '—' ? value : ''}
-      </div>
-    </div>
-  );
-}
-
-function FieldRow({ number, label, value, isBold = false, isMono = false }) {
-  return (
-    <div style={{
-      display: 'grid',
-      gridTemplateColumns: '260px 1fr',
-      alignItems: 'baseline',
-      fontSize: '0.82rem',
-      rowGap: '0.2rem',
-    }}>
-      <span style={{ fontWeight: 600, color: '#1e293b' }}>
-        {number}. {label}
-      </span>
-      <div style={{
-        borderBottom: '1px solid #64748b',
-        paddingBottom: '0.1rem',
-        fontWeight: isBold ? 700 : 500,
-        fontFamily: isMono ? 'monospace' : 'inherit',
-        color: '#090d16',
-        minHeight: '1.25rem',
-      }}>
-        {value || ''}
       </div>
     </div>
   );

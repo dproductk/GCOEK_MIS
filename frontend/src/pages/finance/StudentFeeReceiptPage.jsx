@@ -20,8 +20,9 @@ function StatusPill({ tone, children }) {
     red: { bg: '#fde8e8', color: '#c62828', dot: '#f04438' },
     green: { bg: '#e6f7ec', color: '#1a7f37', dot: '#22a355' },
     amber: { bg: '#fef3c7', color: '#92400e', dot: '#d97706' },
+    gray: { bg: '#f1f5f9', color: '#475569', dot: '#94a3b8' },
   };
-  const t = tones[tone] || tones.red;
+  const t = tones[tone] || tones.gray;
   return (
     <span
       style={{
@@ -278,6 +279,8 @@ export default function StudentFeeReceiptPage() {
                         ? 'Verification initiated by Department — Under review by Class Teacher'
                         : admissionForm.verification_stage === 'FLAGGED'
                         ? `Flagged for clarification: "${admissionForm.remarks || 'Consult class teacher'}"`
+                        : admissionForm.verification_stage === 'REJECTED'
+                        ? 'Not Eligible — rejected after review.'
                         : 'Official admission form tracking'}
                     </div>
                   </div>

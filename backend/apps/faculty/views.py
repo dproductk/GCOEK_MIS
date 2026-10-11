@@ -203,6 +203,18 @@ class FacultyViewSet(viewsets.ModelViewSet):
 
         scopes = get_user_scopes(user)
 
+        # Option A (strict): student-only accounts get no faculty directory.
+        # Staff = SYSADMIN / ADMIN_HEAD / HOD / CLASS_TEACHER / FACULTY /
+        # EMPLOYEE / ACCOUNTANT. A pure STUDENT login is blocked with 403
+        # in list()/retrieve() below; queryset returns none() as backstop.
+        _staff_roles = {
+            'SYSADMIN', 'ADMIN_HEAD', 'HOD', 'CLASS_TEACHER',
+            'FACULTY', 'EMPLOYEE', 'ACCOUNTANT',
+        }
+        _roles = set(scopes.get('roles', []))
+        if not scopes.get('is_system_wide') and not (user.is_superuser or False) and not (_roles & _staff_roles):
+            return Faculty.objects.none()
+
         # 1. Sysadmin / Admin Head / Accountant: institute-wide
         if scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles'] or 'ACCOUNTANT' in scopes['roles']:
             return self._apply_filters(qs)
@@ -214,8 +226,36 @@ class FacultyViewSet(viewsets.ModelViewSet):
                 return self._apply_filters(qs.filter(department_id__in=dept_ids))
             return self._apply_filters(qs)
 
-        # 3. Faculty / Class Teacher / Student: institute directory (read-only)
+        # 3. Faculty / Class Teacher / Employee: institute directory (read-only)
+        # NOTE: STUDENT intentionally excluded (see block above).
         return self._apply_filters(qs)
+
+    def _is_student_only(self, request):
+        scopes = get_user_scopes(request.user)
+        if scopes.get('is_system_wide') or request.user.is_superuser:
+            return False
+        _staff_roles = {
+            'SYSADMIN', 'ADMIN_HEAD', 'HOD', 'CLASS_TEACHER',
+            'FACULTY', 'EMPLOYEE', 'ACCOUNTANT',
+        }
+        _roles = set(scopes.get('roles', []))
+        return bool(_roles) and not (_roles & _staff_roles)
+
+    def list(self, request, *args, **kwargs):
+        if self._is_student_only(request):
+            return Response(
+                {'detail': 'Not allowed. Faculty directory is staff-only.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().list(request, *args, **kwargs)
+
+    def retrieve(self, request, *args, **kwargs):
+        if self._is_student_only(request):
+            return Response(
+                {'detail': 'Not allowed. Faculty directory is staff-only.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().retrieve(request, *args, **kwargs)
 
     def _apply_filters(self, qs):
         dept = self.request.query_params.get('department_id')
