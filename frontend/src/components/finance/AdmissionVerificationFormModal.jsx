@@ -8,6 +8,7 @@ export default function AdmissionVerificationFormModal({
   formData,
   onDownloadPdf,
   downloading,
+  canDownload = true,
 }) {
   const printAreaRef = useRef(null);
 
@@ -71,11 +72,14 @@ export default function AdmissionVerificationFormModal({
             <button
               type="button"
               onClick={onDownloadPdf}
-              disabled={downloading}
+              disabled={downloading || !canDownload}
+              title={!canDownload ? 'Official PDF unlocks once approved by HOD' : 'Download official PDF'}
               className="edvana-btn edvana-btn-primary"
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: '0.45rem',
-                fontSize: '0.84rem', background: '#1E60DC', border: '1px solid #1E60DC'
+                fontSize: '0.84rem', background: canDownload ? '#1E60DC' : '#94a3b8',
+                border: `1px solid ${canDownload ? '#1E60DC' : '#94a3b8'}`,
+                cursor: canDownload ? 'pointer' : 'not-allowed'
               }}
             >
               <Download size={15} /> {downloading ? 'Generating PDF...' : 'Download PDF'}
@@ -389,9 +393,10 @@ export default function AdmissionVerificationFormModal({
           <button
             type="button"
             onClick={onDownloadPdf}
-            disabled={downloading}
+            disabled={downloading || !canDownload}
+            title={!canDownload ? 'Official PDF unlocks once approved by HOD' : 'Download official PDF'}
             className="edvana-btn edvana-btn-primary"
-            style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem' }}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem', background: canDownload ? '#1E60DC' : '#94a3b8', border: `1px solid ${canDownload ? '#1E60DC' : '#94a3b8'}`, cursor: canDownload ? 'pointer' : 'not-allowed' }}
           >
             <Download size={15} /> {downloading ? 'Downloading...' : 'Download Official PDF'}
           </button>

@@ -14,6 +14,76 @@ YEAR_CHANGE_TARGETS = {3, 5, 7}
 """Semesters entered only through the yearly verification cycle."""
 
 
+def _require_student_ready_for_review(student, reviewer=None):
+    """
+    Student-side prerequisites for any teacher/HOD eligibility review.
+
+    1. The student must have filled all details and locked their profile
+       (one-time self-service lock).
+    2. EVERY semester from 1 up to the student's current semester must have
+       a published result (lateral-entry DSY students start at 3, since Sem
+       1-2 never exist for them). WITHHELD/PASS/ATKT/FAIL count as filled;
+       only missing rows and NOT_YET_HELD block.
+
+    Raises rest_framework ValidationError (400) with a human-readable
+    reason so the teacher UI can show exactly what is blocking review.
+    Reads profile_locked fresh (the EV's cached student row may be stale).
+
+    Sysadmin / superuser bypass the gate (admin corrections must never
+    deadlock on a student prerequisite); teachers and HODs never do.
+    """
+    from rest_framework.exceptions import ValidationError
+
+    if reviewer is not None and (
+        getattr(reviewer, 'is_superuser', False)
+    ):
+        return
+    if reviewer is not None:
+        try:
+            from apps.authentication.permissions import user_has_role as _has_role
+            if _has_role(reviewer, 'SYSADMIN'):
+                return
+        except Exception:
+            pass
+
+    locked = Student.objects.filter(id=student.id).values_list('profile_locked', flat=True).first()
+    if not locked:
+        raise ValidationError(
+            'Student has not locked their profile yet. '
+            'Review is blocked until the student fills all details and locks their profile.'
+        )
+    enrollment = StudentEnrollment.objects.filter(
+        student_id=student.id, is_current=True
+    ).select_related('semester').first()
+    if enrollment is None or enrollment.semester_id is None:
+        raise ValidationError(
+            'Student has no active enrollment. Review is blocked.'
+        )
+    cur_num = enrollment.semester.number
+    row = Student.objects.filter(id=student.id).values(
+        'is_direct_second_year', 'admission_type').first() or {}
+    is_dsy = bool(row.get('is_direct_second_year')) or str(
+        row.get('admission_type') or '').upper() == 'DSE'
+    start_num = 3 if is_dsy else 1
+    need = set(range(start_num, cur_num + 1))
+    have = set(
+        SemesterResult.objects.filter(
+            student_id=student.id,
+            semester__number__in=list(need),
+            is_published=True,
+        ).exclude(
+            result_status=SemesterResult.ResultStatus.NOT_YET_HELD
+        ).values_list('semester__number', flat=True)
+    )
+    missing = sorted(need - have)
+    if missing:
+        missing_str = ', '.join(f'Sem {n}' for n in missing)
+        raise ValidationError(
+            f'Semester results missing for {missing_str}. '
+            'Review is blocked until all results are filled.'
+        )
+
+
 def grade_for_marks(marks, max_marks=100):
     """
     9-Point Autonomous Grading scale.
@@ -49,9 +119,14 @@ def calculate_semester_metrics(sem_result_id):
     - ATKT granted if active failed courses <= scheme.max_backlogs_for_atkt.
     """
     sem_res = SemesterResult.objects.get(id=sem_result_id)
-    subjects = sem_res.subject_results.all()
+    # Deduplicate by course_code (defense against race-created duplicates
+    # until DB unique constraint lands): last row wins, extras ignored.
+    seen = {}
+    for s in sem_res.subject_results.all().order_by('created_at', 'id'):
+        seen[s.course_code] = s
+    subjects = list(seen.values())
 
-    if not subjects.exists():
+    if not subjects:
         sem_res.result_status = SemesterResult.ResultStatus.NOT_YET_HELD
         sem_res.save(update_fields=['result_status'])
         return sem_res
@@ -89,6 +164,25 @@ def calculate_semester_metrics(sem_result_id):
     sem_res.total_credits_earned = earned_credits
     sem_res.backlog_count = backlogs
     sem_res.result_status = res_status
+    # CGPA: cumulative weighted SGPA across all published semesters.
+    try:
+        _all = SemesterResult.objects.filter(
+            student_id=sem_res.student_id, is_published=True,
+        ).exclude(result_status=SemesterResult.ResultStatus.NOT_YET_HELD)
+        _tw = Decimal('0.0')
+        _tc = 0
+        for _r in _all:
+            if _r.id == sem_res.id:
+                _sg, _cr = sgpa, total_credits
+            else:
+                _sg, _cr = (_r.sgpa, _r.total_credits_registered)
+            if _sg is None or not _cr:
+                continue
+            _tw += Decimal(str(_sg)) * Decimal(str(_cr))
+            _tc += int(_cr)
+        sem_res.cgpa = round(_tw / Decimal(str(_tc)), 2) if _tc > 0 else sgpa
+    except Exception:
+        sem_res.cgpa = sgpa
     sem_res.save()
 
     return sem_res
@@ -167,6 +261,10 @@ def class_teacher_review_eligibility(eligibility_id, reviewer_user, status_decis
     with transaction.atomic():
         ev = EligibilityVerification.objects.select_for_update().get(id=eligibility_id)
 
+        # Student prerequisites: locked profile + filled results. Checked
+        # first so the teacher sees exactly what is blocking review.
+        _require_student_ready_for_review(ev.student, reviewer_user)
+
         # HOD-closed (failed) cases are untouchable by the teacher.
         if ev.hod_status == EligibilityVerification.StageStatus.REJECTED:
             raise ValidationError(
@@ -236,6 +334,10 @@ def hod_endorse_eligibility(eligibility_id, hod_user, status_decision, remarks='
     """
     with transaction.atomic():
         ev = EligibilityVerification.objects.select_for_update().get(id=eligibility_id)
+        # Student prerequisites apply to HOD endorsement too (defense in
+        # depth: teacher approval already required them, but direct API calls
+        # must not bypass the gate).
+        _require_student_ready_for_review(ev.student, hod_user)
         allowed = {
             EligibilityVerification.StageStatus.APPROVED,
             EligibilityVerification.StageStatus.FLAGGED,
@@ -380,6 +482,15 @@ def submit_semester_marks(student, semester_number, exam_session, subjects_data,
         sem_res.published_at = timezone.now()
         sem_res.save()
 
+        # Deduplicate payload by course_code (last row wins) so a repeated
+        # code in one request can never double-count SGPA.
+        _deduped = {}
+        for _s in (subjects_data or []):
+            _code = ((_s.get('course_code') or _s.get('code') or '').strip())
+            if _code:
+                _deduped[_code] = _s
+        subjects_data = list(_deduped.values())
+
         # Process each subject score with scheme passing criteria
         try:
             from apps.curriculum.services import get_thresholds
@@ -428,11 +539,16 @@ def submit_semester_marks(student, semester_number, exam_session, subjects_data,
                 _max_theory = float(subj.ese_max_marks or 100)
                 _ise_calc = float((subj.ca_max_marks or 0) + (subj.mse_max_marks or 0))
                 _max_ise = _ise_calc if _ise_calc > 0 else 50.0
-                _max_prac = float(subj.practical_total) if subj.practical_total else 100.0
-                _max_total = float(subj.exam_total) if subj.exam_total else (_max_theory + _max_ise + _max_prac)
+                _max_prac = float(subj.practical_total) if subj.practical_total else 0.0
+                if subj.exam_total:
+                    _max_total = float(subj.exam_total)
+                else:
+                    _max_total = _max_theory + _max_ise + (_max_prac if (prac > 0 or _max_prac > 0) else 0.0)
             else:
                 _max_theory, _max_ise, _max_prac = 100.0, 50.0, 100.0
-                _max_total = _max_theory + _max_ise + _max_prac
+                # Unknown code: practical counts only when submitted.
+                # Theory-only payloads grade against 150, not 250.
+                _max_total = _max_theory + _max_ise + (_max_prac if prac > 0 else 0.0)
 
             if th < 0 or th > _max_theory:
                 raise ValidationError(
@@ -454,7 +570,7 @@ def submit_semester_marks(student, semester_number, exam_session, subjects_data,
             # Scheme passing rule (fallback: Theory >= 20 AND Total >= 40)
             is_pass = (th >= min_theory and tot >= min_total)
             if is_pass:
-                grade_letter, grade_point, is_backlog = grade_for_marks(tot)
+                grade_letter, grade_point, is_backlog = grade_for_marks(tot, _max_total)
             else:
                 grade_letter, grade_point, is_backlog = 'F', 0, True
 

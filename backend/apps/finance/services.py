@@ -202,6 +202,11 @@ def apply_gateway_result(
         try:
             with transaction.atomic():
                 receipt_no = generate_next_receipt_no(attempt.academic_year)
+                try:
+                    _ass = attempt.assessment
+                    _snap = _ass.fee_breakdown if isinstance(getattr(_ass, 'fee_breakdown', None), dict) else {}
+                except Exception:
+                    _snap = {}
                 ledger = PaymentLedger.objects.create(
                     receipt_no=receipt_no,
                     student=attempt.student,
@@ -215,6 +220,7 @@ def apply_gateway_result(
                     payment_date=timezone.now().date(),
                     collected_by=actor if (actor and actor.is_authenticated) else None,
                     remarks=f"Easebuzz Online Payment (Txn: {attempt.transaction_id}, EasepayID: {easebuzz_txn_id})",
+                    fee_snapshot=dict(_snap or {}),
                 )
         except IntegrityError as exc:
             logger.warning(

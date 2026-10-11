@@ -1263,7 +1263,7 @@ export default function ResultHistoryPage() {
                 <span style={{ color: '#64748b', fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', display: 'block' }}>Semester</span>
                 <strong style={{ color: '#0f172a' }}>Semester {viewResult.semester_number}</strong>
               </div>
-              {viewResult.is_locked && (
+              {viewResult.is_published && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
                   <span style={{ color: '#64748b', fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', display: 'block' }}>Status</span>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>

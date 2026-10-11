@@ -69,6 +69,7 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
             'amount_paid',
             'balance_due',
             'fee_breakdown',
+            'fee_snapshot',
             'payment_mode',
             'payment_mode_display',
             'transaction_ref',
@@ -82,17 +83,21 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
         # Receipt numbers are server-sequenced and read-only; any client
         # value is ignored (backend always generates GCOEK/<year>/FEE/<nnnn>).
         # status is derived in PaymentLedger.save(); full payment only.
+        # fee_snapshot is server-frozen from assessment; never client-writable.
         extra_kwargs = {
             'receipt_no': {'read_only': True},
             'status': {'read_only': True},
             'balance_due': {'read_only': True},
+            'fee_snapshot': {'read_only': True},
         }
 
     def get_fee_breakdown(self, obj):
-        # Pay-head breakup for the detailed bill: resolved from the matching
-        # StudentFeeAssessment (same student + academic year). Read-only and
-        # additive — old receipts without an assessment yield {}.
+        # Frozen snapshot first (immutable receipt). Fallback to live
+        # assessment only for pre-snapshot legacy receipts.
         try:
+            snap = getattr(obj, 'fee_snapshot', None)
+            if isinstance(snap, dict) and snap:
+                return snap
             assessment = StudentFeeAssessment.objects.filter(
                 student_id=obj.student_id,
                 academic_year_id=obj.academic_year_id,

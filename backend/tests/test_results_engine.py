@@ -28,6 +28,32 @@ def api_client():
     return APIClient()
 
 
+def _make_review_ready(student, academic_year, semester):
+    """New workflow prerequisite: locked profile + EVERY semester 1..current filled."""
+    student.profile_locked = True
+    student.save(update_fields=['profile_locked', 'updated_at'])
+    cur_num = semester.number
+    is_dsy = bool(getattr(student, 'is_direct_second_year', False)) or str(
+        getattr(student, 'admission_type', '') or '').upper() == 'DSE'
+    start_num = 3 if is_dsy else 1
+    for n in range(start_num, cur_num + 1):
+        sem, _ = Semester.objects.get_or_create(
+            number=n,
+            defaults={'name': f'Semester {n}', 'year_level': min(4, (n + 1) // 2),
+                      'term_type': Semester.TermType.ODD if n % 2 else Semester.TermType.EVEN},
+        )
+        SemesterResult.objects.get_or_create(
+            student=student,
+            academic_year=academic_year,
+            semester=sem,
+            defaults={
+                'exam_session': 'Winter 2026',
+                'result_status': SemesterResult.ResultStatus.PASS,
+                'is_published': True,
+            },
+        )
+
+
 @pytest.fixture
 def result_setup(db):
     year = AcademicYear.objects.create(
@@ -196,6 +222,7 @@ class TestEligibilityWorkflow:
     def test_eligibility_multi_tier_approval_flow(self, api_client, result_setup):
         student = result_setup['student']
         sem2 = result_setup['sem2']
+        _make_review_ready(student, result_setup['year'], result_setup['sem1'])
 
         # 1. System calculates eligibility
         ev = evaluate_student_eligibility(student, sem2)
@@ -228,6 +255,7 @@ class TestEligibilityWorkflow:
         """Teacher confirmation locks the record from teacher editing unless returned by HOD."""
         student = result_setup['student']
         sem2 = result_setup['sem2']
+        _make_review_ready(student, result_setup['year'], result_setup['sem1'])
         ev = evaluate_student_eligibility(student, sem2)
 
         # Class teacher approves
@@ -274,6 +302,7 @@ class TestEligibilityWorkflow:
         sem2 = result_setup['sem2']
 
         # 1. System calculates eligibility & teacher approves
+        _make_review_ready(student, result_setup['year'], result_setup['sem1'])
         ev = evaluate_student_eligibility(student, sem2)
         api_client.force_authenticate(user=result_setup['user_ct'])
         api_client.post(f'/api/v1/results/eligibility/{ev.id}/review-class-teacher/', {'status': 'APPROVED'})
@@ -337,6 +366,7 @@ class TestEligibilityWorkflow:
         """Student directory with ?eligible_only=true returns only HOD-endorsed students."""
         student = result_setup['student']
         sem2 = result_setup['sem2']
+        _make_review_ready(student, result_setup['year'], result_setup['sem1'])
         ev = evaluate_student_eligibility(student, sem2)
 
         # Before HOD endorsement -> 0 eligible
@@ -368,6 +398,7 @@ class TestEligibilityWorkflow:
 
         student = result_setup['student']
         sem2 = result_setup['sem2']
+        _make_review_ready(student, result_setup['year'], result_setup['sem1'])
         ev = evaluate_student_eligibility(student, sem2)
 
         # 1. Teacher approves
@@ -732,6 +763,7 @@ class TestEligibilityDirectWriteBlocked:
         StudentEnrollment.objects.create(
             student=student, academic_year=year, department=dept, program=prog,
             semester=sem2, division=div, status='ACTIVE', is_current=True)
+        _make_review_ready(student, year, sem2)
         ev = evaluate_student_eligibility(student, Semester.objects.get(number=3))
         api_client.force_authenticate(user=teacher)
         assert api_client.patch(
@@ -843,6 +875,7 @@ class TestAssignedTeacherOnlyReview:
         StudentEnrollment.objects.create(
             student=student, academic_year=year, department=dept, program=prog,
             semester=sem1, division=div_a, status='ACTIVE', is_current=True)
+        _make_review_ready(student, year, sem1)
         ev = evaluate_student_eligibility(student, sem2)
         return t_a, t_b, hod, ev
 
@@ -870,6 +903,161 @@ class TestAssignedTeacherOnlyReview:
             f'/api/v1/results/eligibility/{ev.id}/review-class-teacher/',
             {'status': 'APPROVED', 'remarks': 'ok'}, format='json')
         assert res.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.django_db
+class TestReviewRequiresLockedProfileAndResults:
+    """New workflow: teacher/HOD review blocked until profile locked + results filled."""
+
+    def test_teacher_blocked_when_profile_unlocked(self, api_client, result_setup):
+        from apps.results.services import evaluate_student_eligibility
+        student = result_setup['student']
+        # Results filled but profile NOT locked.
+        SemesterResult.objects.create(
+            student=student, academic_year=result_setup['year'], semester=result_setup['sem1'],
+            exam_session='Winter 2026', result_status=SemesterResult.ResultStatus.PASS, is_published=True)
+        ev = evaluate_student_eligibility(student, result_setup['sem2'])
+        api_client.force_authenticate(user=result_setup['user_ct'])
+        res = api_client.post(
+            f'/api/v1/results/eligibility/{ev.id}/review-class-teacher/',
+            {'status': 'APPROVED', 'remarks': 'ok'}, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'lock' in res.json()['detail'].lower()
+
+    def test_teacher_blocked_when_results_missing(self, api_client, result_setup):
+        from apps.results.services import evaluate_student_eligibility
+        student = result_setup['student']
+        # Profile locked but NO results filled.
+        student.profile_locked = True
+        student.save(update_fields=['profile_locked', 'updated_at'])
+        ev = evaluate_student_eligibility(student, result_setup['sem2'])
+        api_client.force_authenticate(user=result_setup['user_ct'])
+        res = api_client.post(
+            f'/api/v1/results/eligibility/{ev.id}/review-class-teacher/',
+            {'status': 'APPROVED', 'remarks': 'ok'}, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'result' in res.json()['detail'].lower()
+
+    def test_hod_blocked_when_profile_unlocked(self, api_client, result_setup):
+        from apps.results.services import evaluate_student_eligibility
+        student = result_setup['student']
+        SemesterResult.objects.create(
+            student=student, academic_year=result_setup['year'], semester=result_setup['sem1'],
+            exam_session='Winter 2026', result_status=SemesterResult.ResultStatus.PASS, is_published=True)
+        ev = evaluate_student_eligibility(student, result_setup['sem2'])
+        api_client.force_authenticate(user=result_setup['user_hod'])
+        res = api_client.post(
+            f'/api/v1/results/eligibility/{ev.id}/endorse-hod/',
+            {'status': 'APPROVED', 'remarks': 'ok'}, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'lock' in res.json()['detail'].lower()
+
+    def test_sysadmin_bypass_for_corrections(self, api_client, result_setup):
+        """Sysadmin override must never deadlock on student prerequisites."""
+        from apps.authentication.models import User
+        from apps.results.services import evaluate_student_eligibility
+        student = result_setup['student']
+        ev = evaluate_student_eligibility(student, result_setup['sem2'])
+        admin = User.objects.create_superuser(username='sysadmin_bypass', password='Password12345!')
+        api_client.force_authenticate(user=admin)
+        res = api_client.post(
+            f'/api/v1/results/eligibility/{ev.id}/review-class-teacher/',
+            {'status': 'APPROVED', 'remarks': 'admin correction'}, format='json')
+        assert res.status_code == status.HTTP_200_OK, res.data
+
+    def test_teacher_blocked_when_older_semester_missing(self, api_client, result_setup):
+        """Strict gate: current filled but Sem 1 missing still blocks."""
+        from apps.academic_structure.models import Semester
+        from apps.results.services import evaluate_student_eligibility
+        student = result_setup['student']
+        sem2 = Semester.objects.get(number=2)
+        # Move student to Sem 2 with only Sem 2 filled (Sem 1 missing).
+        enr = student.enrollments.filter(is_current=True).first()
+        enr.semester = sem2
+        enr.save(update_fields=['semester'])
+        student.profile_locked = True
+        student.save(update_fields=['profile_locked', 'updated_at'])
+        SemesterResult.objects.create(
+            student=student, academic_year=result_setup['year'], semester=sem2,
+            exam_session='Winter 2026', result_status=SemesterResult.ResultStatus.PASS, is_published=True)
+        ev = evaluate_student_eligibility(student, result_setup['sem3'])
+        api_client.force_authenticate(user=result_setup['user_ct'])
+        res = api_client.post(
+            f'/api/v1/results/eligibility/{ev.id}/review-class-teacher/',
+            {'status': 'APPROVED', 'remarks': 'ok'}, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'Sem 1' in res.json()['detail']
+
+    def test_dsy_range_starts_at_sem3(self, api_client, result_setup):
+        """DSY lateral entry never needs Sem 1-2 results."""
+        from apps.results.services import evaluate_student_eligibility
+        student = result_setup['student']
+        student.is_direct_second_year = True
+        student.save(update_fields=['is_direct_second_year', 'updated_at'])
+        sem3 = result_setup['sem3']
+        enr = student.enrollments.filter(is_current=True).first()
+        enr.semester = sem3
+        enr.save(update_fields=['semester'])
+        _make_review_ready(student, result_setup['year'], sem3)
+        assert not SemesterResult.objects.filter(student=student, semester__number__in=[1, 2]).exists()
+        ev = evaluate_student_eligibility(student, sem3)
+        api_client.force_authenticate(user=result_setup['user_ct'])
+        res = api_client.post(
+            f'/api/v1/results/eligibility/{ev.id}/review-class-teacher/',
+            {'status': 'APPROVED', 'remarks': 'ok'}, format='json')
+        assert res.status_code == status.HTTP_200_OK, res.data
+
+
+@pytest.mark.django_db
+class TestBulkFlagSemesters:
+    """Teacher ticks several semesters in the review modal; only those reopen."""
+
+    def _two_ev_setup(self, result_setup):
+        from apps.results.services import evaluate_student_eligibility
+        student = result_setup['student']
+        _make_review_ready(student, result_setup['year'], result_setup['sem1'])
+        ev2 = evaluate_student_eligibility(student, result_setup['sem2'])
+        ev3 = evaluate_student_eligibility(student, result_setup['sem3'])
+        return student, ev2, ev3
+
+    def test_bulk_flag_opens_only_chosen(self, api_client, result_setup):
+        student, ev2, ev3 = self._two_ev_setup(result_setup)
+        api_client.force_authenticate(user=result_setup['user_ct'])
+        res = api_client.post(
+            '/api/v1/results/eligibility/bulk-flag/',
+            {'student_id': str(student.id), 'target_semester_numbers': [2, 3],
+             'remarks': 'Correct Sem 2 and 3 marksheets.'}, format='json')
+        assert res.status_code == status.HTTP_200_OK, res.data
+        assert {f['target_semester_number'] for f in res.data['flagged']} == {2, 3}
+        ev2.refresh_from_db()
+        ev3.refresh_from_db()
+        assert ev2.class_teacher_status == 'FLAGGED'
+        assert ev3.class_teacher_status == 'FLAGGED'
+
+    def test_bulk_flag_atomic_on_missing_row(self, api_client, result_setup):
+        student, ev2, ev3 = self._two_ev_setup(result_setup)
+        api_client.force_authenticate(user=result_setup['user_ct'])
+        res = api_client.post(
+            '/api/v1/results/eligibility/bulk-flag/',
+            {'student_id': str(student.id), 'target_semester_numbers': [2, 7],
+             'remarks': 'Fix both.'}, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        ev2.refresh_from_db()
+        ev3.refresh_from_db()
+        # All-or-nothing: the valid Sem 2 row must NOT be flagged either.
+        assert ev2.class_teacher_status == 'PENDING'
+        assert ev3.class_teacher_status == 'PENDING'
+
+    def test_bulk_flag_needs_remarks(self, api_client, result_setup):
+        student, ev2, _ = self._two_ev_setup(result_setup)
+        api_client.force_authenticate(user=result_setup['user_ct'])
+        res = api_client.post(
+            '/api/v1/results/eligibility/bulk-flag/',
+            {'student_id': str(student.id), 'target_semester_numbers': [2],
+             'remarks': ''}, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        ev2.refresh_from_db()
+        assert ev2.class_teacher_status == 'PENDING'
 
 
 class TestClassVerificationWorkflow:

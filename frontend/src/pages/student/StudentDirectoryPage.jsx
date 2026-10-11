@@ -466,47 +466,8 @@ export default function StudentDirectoryPage() {
               </p>
             </div>
 
-            {/* Top Right Action Buttons */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-              <button
-                type="button"
-                className="edvana-btn"
-                onClick={() => setCreateLoginsModal(true)}
-                style={{
-                  backgroundColor: '#eff6ff',
-                  border: '1px solid #bfdbfe',
-                  color: '#1d4ed8',
-                  fontSize: '0.8125rem',
-                  fontWeight: 600,
-                  padding: '0.5rem 0.875rem',
-                  borderRadius: '8px',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '0.45rem',
-                }}
-              >
-                <KeyRound size={15} />
-                <span>Create Logins</span>
-              </button>
-
-              <button
-                type="button"
-                className="edvana-btn edvana-btn-primary"
-                onClick={() => setRegisterModal(true)}
-                style={{
-                  fontSize: '0.8125rem',
-                  fontWeight: 600,
-                  padding: '0.5rem 1rem',
-                  borderRadius: '8px',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '0.45rem',
-                }}
-              >
-                <Plus size={16} />
-                <span>Register Student</span>
-              </button>
-            </div>
+            {/* Top Right Action Buttons removed: Register + Provision were fake (no POST).
+                Student onboarding is via Government Excel Ingestion only. */}
           </div>
 
           {/* Student Role Notice Banner (if logged in with student-isolated permissions) */}

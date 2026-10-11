@@ -729,6 +729,7 @@ export default function StudentFeeReceiptPage() {
         formData={admissionForm}
         onDownloadPdf={handleDownloadAdmissionPdf}
         downloading={downloadingPdf}
+        canDownload={admissionForm?.can_download !== false}
       />
     </>
   );

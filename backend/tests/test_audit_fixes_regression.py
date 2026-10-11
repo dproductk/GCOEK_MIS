@@ -410,6 +410,21 @@ def _promo_visibility_setup(suffix=''):
     StudentEnrollment.objects.create(
         student=stu, academic_year=cur, department=dept, program=prog,
         semester=sem4, division=div4, status='ACTIVE', is_current=True)
+    # New workflow prerequisite for re-endorse via API.
+    stu.profile_locked = True
+    stu.save(update_fields=['profile_locked', 'updated_at'])
+    from apps.academic_structure.models import Semester as _Sem
+    from apps.results.models import SemesterResult as _SR
+    for _n in range(1, 5):
+        _sem, _ = _Sem.objects.get_or_create(
+            number=_n,
+            defaults={'name': f'Semester {_n}', 'year_level': min(4, (_n + 1) // 2),
+                      'term_type': _Sem.TermType.ODD if _n % 2 else _Sem.TermType.EVEN},
+        )
+        _SR.objects.get_or_create(
+            student=stu, academic_year=cur, semester=_sem,
+            defaults={'exam_session': 'Winter', 'result_status': _SR.ResultStatus.PASS,
+                      'is_published': True})
     ev = EligibilityVerification.objects.create(
         student=stu, academic_year=cur, target_semester=sem5, department=dept,
         active_backlog_count=0,

@@ -107,6 +107,11 @@ class PaymentLedger(BaseModel):
         related_name='collected_payments',
     )
     remarks = models.TextField(blank=True, default='')
+    fee_snapshot = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Frozen head-wise breakup copied from assessment at payment time. Never mutated.',
+    )
 
     class Meta:
         db_table = 'finance_payment_ledgers'

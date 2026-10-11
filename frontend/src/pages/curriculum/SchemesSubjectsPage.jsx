@@ -78,8 +78,18 @@ export default function SchemesSubjectsPage() {
   const [showScheme, setShowScheme] = useState(false);
   const [showSubject, setShowSubject] = useState(false);
   const [showSubjectLink, setShowSubjectLink] = useState(false);
+  const [showEditSubject, setShowEditSubject] = useState(false);
+  const [editingSubject, setEditingSubject] = useState(null);
+  const [showEditScheme, setShowEditScheme] = useState(false);
+  const [showMoveLink, setShowMoveLink] = useState(false);
+  const [movingRow, setMovingRow] = useState(null);
+  const [moveSem, setMoveSem] = useState(1);
+  const [cloning, setCloning] = useState(false);
   const [saving, setSaving] = useState(false);
   const [fieldErrors, setFieldErrors] = useState({});
+  const [subjectSearch, setSubjectSearch] = useState('');
+  const [schemeSearch, setSchemeSearch] = useState('');
+  const [schemeStatus, setSchemeStatus] = useState('');
 
   const [schemeForm, setSchemeForm] = useState({
     code: '', name: '', program: '',
@@ -343,6 +353,181 @@ export default function SchemesSubjectsPage() {
     } catch (err) { setError(err.response?.data?.detail || 'Failed to remove subject from scheme.'); }
   };
 
+  // --- Edit Subject master (sysadmin; works even when used — backend guards) ---
+  const openEditSubject = (s) => {
+    if (!s) return;
+    setEditingSubject(s);
+    setSubjectForm({
+      course_category: s.course_category || '',
+      code: s.code || '',
+      title: s.title || '',
+      lecture_hours: s.lecture_hours ?? '',
+      practical_hours: s.practical_hours ?? '',
+      ca_max_marks: s.ca_max_marks ?? '',
+      mse_max_marks: s.mse_max_marks ?? '',
+      ese_max_marks: s.ese_max_marks ?? '',
+      practical_ca_max_marks: s.practical_ca_max_marks ?? '',
+      practical_ese_max_marks: s.practical_ese_max_marks ?? '',
+      credits: s.credits ?? '',
+    });
+    setFieldErrors({});
+    setShowEditSubject(true);
+  };
+
+  const handleUpdateSubject = async (e) => {
+    e?.preventDefault?.();
+    if (!editingSubject || saving) return;
+    setSaving(true); setFieldErrors({});
+    try {
+      const kind = categoryKind(subjectForm.course_category);
+      const payload = {
+        course_category: subjectForm.course_category,
+        code: subjectForm.code.trim(),
+        title: subjectForm.title.trim(),
+        lecture_hours: numOrNull(subjectForm.lecture_hours),
+        practical_hours: numOrNull(subjectForm.practical_hours),
+        credits: numOrNull(subjectForm.credits),
+      };
+      if (kind === 'lab') {
+        payload.practical_ca_max_marks = numOrNull(subjectForm.practical_ca_max_marks);
+        payload.practical_ese_max_marks = numOrNull(subjectForm.practical_ese_max_marks);
+      } else {
+        payload.ca_max_marks = numOrNull(subjectForm.ca_max_marks);
+        payload.mse_max_marks = numOrNull(subjectForm.mse_max_marks);
+        payload.ese_max_marks = numOrNull(subjectForm.ese_max_marks);
+      }
+      const res = await curriculumApi.updateSubject(editingSubject.id, payload);
+      setShowEditSubject(false);
+      setEditingSubject(null);
+      setSubjectForm(emptySubjectForm);
+      flash(`Subject ${res.data.code} updated. Linked scheme rows keep their copied exam scheme; new links use the new one.`);
+      await loadAll();
+    } catch (err) {
+      const parsed = parseErrors(err.response?.data);
+      if (Object.keys(parsed).length && !err.response?.data?.detail) setFieldErrors(parsed);
+      else setError(err.response?.data?.detail || 'Failed to update subject.');
+    } finally { setSaving(false); }
+  };
+
+  // --- Edit Scheme header (DRAFT only; code/version locked — use Save as version to rename) ---
+  const openEditScheme = () => {
+    if (!detail || detail.status !== 'DRAFT') return;
+    setSchemeForm({
+      code: detail.code || '',
+      name: detail.name || '',
+      program: detail.program || '',
+      effective_from_year: detail.effective_from_year || '',
+      effective_to_year: detail.effective_to_year || '',
+      version: detail.version || 1,
+      min_theory_marks: detail.min_theory_marks ?? 20,
+      min_total_marks: detail.min_total_marks ?? 40,
+      max_backlogs_for_atkt: detail.max_backlogs_for_atkt ?? 4,
+    });
+    setFieldErrors({});
+    setShowEditScheme(true);
+  };
+
+  const handleUpdateScheme = async (e) => {
+    e?.preventDefault?.();
+    if (!detail || saving) return;
+    setSaving(true); setFieldErrors({});
+    try {
+      const payload = {
+        name: schemeForm.name.trim(),
+        program: schemeForm.program || null,
+        effective_from_year: schemeForm.effective_from_year || undefined,
+        effective_to_year: schemeForm.effective_to_year || null,
+        min_theory_marks: Number(schemeForm.min_theory_marks),
+        min_total_marks: Number(schemeForm.min_total_marks),
+        max_backlogs_for_atkt: Number(schemeForm.max_backlogs_for_atkt),
+      };
+      await curriculumApi.updateScheme(detail.id, payload);
+      setShowEditScheme(false);
+      flash(`Scheme ${detail.code} v${detail.version} updated.`);
+      await loadAll();
+    } catch (err) {
+      const parsed = parseErrors(err.response?.data);
+      if (Object.keys(parsed).length && !err.response?.data?.detail) setFieldErrors(parsed);
+      else setError(err.response?.data?.detail || Object.values(parsed).join(' ') || 'Failed to update scheme.');
+    } finally { setSaving(false); }
+  };
+
+  // --- Save as new version: atomic backend clone (version+1, all links+groups) ---
+  const handleCloneVersion = async () => {
+    if (!detail || cloning || saving) return;
+    const nextVersion = Number(detail.version || 1) + 1;
+    if (!window.confirm(`Create ${detail.code} v${nextVersion} as DRAFT and copy all ${detail.scheme_subjects?.length || 0} subject(s) atomically? Publish it when ready.`)) return;
+    setCloning(true); setError(null);
+    try {
+      const created = await curriculumApi.cloneScheme(detail.id, {});
+      await loadAll();
+      setSelectedScheme(created.data.id);
+      flash(`Version v${created.data.version} created as DRAFT with ${(created.data.scheme_subjects || []).length} subject(s). Publish it to apply.`);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to create new version (code+version must be unique).');
+    } finally { setCloning(false); }
+  };
+
+  // --- Move subject between semesters (DRAFT only; covers odd↔even) ---
+  const openMoveLink = (row) => {
+    if (!row || detail?.status !== 'DRAFT') return;
+    setMovingRow(row);
+    setMoveSem(row.semester_number || 1);
+    setFieldErrors({});
+    setShowMoveLink(true);
+  };
+
+  const handleMoveLink = async (e) => {
+    e?.preventDefault?.();
+    if (!movingRow || saving) return;
+    const target = Number(moveSem);
+    if (!Number.isInteger(target) || target < 1 || target > 8) {
+      setFieldErrors({ semester_number: 'Semester must be 1-8.' });
+      return;
+    }
+    if (target === movingRow.semester_number) { setShowMoveLink(false); return; }
+    setSaving(true); setFieldErrors({});
+    try {
+      await curriculumApi.updateSchemeSubject(movingRow.id, { semester_number: target });
+      setShowMoveLink(false);
+      setMovingRow(null);
+      flash(`${movingRow.course_code} moved to Semester ${target}.`);
+      await loadAll();
+    } catch (err) {
+      const parsed = parseErrors(err.response?.data);
+      if (parsed.semester_number) setFieldErrors({ semester_number: parsed.semester_number });
+      else if (parsed.subject) setFieldErrors({ semester_number: parsed.subject });
+      else setError(err.response?.data?.detail || 'Failed to move subject (slot may be taken).');
+    } finally { setSaving(false); }
+  };
+
+  // --- Server-side search (backend ?search= / ?code=&status=) ---
+  const handleSubjectSearch = async (e) => {
+    e?.preventDefault?.();
+    setLoading(true); setError(null);
+    try {
+      const subRes = await curriculumApi.getSubjects(subjectSearch.trim() ? { search: subjectSearch.trim() } : {});
+      setSubjects(subRes.data?.results || subRes.data || []);
+    } catch (err) { setError(err.response?.data?.detail || 'Subject search failed.'); }
+    finally { setLoading(false); }
+  };
+
+  const handleSchemeSearch = async (e) => {
+    e?.preventDefault?.();
+    setLoading(true); setError(null);
+    try {
+      const params = {};
+      if (schemeSearch.trim()) params.code = schemeSearch.trim();
+      if (schemeStatus) params.status = schemeStatus;
+      const schRes = await curriculumApi.getSchemes(params);
+      const list = schRes.data?.results || schRes.data || [];
+      setSchemes(list);
+      if (list.length && !list.some((s) => s.id === selectedScheme)) setSelectedScheme(list[0].id);
+      if (!list.length) setSelectedScheme(null);
+    } catch (err) { setError(err.response?.data?.detail || 'Scheme search failed.'); }
+    finally { setLoading(false); }
+  };
+
   const schemeColumns = [
     { header: 'Scheme', render: (s) => <span style={{ fontWeight: 700 }}>{s.code} <span style={{ color: '#64748b' }}>v{s.version}</span></span> },
     { header: 'Name', accessor: 'name' },
@@ -403,7 +588,21 @@ export default function SchemesSubjectsPage() {
           <>
             <div className="edvana-card" style={{ marginBottom: '1.5rem' }}>
               <div className="edvana-card-header"><h2 className="edvana-card-title">Scheme Versions ({schemes.length})</h2>
-                <p className="edvana-card-description">Select a scheme to see its semester-wise subjects and rules.</p></div>
+                <p className="edvana-card-description">Select a scheme to see its semester-wise subjects and rules.</p>
+                <form onSubmit={handleSchemeSearch} style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem', flexWrap: 'wrap' }}>
+                  <input className="edvana-input" style={{ maxWidth: '180px' }} placeholder="Search code (e.g. G)" value={schemeSearch} onChange={(e) => setSchemeSearch(e.target.value)} />
+                  <select className="edvana-input" style={{ maxWidth: '150px' }} value={schemeStatus} onChange={(e) => setSchemeStatus(e.target.value)}>
+                    <option value="">All statuses</option>
+                    <option value="DRAFT">DRAFT</option>
+                    <option value="PUBLISHED">PUBLISHED</option>
+                    <option value="RETIRED">RETIRED</option>
+                  </select>
+                  <button type="submit" className="edvana-btn edvana-btn-secondary">Search</button>
+                  {(schemeSearch || schemeStatus) && (
+                    <button type="button" className="edvana-btn edvana-btn-secondary" onClick={() => { setSchemeSearch(''); setSchemeStatus(''); loadAll(); }}>Clear</button>
+                  )}
+                </form>
+              </div>
               <div className="edvana-card-body" style={{ padding: 0 }}>
                 {schemes.length === 0 ? (
                   <div style={{ padding: '2rem' }}><EmptyState title="No schemes yet" message="Sysadmin creates the first scheme version (e.g. G v1) for a program and admission year." /></div>
@@ -440,13 +639,19 @@ export default function SchemesSubjectsPage() {
                     </p>
                   </div>
                   {isSysadmin && (
-                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
                       {detail.status === 'DRAFT' && (
                         <button className="edvana-btn edvana-btn-primary" onClick={handlePublish}>Publish</button>
                       )}
                       {detail.status === 'PUBLISHED' && (
                         <button className="edvana-btn edvana-btn-secondary" onClick={handleRetire}>Retire</button>
                       )}
+                      {detail.status === 'DRAFT' && (
+                        <button className="edvana-btn edvana-btn-secondary" onClick={openEditScheme}>Edit Scheme</button>
+                      )}
+                      <button className="edvana-btn edvana-btn-secondary" onClick={handleCloneVersion} disabled={cloning}>
+                        {cloning ? 'Copying…' : `Save as v${Number(detail.version || 1) + 1}`}
+                      </button>
                       {detail.status === 'DRAFT' && (
                         <button className="edvana-btn edvana-btn-secondary" onClick={() => { setFieldErrors({}); setShowSubjectLink(true); }}>
                           <Layers size={14} /> Add Subject
@@ -482,13 +687,22 @@ export default function SchemesSubjectsPage() {
                             ) },
                             ...(isSysadmin && detail.status === 'DRAFT' ? [{
                               header: '', align: 'right', render: (r) => (
-                                <button
-                                  title={`Remove ${r.course_code} from scheme`}
-                                  onClick={() => handleUnlinkSubject(r)}
-                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#b91c1c', padding: '0.35rem', display: 'inline-flex', alignItems: 'center' }}
-                                >
-                                  <Trash2 size={16} />
-                                </button>
+                                <span style={{ display: 'inline-flex', gap: '0.25rem', alignItems: 'center' }}>
+                                  <button
+                                    title={`Move ${r.course_code} to another semester (odd↔even)`}
+                                    onClick={() => openMoveLink(r)}
+                                    style={{ background: 'none', border: '1px solid #bfdbfe', cursor: 'pointer', color: '#1d4ed8', padding: '0.35rem 0.6rem', display: 'inline-flex', alignItems: 'center', borderRadius: '6px', fontSize: '0.75rem', fontWeight: 600 }}
+                                  >
+                                    Move
+                                  </button>
+                                  <button
+                                    title={`Remove ${r.course_code} from scheme`}
+                                    onClick={() => handleUnlinkSubject(r)}
+                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#b91c1c', padding: '0.35rem', display: 'inline-flex', alignItems: 'center' }}
+                                  >
+                                    <Trash2 size={16} />
+                                  </button>
+                                </span>
                               ),
                             }] : []),
                           ]}
@@ -503,7 +717,15 @@ export default function SchemesSubjectsPage() {
 
             <div className="edvana-card">
               <div className="edvana-card-header"><h2 className="edvana-card-title">Subject Master ({subjects.length})</h2>
-                <p className="edvana-card-description">Reusable subjects placed into scheme versions.</p></div>
+                <p className="edvana-card-description">Reusable subjects placed into scheme versions.</p>
+                <form onSubmit={handleSubjectSearch} style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem', flexWrap: 'wrap' }}>
+                  <input className="edvana-input" style={{ maxWidth: '260px' }} placeholder="Search code or title" value={subjectSearch} onChange={(e) => setSubjectSearch(e.target.value)} />
+                  <button type="submit" className="edvana-btn edvana-btn-secondary">Search</button>
+                  {subjectSearch && (
+                    <button type="button" className="edvana-btn edvana-btn-secondary" onClick={() => { setSubjectSearch(''); loadAll(); }}>Clear</button>
+                  )}
+                </form>
+              </div>
               <div className="edvana-card-body" style={{ padding: 0 }}>
                 <DataTable
                   columns={[
@@ -515,13 +737,22 @@ export default function SchemesSubjectsPage() {
                     { header: 'Credit', accessor: 'credits' },
                     ...(isSysadmin ? [{
                       header: '', align: 'right', render: (s) => (
-                        <button
-                          title={`Delete subject ${s.code}`}
-                          onClick={() => handleDeleteSubject(s)}
-                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#b91c1c', padding: '0.35rem', display: 'inline-flex', alignItems: 'center' }}
-                        >
-                          <Trash2 size={16} />
-                        </button>
+                        <span style={{ display: 'inline-flex', gap: '0.25rem', alignItems: 'center' }}>
+                          <button
+                            title={`Edit subject ${s.code}`}
+                            onClick={() => openEditSubject(s)}
+                            style={{ background: 'none', border: '1px solid #bfdbfe', cursor: 'pointer', color: '#1d4ed8', padding: '0.35rem 0.6rem', display: 'inline-flex', alignItems: 'center', borderRadius: '6px', fontSize: '0.75rem', fontWeight: 600 }}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            title={`Delete subject ${s.code}`}
+                            onClick={() => handleDeleteSubject(s)}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#b91c1c', padding: '0.35rem', display: 'inline-flex', alignItems: 'center' }}
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </span>
                       ),
                     }] : []),
                   ]}
@@ -673,6 +904,114 @@ export default function SchemesSubjectsPage() {
               {fieldErrors._general}
             </p>
           )}
+        </form>
+      </Modal>
+
+      <Modal isOpen={showEditSubject} onClose={() => { setShowEditSubject(false); setEditingSubject(null); }} title={`Edit Subject ${editingSubject?.code || ''} (Sysadmin)`} size="lg"
+        footer={<><button className="edvana-btn edvana-btn-secondary" onClick={() => { setShowEditSubject(false); setEditingSubject(null); }} disabled={saving}>Cancel</button>
+          <button className="edvana-btn edvana-btn-primary" onClick={handleUpdateSubject} disabled={saving}>{saving ? 'Saving...' : 'Save'}</button></>}>
+        <form onSubmit={handleUpdateSubject}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
+            <FormField label="Course Category" required error={fieldErrors.course_category}>
+              <select className="edvana-input" style={{ width: '100%' }} value={subjectForm.course_category} onChange={(e) => setSubjectForm({ ...subjectForm, course_category: e.target.value })}>
+                <option value="">Select category</option>
+                {COURSE_CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+              </select>
+            </FormField>
+            <FormField label="Course Code" required error={fieldErrors.code}>
+              <input className="edvana-input" style={{ width: '100%' }} value={subjectForm.code} onChange={(e) => setSubjectForm({ ...subjectForm, code: e.target.value })} />
+            </FormField>
+            <FormField label="Course Name" required error={fieldErrors.title}>
+              <input className="edvana-input" style={{ width: '100%' }} value={subjectForm.title} onChange={(e) => setSubjectForm({ ...subjectForm, title: e.target.value })} />
+            </FormField>
+          </div>
+          <div style={{ marginTop: '1rem', background: '#eff6ff', borderRadius: '8px', padding: '0.75rem 1rem 1rem' }}>
+            <h4 style={{ margin: '0 0 0.75rem', color: '#1d4ed8', fontSize: '0.9rem' }}>Weekly Hours</h4>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
+              <FormField label="L (Lecture)" required error={fieldErrors.lecture_hours}>
+                <input type="number" min="0" max="12" className="edvana-input" style={{ width: '100%' }} value={subjectForm.lecture_hours} onChange={(e) => setSubjectForm({ ...subjectForm, lecture_hours: e.target.value })} />
+              </FormField>
+              <FormField label="P (Practical)" required error={fieldErrors.practical_hours}>
+                <input type="number" min="0" max="24" className="edvana-input" style={{ width: '100%' }} value={subjectForm.practical_hours} onChange={(e) => setSubjectForm({ ...subjectForm, practical_hours: e.target.value })} />
+              </FormField>
+            </div>
+          </div>
+          <div style={{ marginTop: '1rem', background: '#eff6ff', borderRadius: '8px', padding: '0.75rem 1rem 1rem' }}>
+            <h4 style={{ margin: '0 0 0.75rem', color: '#1d4ed8', fontSize: '0.9rem' }}>Examination Scheme</h4>
+            {categoryKind(subjectForm.course_category) === 'lab' ? (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem' }}>
+                <FormField label="Practical CA" required error={fieldErrors.practical_ca_max_marks}>
+                  <input type="number" step="0.5" min="0" className="edvana-input" style={{ width: '100%' }} value={subjectForm.practical_ca_max_marks} onChange={(e) => setSubjectForm({ ...subjectForm, practical_ca_max_marks: e.target.value })} />
+                </FormField>
+                <FormField label="Practical ESE" required error={fieldErrors.practical_ese_max_marks}>
+                  <input type="number" step="0.5" min="0" className="edvana-input" style={{ width: '100%' }} value={subjectForm.practical_ese_max_marks} onChange={(e) => setSubjectForm({ ...subjectForm, practical_ese_max_marks: e.target.value })} />
+                </FormField>
+                <FormField label="Credit" required error={fieldErrors.credits}>
+                  <input type="number" min="1" max="12" className="edvana-input" style={{ width: '100%' }} value={subjectForm.credits} onChange={(e) => setSubjectForm({ ...subjectForm, credits: e.target.value })} />
+                </FormField>
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '1rem' }}>
+                <FormField label="CA" required error={fieldErrors.ca_max_marks}>
+                  <input type="number" step="0.5" min="0" className="edvana-input" style={{ width: '100%' }} value={subjectForm.ca_max_marks} onChange={(e) => setSubjectForm({ ...subjectForm, ca_max_marks: e.target.value })} />
+                </FormField>
+                <FormField label="MSE" required error={fieldErrors.mse_max_marks}>
+                  <input type="number" step="0.5" min="0" className="edvana-input" style={{ width: '100%' }} value={subjectForm.mse_max_marks} onChange={(e) => setSubjectForm({ ...subjectForm, mse_max_marks: e.target.value })} />
+                </FormField>
+                <FormField label="ESE" required error={fieldErrors.ese_max_marks}>
+                  <input type="number" step="0.5" min="0" className="edvana-input" style={{ width: '100%' }} value={subjectForm.ese_max_marks} onChange={(e) => setSubjectForm({ ...subjectForm, ese_max_marks: e.target.value })} />
+                </FormField>
+                <FormField label="Credit" required error={fieldErrors.credits}>
+                  <input type="number" min="1" max="12" className="edvana-input" style={{ width: '100%' }} value={subjectForm.credits} onChange={(e) => setSubjectForm({ ...subjectForm, credits: e.target.value })} />
+                </FormField>
+              </div>
+            )}
+          </div>
+          <p style={{ marginTop: '0.75rem', fontSize: '0.8rem', color: '#64748b' }}>Note: existing scheme links keep their copied exam scheme; new links use the updated one.</p>
+        </form>
+      </Modal>
+
+      <Modal isOpen={showEditScheme} onClose={() => setShowEditScheme(false)} title={`Edit Scheme ${detail?.code || ''} v${detail?.version || ''} (DRAFT only)`} size="lg"
+        footer={<><button className="edvana-btn edvana-btn-secondary" onClick={() => setShowEditScheme(false)} disabled={saving}>Cancel</button>
+          <button className="edvana-btn edvana-btn-primary" onClick={handleUpdateScheme} disabled={saving}>{saving ? 'Saving...' : 'Save'}</button></>}>
+        <form onSubmit={handleUpdateScheme}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+            <FormField label="Scheme Code (locked — use Save as version to rename)" error={fieldErrors.code}>
+              <input className="edvana-input" style={{ width: '100%', background: '#f1f5f9' }} value={schemeForm.code} disabled />
+            </FormField>
+            <FormField label="Name" required error={fieldErrors.name}>
+              <input className="edvana-input" style={{ width: '100%' }} value={schemeForm.name} onChange={(e) => setSchemeForm({ ...schemeForm, name: e.target.value })} />
+            </FormField>
+            <FormField label="Program" error={fieldErrors.program}>
+              <select className="edvana-input" style={{ width: '100%' }} value={schemeForm.program} onChange={(e) => setSchemeForm({ ...schemeForm, program: e.target.value })}>
+                <option value="">All programs (applies to every program)</option>
+                {programs.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
+              </select>
+            </FormField>
+            <FormField label="Version (locked)" error={fieldErrors.version}>
+              <input className="edvana-input" style={{ width: '100%', background: '#f1f5f9' }} value={schemeForm.version} disabled />
+            </FormField>
+            <FormField label="Min Theory" required error={fieldErrors.min_theory_marks}>
+              <input type="number" step="0.5" className="edvana-input" style={{ width: '100%' }} value={schemeForm.min_theory_marks} onChange={(e) => setSchemeForm({ ...schemeForm, min_theory_marks: e.target.value })} />
+            </FormField>
+            <FormField label="Min Total" required error={fieldErrors.min_total_marks}>
+              <input type="number" step="0.5" className="edvana-input" style={{ width: '100%' }} value={schemeForm.min_total_marks} onChange={(e) => setSchemeForm({ ...schemeForm, min_total_marks: e.target.value })} />
+            </FormField>
+            <FormField label="Max Backlogs (ATKT)" required error={fieldErrors.max_backlogs_for_atkt}>
+              <input type="number" min="0" max="12" className="edvana-input" style={{ width: '100%' }} value={schemeForm.max_backlogs_for_atkt} onChange={(e) => setSchemeForm({ ...schemeForm, max_backlogs_for_atkt: e.target.value })} />
+            </FormField>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal isOpen={showMoveLink} onClose={() => { setShowMoveLink(false); setMovingRow(null); }} title={`Move ${movingRow?.course_code || ''} (Sem ${movingRow?.semester_number || ''} → ?)`} size="sm"
+        footer={<><button className="edvana-btn edvana-btn-secondary" onClick={() => { setShowMoveLink(false); setMovingRow(null); }} disabled={saving}>Cancel</button>
+          <button className="edvana-btn edvana-btn-primary" onClick={handleMoveLink} disabled={saving}>{saving ? 'Moving...' : 'Move'}</button></>}>
+        <form onSubmit={handleMoveLink}>
+          <FormField label="New Semester (1-8, odd↔even allowed)" required error={fieldErrors.semester_number}
+            help="DRAFT schemes only. Blocked if the slot already has this subject.">
+            <input type="number" min="1" max="8" className="edvana-input" style={{ width: '100%' }} value={moveSem} onChange={(e) => setMoveSem(e.target.value)} />
+          </FormField>
         </form>
       </Modal>
 

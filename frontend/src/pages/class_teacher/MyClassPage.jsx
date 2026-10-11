@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import studentApi from '../../api/studentApi';
 import resultsApi from '../../api/resultsApi';
 import PageHeader from '../../components/common/PageHeader';
 import StatCard from '../../components/common/StatCard';
@@ -40,12 +39,43 @@ export default function MyClassPage() {
     try {
       setLoading(true);
       setError(null);
-      const [stuRes, eligRes] = await Promise.all([
-        studentApi.getStudents(),
-        resultsApi.getEligibilities(),
-      ]);
-      setStudents(stuRes.data?.results || stuRes.data || []);
-      setEligibilities(eligRes.data?.results || eligRes.data || []);
+      // Assigned-divisions only: never use college-wide student directory here.
+      // Backend getClasses() is already assigned-only for CLASS_TEACHER.
+      const clsRes = await resultsApi.getClasses();
+      const assigned = clsRes.data?.results || clsRes.data || [];
+      if (!assigned.length) {
+        setStudents([]);
+        setEligibilities([]);
+        return;
+      }
+      const rosters = await Promise.all(
+        assigned.map((c) => resultsApi.getClassRoster(c.division_id).then((r) => r.data).catch(() => null))
+      );
+      const mergedStudents = [];
+      const mergedElig = [];
+      rosters.forEach((roster) => {
+        if (!roster || !Array.isArray(roster.students)) return;
+        roster.students.forEach((s) => {
+          mergedStudents.push({
+            id: s.student_id,
+            display_name: s.student_name,
+            enrollment_no: s.enrollment_no,
+            division_name: roster.division_name,
+            semester_number: s.current_semester,
+            department_code: roster.department_code,
+          });
+          if (s.eligibility_id) {
+            mergedElig.push({
+              student_id: s.student_id,
+              calculated_status: s.calculated_status,
+              calculated_status_display: s.calculated_status_display,
+              active_backlog_count: s.semester_result?.backlog_count,
+            });
+          }
+        });
+      });
+      setStudents(mergedStudents);
+      setEligibilities(mergedElig);
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to load assigned class roster.');
     } finally {
@@ -252,29 +282,29 @@ export default function MyClassPage() {
         >
           <StatCard
             label="Enrolled in Division"
-            value={`${students.length || 60} Students`}
-            hint="Division A — Semester 1"
+            value={`${students.length} Students`}
+            hint="Your assigned divisions only"
             icon={Users}
             color="var(--edvana-brand)"
           />
           <StatCard
             label="Average Attendance"
-            value="86.4%"
-            hint="Complies with >75% attendance rule"
+            value="—"
+            hint="Attendance tracking not yet wired"
             icon={Percent}
             color="var(--edvana-success)"
           />
           <StatCard
             label="Eligible for Promotion"
-            value={eligibleCount || students.length || 58}
+            value={eligibleCount}
             hint="Clear promotion record"
             icon={CheckCircle2}
             color="var(--edvana-success)"
           />
           <StatCard
             label="Class Verification"
-            value="Complete"
-            hint="Ready for HOD sign-off"
+            value={eligibilities.length ? 'In Progress' : 'Not Started'}
+            hint="Open Eligibility Desk to review"
             icon={FileCheck}
             color="var(--edvana-info)"
           />

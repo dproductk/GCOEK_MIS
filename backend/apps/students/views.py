@@ -17,7 +17,7 @@ from rest_framework.response import Response
 
 from apps.audit.models import AuditLog
 from apps.audit.services import audit_log
-from apps.common.encryption import decrypt_value, encrypt_value
+from apps.common.encryption import decrypt_value, encrypt_value, require_encryption_for_write
 from apps.authentication.permissions import (
     HasRolePermission,
     HasScopeAccess,
@@ -294,11 +294,17 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
         Student self-service profile update.
 
         Only the authenticated student may update their OWN record.
-        Locked (silently ignored, never written):
-          enrollment_no, application_id, names, status, admission data,
-          enrollments, Aadhaar number/verified flag, documents/marksheets.
-        Editable: personal contact/demographic details, guardians,
-        permanent address, primary bank account. All changes audited.
+        Locked (rejected, never written):
+          enrollment_no, application_id, status, admission data,
+          enrollments, gender, caste, documents verification flags.
+        Editable: full name, personal contact/demographic details,
+        guardians, scholarship, permanent address, primary bank account,
+        Aadhaar number + name on Aadhaar, SSC/HSC/Diploma board records.
+        All changes audited. Address/bank/board writes are atomic:
+        any validation failure rolls back the whole save.
+        Once profile_locked is True, all self-service writes are rejected
+        with 403 — the student gets exactly one editing lifetime ending
+        in an explicit lock. Staff unlock is a separate audited action.
         """
         import re
 
@@ -318,6 +324,8 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
                 {'detail': 'Student profile not associated with this account.'},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        if student.profile_locked:
+            raise PermissionDenied('Profile is locked permanently. Contact Admin Head for corrections.')
 
         data = request.data or {}
         changed = []
@@ -329,16 +337,47 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
             return value
 
         with transaction.atomic():
+            # 0. Full name (editable). Split into first/middle/last + display.
+            # first_name / last_name keys remain ignored; only full_name writes.
+            if 'full_name' in data and data.get('full_name') not in (None, ''):
+                full = str(data.get('full_name') or '').strip()
+                if not full:
+                    raise ValidationError({'full_name': 'Full name cannot be empty.'})
+                if len(full) < 3 or len(full) > 150:
+                    raise ValidationError({'full_name': 'Full name must be 3-150 characters.'})
+                # Unicode-aware: letters from any script plus spaces/dots/
+                # hyphens/apostrophes. Digits and symbols stay rejected.
+                _name_core = re.sub(r"[\s.'\-]", '', full)
+                if not _name_core or not _name_core.isalpha():
+                    raise ValidationError({'full_name': 'Full name may only contain letters, spaces, dots, hyphens.'})
+                parts = full.split()
+                if len(parts) < 2:
+                    raise ValidationError({'full_name': 'Enter first and last name.'})
+                first = parts[0]
+                last = parts[-1]
+                middle = ' '.join(parts[1:-1]) if len(parts) > 2 else ''
+                if (student.first_name != first or student.middle_name != middle
+                        or student.last_name != last or student.display_name != full):
+                    student.first_name = first
+                    student.middle_name = middle
+                    student.last_name = last
+                    student.display_name = full
+                    student.save(update_fields=['first_name', 'middle_name', 'last_name', 'display_name', 'updated_at'])
+                    changed.append('full_name')
+
             # 1. Personal details (create row if missing)
-            # LOCKED admission-identity fields (government file is the truth;
-            # corrections go through Admin Head, never self-service):
-            # gender (always set by import) can never be changed here;
-            # caste may be filled once when the import left it blank.
+            # LOCKED: gender and caste come from the admission record and can
+            # never be changed here — not even once. Corrections go through
+            # Admin Head.
             personal_data = data.get('personal') or {}
             if isinstance(personal_data, dict) and personal_data:
                 if 'gender' in personal_data:
                     raise ValidationError(
                         {'personal.gender': 'Gender is locked from your admission record. Contact Admin Head for corrections.'}
+                    )
+                if 'caste' in personal_data:
+                    raise ValidationError(
+                        {'personal.caste': 'Sub-caste is locked from your admission record. Contact Admin Head for corrections.'}
                     )
                 allowed = {
                     'date_of_birth', 'place_of_birth', 'religion',
@@ -347,15 +386,6 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
                     'marital_status', 'abc_id',
                 }
                 personal, _ = StudentPersonalDetail.objects.get_or_create(student=student)
-                if 'caste' in personal_data:
-                    new_caste = str(personal_data.get('caste') or '').strip()
-                    if (personal.caste or '').strip() and new_caste != personal.caste:
-                        raise ValidationError(
-                            {'personal.caste': 'Sub-caste is locked from your admission record. Contact Admin Head for corrections.'}
-                        )
-                    if new_caste != (personal.caste or ''):
-                        personal.caste = new_caste
-                        changed.append('personal.caste')
                 for field_name, value in personal_data.items():
                     if field_name not in allowed:
                         continue
@@ -519,6 +549,7 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
                         digits = re.sub(r'\D', '', value)
                         if not 9 <= len(digits) <= 18:
                             raise ValidationError({'bank.account_number': 'Account number must be 9-18 digits.'})
+                        require_encryption_for_write()
                         bank.account_number_encrypted = encrypt_value(digits)
                         bank.account_number_masked = f'XXXXXXXX{digits[-4:]}'
                         changed.append('bank.account_number')
@@ -537,6 +568,82 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
                             changed.append(f'bank.{field_name}')
                 bank.save()
 
+            # 5. Aadhaar (editable). Number re-encrypted + masked, verified
+            # reset on change since staff must re-verify the new number.
+            aadhaar_data = data.get('aadhaar') or {}
+            if isinstance(aadhaar_data, dict) and aadhaar_data:
+                from apps.students.models import StudentAadhaarDetail
+                try:
+                    aadhaar = student.aadhaar_details
+                except StudentAadhaarDetail.DoesNotExist:
+                    aadhaar = StudentAadhaarDetail(
+                        student=student,
+                        aadhaar_number_encrypted='',
+                        aadhaar_number_masked='',
+                    )
+                if 'name_as_per_aadhaar' in aadhaar_data:
+                    new_name = str(aadhaar_data.get('name_as_per_aadhaar') or '').strip()
+                    if new_name and (len(new_name) < 3 or len(new_name) > 150):
+                        raise ValidationError({'aadhaar.name_as_per_aadhaar': 'Name on Aadhaar must be 3-150 characters.'})
+                    if (aadhaar.name_as_per_aadhaar or '') != new_name:
+                        aadhaar.name_as_per_aadhaar = new_name
+                        changed.append('aadhaar.name_as_per_aadhaar')
+                if 'aadhaar_number' in aadhaar_data and str(aadhaar_data.get('aadhaar_number') or '').strip():
+                    raw = re.sub(r'\D', '', str(aadhaar_data.get('aadhaar_number')))
+                    if not re.fullmatch(r'[2-9]\d{11}', raw):
+                        raise ValidationError({'aadhaar.aadhaar_number': 'Aadhaar must be 12 digits starting 2-9.'})
+                    require_encryption_for_write()
+                    masked = f'XXXX-XXXX-{raw[-4:]}'
+                    if (aadhaar.aadhaar_number_masked or '') != masked:
+                        aadhaar.aadhaar_number_encrypted = encrypt_value(raw)
+                        aadhaar.aadhaar_number_masked = masked
+                        aadhaar.verified = False
+                        changed.append('aadhaar.aadhaar_number')
+                aadhaar.save()
+
+            # 6. Board records — SSC / HSC / DIPLOMA qualifying details.
+            # Accepts {ssc: {...}, hsc: {...}} with keys:
+            # stream, board, school_college, passing_year, seat_no,
+            # marks_obtained, percentage.
+            for key, default_level in (('ssc', 'SSC'), ('hsc', None)):
+                entry = data.get(key) or {}
+                if not isinstance(entry, dict) or not entry:
+                    continue
+                from apps.students.models import StudentBoardRecord
+                level = str(entry.get('level') or default_level or '').strip().upper()
+                if key == 'hsc' and level not in ('HSC', 'DIPLOMA'):
+                    level = 'DIPLOMA' if student.is_direct_second_year else 'HSC'
+                if level not in ('SSC', 'HSC', 'DIPLOMA'):
+                    raise ValidationError({f'{key}.level': 'Level must be SSC, HSC or DIPLOMA.'})
+                allowed = {
+                    'stream', 'board', 'school_college', 'passing_year',
+                    'seat_no', 'marks_obtained', 'percentage',
+                }
+                cleaned = {}
+                for field_name in allowed:
+                    if field_name not in entry:
+                        continue
+                    value = str(entry[field_name] or '').strip()
+                    if len(value) > 255:
+                        raise ValidationError({f'{key}.{field_name}': 'Too long (max 255).'})
+                    if '<' in value or '>' in value:
+                        raise ValidationError({f'{key}.{field_name}': 'Angle brackets are not allowed.'})
+                    cleaned[field_name] = value
+                if not cleaned:
+                    continue
+                if 'passing_year' in cleaned and cleaned['passing_year']:
+                    if not re.fullmatch(r'(19|20)\d{2}', cleaned['passing_year']):
+                        raise ValidationError({f'{key}.passing_year': 'Passing year must be YYYY, e.g. 2022.'})
+                record, _ = student.board_records.get_or_create(
+                    level=level,
+                    defaults={'stream': '', 'board': '', 'school_college': ''},
+                )
+                for field_name, value in cleaned.items():
+                    if getattr(record, field_name) != value:
+                        setattr(record, field_name, value)
+                        changed.append(f'{key}.{field_name}')
+                record.save()
+
         if changed:
             audit_log(
                 request=request,
@@ -552,6 +659,108 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = StudentProfileSerializer(student)
         return Response(
             {'detail': 'Profile updated successfully.', 'changed': sorted(set(changed)), 'profile': serializer.data},
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=['post'], url_path='me/lock')
+    def lock_me(self, request):
+        """
+        One-time permanent self-lock.
+
+        The student confirms they are done editing. After this call the
+        profile can never be edited or self-uploaded again by the student
+        (update_me + own document upload/delete return 403). Staff unlock
+        via unlock (SYSADMIN/ADMIN_HEAD) is the only recourse, audited.
+        Idempotent-safe: locking twice returns 400, never re-opens.
+        """
+        from django.db import transaction
+        from django.utils import timezone as _tz
+        from rest_framework.exceptions import PermissionDenied
+
+        if not user_has_role(request.user, 'STUDENT'):
+            raise PermissionDenied('Only students may lock their own profile.')
+        try:
+            student = Student.objects.get(user_id=request.user.id, is_active=True)
+        except Student.DoesNotExist:
+            return Response(
+                {'detail': 'Student profile not associated with this account.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if student.profile_locked:
+            return Response(
+                {'detail': 'Profile is already locked permanently.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        with transaction.atomic():
+            student = Student.objects.select_for_update().get(id=student.id)
+            if student.profile_locked:
+                return Response(
+                    {'detail': 'Profile is already locked permanently.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            student.profile_locked = True
+            student.profile_locked_at = _tz.now()
+            student.save(update_fields=['profile_locked', 'profile_locked_at', 'updated_at'])
+            audit_log(
+                request=request,
+                actor=request.user,
+                action=AuditLog.Action.UPDATE,
+                target_type='Student',
+                target_id=str(student.id),
+                target_display=student.display_name,
+                reason='Student one-time profile lock',
+                description='Student permanently locked their own profile after self-service edit.',
+            )
+        serializer = StudentProfileSerializer(student)
+        return Response(
+            {'detail': 'Profile locked permanently. No further edits are allowed.', 'profile': serializer.data},
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=['post'], url_path='unlock')
+    def unlock(self, request, pk=None):
+        """
+        Staff unlock for a locked student profile (recourse path).
+
+        Requires SYSADMIN or ADMIN_HEAD (or superuser). Reason (min 5 chars)
+        is mandatory and audited. Students can never call this for
+        themselves — it is detail-route + role-gated.
+        Note: earlier teacher reviews / HOD endorsements stay on record;
+        unlocking only re-opens self-service editing for corrections.
+        """
+        from django.db import transaction
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+
+        student = self.get_object()
+        user = request.user
+        if not (user.is_superuser or user_has_role(user, 'SYSADMIN') or user_has_role(user, 'ADMIN_HEAD')):
+            raise PermissionDenied('Only Sysadmin or Admin Head can unlock a student profile.')
+        reason = str(request.data.get('reason') or '').strip()
+        if len(reason) < 5:
+            raise ValidationError({'reason': 'A reason of at least 5 characters is required.'})
+        with transaction.atomic():
+            student = Student.objects.select_for_update().get(id=student.id)
+            if not student.profile_locked:
+                return Response(
+                    {'detail': 'Profile is not locked.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            student.profile_locked = False
+            student.profile_locked_at = None
+            student.save(update_fields=['profile_locked', 'profile_locked_at', 'updated_at'])
+            audit_log(
+                request=request,
+                actor=user,
+                action=AuditLog.Action.UPDATE,
+                target_type='Student',
+                target_id=str(student.id),
+                target_display=student.display_name,
+                reason=reason,
+                description=f'Staff unlocked student profile: {reason}',
+            )
+        serializer = StudentProfileSerializer(student)
+        return Response(
+            {'detail': 'Profile unlocked. Student may edit once more.', 'profile': serializer.data},
             status=status.HTTP_200_OK,
         )
 
@@ -575,6 +784,14 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(
                 {'detail': 'A justification reason of at least 5 characters is required.'},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from apps.audit.services import sensitive_reveal_allowed
+        from apps.common.http import no_store
+        if not sensitive_reveal_allowed(request.user):
+            return Response(
+                {'detail': 'Too many reveals in the last hour. Try again later.'},
+                status=429,
             )
 
         # Audit log the reveal event
@@ -601,12 +818,12 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
             if bank_account and getattr(bank_account, 'account_number_encrypted', '') else None
         )
 
-        return Response({
+        return no_store(Response({
             'aadhaar_number': aadhaar_number,
             'bank_account_number': bank_account_number,
             'revealed_at': timezone.now(),
             'message': 'Sensitive data unmasked. Access has been logged to the security audit trail.',
-        }, status=status.HTTP_200_OK)
+        }, status=status.HTTP_200_OK))
 
     @action(detail=True, methods=['post'], url_path='assign-division')
     def assign_division(self, request, pk=None):
@@ -1010,6 +1227,8 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
         student = self._get_owned_student(request)
         if student is None:
             return Response({'detail': 'Student profile not associated with this account.'}, status=status.HTTP_404_NOT_FOUND)
+        if student.profile_locked:
+            raise PermissionDenied('Profile is locked permanently. Contact Admin Head for corrections.')
         doc_type = str(request.data.get('document_type') or '').strip().upper()
         uploaded_file = request.FILES.get('file')
         title = str(request.data.get('title') or '').strip()
@@ -1035,7 +1254,8 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
         if not default_storage.exists(doc.file_path):
             raise Http404('File missing on server.')
         fh = default_storage.open(doc.file_path, 'rb')
-        return FileResponse(fh, content_type=doc.mime_type or 'application/octet-stream', as_attachment=True, filename=f"{doc.document_type}{('.' + doc.file_path.rsplit('.', 1)[-1]) if '.' in (doc.file_path or '') else ''}")
+        from apps.common.http import no_store as _no_store
+        return _no_store(FileResponse(fh, content_type=doc.mime_type or 'application/octet-stream', as_attachment=True, filename=f"{doc.document_type}{('.' + doc.file_path.rsplit('.', 1)[-1]) if '.' in (doc.file_path or '') else ''}"))
 
     @action(detail=False, methods=['delete'], url_path=r'me/documents/(?P<doc_id>[0-9a-fA-F-]{36})')
     def delete_own_document(self, request, doc_id=None):
@@ -1046,6 +1266,8 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
         student = self._get_owned_student(request)
         if student is None:
             return Response({'detail': 'Student profile not associated with this account.'}, status=status.HTTP_404_NOT_FOUND)
+        if student.profile_locked:
+            raise PermissionDenied('Profile is locked permanently. Contact Admin Head for corrections.')
         doc = student.documents.filter(id=doc_id).first()
         if doc is None:
             return Response({'detail': 'Document not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -1083,6 +1305,10 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
             raise PermissionDenied('You do not have permission to upload for this student.')
         if user_has_role(request.user, 'STUDENT') and student.user_id != request.user.id:
             raise PermissionDenied('Students may only upload their own documents.')
+        if student.profile_locked and student.user_id == request.user.id and not (
+            request.user.is_superuser or user_has_role(request.user, 'SYSADMIN') or user_has_role(request.user, 'ADMIN_HEAD')
+        ):
+            raise PermissionDenied('Profile is locked permanently. Contact Admin Head for corrections.')
         doc_type = str(request.data.get('document_type') or '').strip().upper()
         uploaded_file = request.FILES.get('file')
         title = str(request.data.get('title') or '').strip()
@@ -1113,7 +1339,8 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
             reason='Document download', description=f"Downloaded {doc.document_type} for {student.display_name}.",
         )
         fh = default_storage.open(doc.file_path, 'rb')
-        return FileResponse(fh, content_type=doc.mime_type or 'application/octet-stream', as_attachment=True, filename=f"{doc.document_type}{('.' + doc.file_path.rsplit('.', 1)[-1]) if '.' in (doc.file_path or '') else ''}")
+        from apps.common.http import no_store as _no_store_staff
+        return _no_store_staff(FileResponse(fh, content_type=doc.mime_type or 'application/octet-stream', as_attachment=True, filename=f"{doc.document_type}{('.' + doc.file_path.rsplit('.', 1)[-1]) if '.' in (doc.file_path or '') else ''}"))
 
     @action(detail=True, methods=['delete'], url_path=r'documents/(?P<doc_id>[0-9a-fA-F-]{36})')
     def delete_student_document(self, request, pk=None, doc_id=None):

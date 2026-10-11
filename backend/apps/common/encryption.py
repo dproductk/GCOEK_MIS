@@ -7,8 +7,16 @@ via the FIELD_ENCRYPTION_KEY environment variable (see settings).
 decrypt_value() is migration-tolerant: values written before encryption was
 enabled (plaintext digits or "encrypted_..." seed placeholders) are returned
 as-is so existing rows keep working until re-saved encrypted.
+
+encrypt_value() fails closed in production: when no key is configured it
+logs a security warning and — unless DEBUG is on — raises instead of
+silently storing plaintext in a column callers believe is encrypted.
 """
+import logging
+
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 _fernet = None
 _fernet_error = None
@@ -45,11 +53,39 @@ def encrypt_value(plaintext):
         return ''
     fernet = _get_fernet()
     if fernet is None:
-        # No key configured (e.g. tests without env): fall back to plaintext
-        # so dev/test flows keep working. Production requires the key
-        # (settings raises when DEBUG=False and key is missing).
+        # No key configured: never silently store plaintext where callers
+        # expect ciphertext. Dev/test (DEBUG) keeps working with a loudly
+        # logged warning; production fails closed so the write is retried
+        # after the key is configured instead of leaking PII.
+        logger.warning(
+            'encrypt_value without FIELD_ENCRYPTION_KEY: refusing silent '
+            'plaintext storage (DEBUG=%s).',
+            bool(getattr(settings, 'DEBUG', False)),
+        )
+        if not getattr(settings, 'DEBUG', False):
+            from django.core.exceptions import ImproperlyConfigured
+            raise ImproperlyConfigured(
+                'FIELD_ENCRYPTION_KEY is required to store sensitive values.'
+            )
         return text
     return fernet.encrypt(text.encode()).decode()
+
+
+def require_encryption_for_write():
+    """Raise DRF ValidationError when sensitive writes cannot be encrypted.
+
+    Call at the top of any view path that persists Aadhaar/PAN/bank numbers
+    when encryption is unavailable outside DEBUG. Returns None when writes
+    are safe. Keeping this check in views (not encrypt_value) lets API
+    callers get a 400/503-style response instead of a 500.
+    """
+    if is_encryption_configured() or getattr(settings, 'DEBUG', False):
+        return None
+    from rest_framework.exceptions import ValidationError
+    raise ValidationError(
+        'Encrypted storage is currently unavailable. '
+        'Sensitive numbers cannot be saved right now; contact the administrator.'
+    )
 
 
 def decrypt_value(stored):

@@ -24,6 +24,13 @@ export const resultsApi = {
       remarks,
     }),
 
+  bulkFlagSemesters: (studentId, targetSemesterNumbers, remarks) =>
+    client.post('/results/eligibility/bulk-flag/', {
+      student_id: studentId,
+      target_semester_numbers: targetSemesterNumbers,
+      remarks,
+    }),
+
   initializeEligibility: (data = {}) =>
     client.post('/results/eligibility/initialize/', data),
 

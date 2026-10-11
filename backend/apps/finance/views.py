@@ -276,6 +276,12 @@ class PaymentLedgerViewSet(viewsets.ModelViewSet):
                             {'detail': 'Fee already recorded for this student and academic year. Duplicate payment blocked.'}
                         )
                     serializer.validated_data['receipt_no'] = generate_next_receipt_no(academic_year)
+                    # Freeze head-wise breakup at payment time (immutable receipt).
+                    try:
+                        _snap = assessment.fee_breakdown if isinstance(assessment.fee_breakdown, dict) else {}
+                    except Exception:
+                        _snap = {}
+                    serializer.validated_data['fee_snapshot'] = dict(_snap or {})
                     ledger = serializer.save(collected_by=self.request.user)
                 break
             except ValidationError:

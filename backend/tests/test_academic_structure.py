@@ -949,7 +949,7 @@ class TestFailFlow:
     def _setup(self, seed):
         import datetime
         from apps.finance.models import PaymentLedger
-        from apps.results.models import EligibilityVerification
+        from apps.results.models import EligibilityVerification, SemesterResult
         from apps.students.models import Student, StudentEnrollment
         sem6 = Semester.objects.create(number=6, name='Semester 6', year_level=3, term_type=Semester.TermType.EVEN)
         sem7 = Semester.objects.create(number=7, name='Semester 7', year_level=4, term_type=Semester.TermType.ODD)
@@ -962,6 +962,21 @@ class TestFailFlow:
             student=s, academic_year=seed['year'], department=seed['dept'],
             program=prog, semester=sem6, division=div,
             status='ACTIVE', is_current=True)
+        # New workflow prerequisite for teacher/HOD review.
+        s.profile_locked = True
+        s.save(update_fields=['profile_locked', 'updated_at'])
+        from apps.academic_structure.models import Semester as _Sem
+        from apps.results.models import SemesterResult as _SR
+        for _n in range(1, 7):
+            _sem, _ = _Sem.objects.get_or_create(
+                number=_n,
+                defaults={'name': f'Semester {_n}', 'year_level': min(4, (_n + 1) // 2),
+                          'term_type': _Sem.TermType.ODD if _n % 2 else _Sem.TermType.EVEN},
+            )
+            _SR.objects.get_or_create(
+                student=s, academic_year=seed['year'], semester=_sem,
+                defaults={'exam_session': 'Winter', 'result_status': _SR.ResultStatus.PASS,
+                          'is_published': True})
         ev = EligibilityVerification.objects.create(
             student=s, academic_year=seed['year'], target_semester=sem7,
             department=seed['dept'], active_backlog_count=0,
@@ -1138,6 +1153,21 @@ class TestTwelveStudentRepeaterScenario:
         SemesterResult.objects.create(
             student=s_fail1, academic_year=ay, semester=sem6, is_published=True,
             result_status=SemesterResult.ResultStatus.FAIL)
+        # New workflow prerequisite for the reopen + re-review below.
+        s_fail1.profile_locked = True
+        s_fail1.save(update_fields=['profile_locked', 'updated_at'])
+        # Strict gate needs Sem 1-5 history (Sem 6 FAIL above covers current).
+        from apps.academic_structure.models import Semester as _Sem2
+        for _n in range(1, 6):
+            _sem, _ = _Sem2.objects.get_or_create(
+                number=_n,
+                defaults={'name': f'Semester {_n}', 'year_level': min(4, (_n + 1) // 2),
+                          'term_type': _Sem2.TermType.ODD if _n % 2 else _Sem2.TermType.EVEN},
+            )
+            SemesterResult.objects.get_or_create(
+                student=s_fail1, academic_year=ay, semester=_sem,
+                defaults={'exam_session': 'Winter', 'is_published': True,
+                          'result_status': SemesterResult.ResultStatus.PASS})
 
         s_fail2 = students[11]
         StudentEnrollment.objects.create(

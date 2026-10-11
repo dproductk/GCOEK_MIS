@@ -18,6 +18,7 @@ from apps.faculty.models import (
     FacultyPersonalDetail,
     FacultyPublication,
     FacultyQualification,
+    FacultyResearchProfile,
     TeachingAssignment,
 )
 
@@ -159,11 +160,29 @@ class FacultyDocumentSerializer(serializers.ModelSerializer):
             'document_type',
             'document_type_display',
             'title',
+            'document_number_masked',
             'file_path',
             'file_size',
             'mime_type',
             'is_verified',
             'version',
+        ]
+
+
+class FacultyResearchProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FacultyResearchProfile
+        fields = [
+            'national_journal_papers',
+            'international_journal_papers',
+            'national_conference_papers',
+            'international_conference_papers',
+            'books_patents',
+            'professional_membership',
+            'consultancy_activities',
+            'awards',
+            'grants_fetched',
+            'interaction_institution',
         ]
 
 
@@ -416,6 +435,7 @@ class FacultyProfileSerializer(serializers.ModelSerializer):
     bank_accounts = FacultyBankAccountMaskedSerializer(many=True, read_only=True)
     documents = FacultyDocumentSerializer(many=True, read_only=True)
     teaching_assignments = TeachingAssignmentSerializer(many=True, read_only=True)
+    research_profile = FacultyResearchProfileSerializer(read_only=True)
 
     class Meta:
         model = Faculty
@@ -450,6 +470,7 @@ class FacultyProfileSerializer(serializers.ModelSerializer):
             'bank_accounts',
             'documents',
             'teaching_assignments',
+            'research_profile',
             'created_at',
             'updated_at',
         ]

@@ -24,6 +24,12 @@ export const studentApi = {
   updateMyProfile: (data) => client.patch('/students/me/update/', data),
 
   /**
+   * One-time permanent lock. After this the student cannot edit or
+   * self-upload again. Staff unlock is the only recourse.
+   */
+  lockMyProfile: () => client.post('/students/me/lock/', {}),
+
+  /**
    * Reveal unmasked sensitive details (requires permission + audit reason).
    */
   revealSensitive: (id, reason) =>

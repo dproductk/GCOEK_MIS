@@ -12,6 +12,7 @@ from apps.students.models import (
     StudentAadhaarDetail,
     StudentAddress,
     StudentBankAccount,
+    StudentBoardRecord,
     StudentDocument,
     StudentEnrollment,
     StudentGuardian,
@@ -84,6 +85,7 @@ class StudentAadhaarMaskedSerializer(serializers.ModelSerializer):
     class Meta:
         model = StudentAadhaarDetail
         fields = [
+            'name_as_per_aadhaar',
             'aadhaar_number_masked',
             'enrolment_id',
             'verified',
@@ -103,6 +105,26 @@ class StudentBankAccountMaskedSerializer(serializers.ModelSerializer):
             'ifsc_code',
             'account_number_masked',
             'is_primary',
+        ]
+
+
+class StudentBoardRecordSerializer(serializers.ModelSerializer):
+    level_display = serializers.CharField(source='get_level_display', read_only=True)
+
+    class Meta:
+        model = StudentBoardRecord
+        fields = [
+            'id',
+            'level',
+            'level_display',
+            'stream',
+            'board',
+            'school_college',
+            'passing_year',
+            'seat_no',
+            'marks_obtained',
+            'percentage',
+            'is_verified',
         ]
 
 
@@ -373,6 +395,7 @@ class StudentProfileSerializer(serializers.ModelSerializer):
     addresses = StudentAddressSerializer(many=True, read_only=True)
     aadhaar_details = StudentAadhaarMaskedSerializer(read_only=True)
     bank_accounts = StudentBankAccountMaskedSerializer(many=True, read_only=True)
+    board_records = StudentBoardRecordSerializer(many=True, read_only=True)
     documents = StudentDocumentSerializer(many=True, read_only=True)
     current_enrollment = serializers.SerializerMethodField()
     enrollment_history = serializers.SerializerMethodField()
@@ -394,12 +417,15 @@ class StudentProfileSerializer(serializers.ModelSerializer):
             'scholarship_applied',
             'scholarship_type',
             'scholarship_type_display',
+            'profile_locked',
+            'profile_locked_at',
             'admission_details',
             'personal_details',
             'guardians',
             'addresses',
             'aadhaar_details',
             'bank_accounts',
+            'board_records',
             'documents',
             'current_enrollment',
             'enrollment_history',

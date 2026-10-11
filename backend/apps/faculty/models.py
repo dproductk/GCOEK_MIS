@@ -346,6 +346,40 @@ class FacultyBankAccount(BaseModel):
         return f'{self.bank_name} - {self.account_number_masked} ({self.faculty})'
 
 
+class FacultyResearchProfile(TimestampedModel):
+    """
+    Self-service research / academic summary counts + free-text achievements.
+
+    Stores exactly what the Faculty Profile "Academic Detail" tab asks:
+    paper counts (journal/conference x national/international) and
+    books/patents, membership, consultancy, awards, grants, interaction.
+    One row per faculty; counts are non-negative, texts are free-form.
+    """
+
+    faculty = models.OneToOneField(
+        Faculty,
+        on_delete=models.CASCADE,
+        primary_key=True,
+        related_name='research_profile',
+    )
+    national_journal_papers = models.PositiveIntegerField(default=0)
+    international_journal_papers = models.PositiveIntegerField(default=0)
+    national_conference_papers = models.PositiveIntegerField(default=0)
+    international_conference_papers = models.PositiveIntegerField(default=0)
+    books_patents = models.TextField(blank=True, default='')
+    professional_membership = models.TextField(blank=True, default='')
+    consultancy_activities = models.TextField(blank=True, default='')
+    awards = models.TextField(blank=True, default='')
+    grants_fetched = models.TextField(blank=True, default='')
+    interaction_institution = models.TextField(blank=True, default='')
+
+    class Meta:
+        db_table = 'faculty_research_profiles'
+
+    def __str__(self):
+        return f'Research Profile: {self.faculty}'
+
+
 class FacultyDocument(BaseModel):
     """
     Faculty document metadata (photo, resume, appointment letter, degrees).
@@ -368,6 +402,12 @@ class FacultyDocument(BaseModel):
     )
     document_type = models.CharField(max_length=30, choices=DocType.choices)
     title = models.CharField(max_length=255)
+    # ID numbers typed alongside uploads (Aadhaar 12-digit, PAN format).
+    # Stored on the AADHAAR / PAN rows; blank for photo/signature rows.
+    # Plaintext column kept for legacy rows; new writes go encrypted.
+    document_number = models.CharField(max_length=30, blank=True, default='')
+    document_number_encrypted = models.CharField(max_length=255, blank=True, default='')
+    document_number_masked = models.CharField(max_length=20, blank=True, default='')
     file_path = models.CharField(max_length=500)
     file_size = models.PositiveIntegerField(default=0)
     mime_type = models.CharField(max_length=100, default='application/pdf')

@@ -109,6 +109,12 @@ class SubjectResult(BaseModel):
     class Meta:
         db_table = 'results_subject_results'
         ordering = ['semester_result', 'course_code']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['semester_result', 'course_code'],
+                name='uniq_subjectresult_result_code',
+            ),
+        ]
 
     def __str__(self):
         return f'{self.course_code} - {self.course_name} ({self.grade_letter})'

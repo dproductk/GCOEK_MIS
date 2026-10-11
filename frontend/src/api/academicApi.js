@@ -16,6 +16,7 @@ export const academicApi = {
   getAcademicYears: (params = {}) => client.get('/academic/years/', { params }),
   createAcademicYear: (data) => client.post('/academic/years/', data),
   getCurrentContext: () => client.get('/academic/contexts/current/'),
+  rolloverTerm: (data) => client.post('/academic/contexts/rollover/', data),
 };
 
 export default academicApi;

@@ -488,45 +488,81 @@ def generate_admission_verification_pdf(data):
         p_val = custom_right if custom_right else Paragraph("", style_field_val)
         return [p_label, p_val]
 
-    # Clean prefilled values (PRN, full name, branch, caste, gender)
-    val_name = data.get('full_name', '') if data.get('full_name') != '—' else ''
-    val_prn = data.get('prn_number', '') if data.get('prn_number') != '—' else ''
-    val_branch = data.get('branch', '') if data.get('branch') != '—' else ''
-    val_caste = data.get('caste', '') if data.get('caste') != '—' else ''
-    val_gender = data.get('gender', '') if data.get('gender') != '—' else ''
+    # Clean prefilled values — all 18 fields come from get_student_admission_form_data().
+    # Missing data ('—' or '') falls back to a handwriting blank line.
+    import html as _html
 
-    # Item 6 & 7: prefilled gender and blank handwriting line for religion
+    def _clean(key):
+        v = data.get(key, '')
+        if v is None:
+            return ''
+        v = str(v).strip()
+        if v in ('', '—', '–', 'N/A', 'n/a'):
+            return ''
+        return _html.escape(v)
+
+    def _val(key, blank='_________________'):
+        v = _clean(key)
+        return v if v else blank
+
+    val_name = _clean('full_name')
+    val_prn = _clean('prn_number')
+    val_branch = _clean('branch')
+    val_caste = _clean('caste')
+    val_category = _clean('category')
+    val_gender = _clean('gender')
+    val_religion = _clean('religion')
+    val_pwd = _clean('physically_disabled')
+    val_mob_stu = _clean('mobile_student')
+    val_mob_par = _clean('mobile_parent')
+    val_abc = _clean('abc_id')
+    val_local = _clean('local_address')
+    val_perm = _clean('permanent_address')
+    val_inc_no = _clean('income_cert_no')
+    val_inc = _clean('parent_annual_income')
+    val_ncl = _clean('non_creamy_layer')
+    val_fy = _clean('fy_receipt_info')
+    val_fy_c = _clean('credits_first_year')
+    val_sy_c = _clean('credits_second_year')
+    val_tot_c = _clean('total_credits')
+
+    def _p(key):
+        return Paragraph(_val(key), style_field_val)
+
+    # Item 6 & 7 share one line: Gender value + Religion value
     gender_religion_right = Paragraph(
-        f"<b>{val_gender}</b> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <b>7. Religion :</b> _________________",
-        style_field_label
+        f"<b>{val_gender or '_________________'}</b>"
+        f" &nbsp;&nbsp;&nbsp;&nbsp; <b>7. Religion :</b> {val_religion or '_________________'}",
+        style_field_val,
     )
 
-    # Item 18 with 1st, 2nd, 3rd year and Total credits blanks
+    # Item 18: FY / SY / Total credits (SY shows blank line if not applicable e.g. 2nd-year admission)
     credits_row_right = Paragraph(
-        "__________ &nbsp;&nbsp;&nbsp;&nbsp; <b>Second Year:</b> __________ &nbsp;&nbsp;&nbsp;&nbsp; <b>Third Year:</b> __________ &nbsp;&nbsp;&nbsp;&nbsp; <b>Total:</b> __________",
-        style_field_label
+        f"<b>{val_fy_c or '__________'}</b>"
+        f" &nbsp;&nbsp; <b>Second Year:</b> {val_sy_c or '__________'}"
+        f" &nbsp;&nbsp; <b>Third Year:</b> __________"
+        f" &nbsp;&nbsp; <b>Total:</b> <b>{val_tot_c or '__________'}</b>",
+        style_field_val,
     )
 
-    # 18 Items Data Table with prefilled basic identity and generous space for remaining manual handwriting
+    # 18 Items Data Table — fully prefilled, blank line only when source data missing
     items_table_data = [
-        field_row("1. Full Name of Student:", Paragraph(val_name, style_field_val)),
-        field_row("2. PRN Number :", Paragraph(val_prn, style_field_val)),
-        field_row("3. Branch :", Paragraph(val_branch, style_field_val)),
-        field_row("4. Caste:", Paragraph(val_caste, style_field_val)),
-        field_row("5. Category (Open/SC/ST/OBC/VJ/NT-1/NT-2/NT-3/SEBC/EWS/TFWS):"),
+        field_row("1. Full Name of Student:", Paragraph(val_name or '_________________', style_field_val)),
+        field_row("2. PRN Number :", Paragraph(val_prn or '_________________', style_field_val)),
+        field_row("3. Branch :", Paragraph(val_branch or '_________________', style_field_val)),
+        field_row("4. Caste:", Paragraph(val_caste or '_________________', style_field_val)),
+        field_row("5. Category (Open/SC/ST/OBC/VJ/NT-1/NT-2/NT-3/SEBC/EWS/TFWS):", _p('category')),
         field_row("6. Gender (Male/ Female/Other):", gender_religion_right),
-        field_row("8. Whether Student is Physically Disabled (Yes/No):"),
-        field_row("9. Mobile Number of Student:"),
-        field_row("10. Mobile Number of Parent:"),
-        field_row("11. ABC ID of Student:"),
-        field_row("12. Local Address:"),
-        field_row(""),  # Second line for address handwriting
-        field_row("13. Permanent Address:"),
-        field_row(""),  # Second line for permanent address handwriting
-        field_row("14. Income Certificate Number:"),
-        field_row("15. Parent's Annual Income:"),
-        field_row("16. Whether Student has Non-Creamy Layer Certificate (Yes/No):"),
-        field_row("17. First Year admission Fees Receipt Number And Date:"),
+        field_row("8. Whether Student is Physically Disabled (Yes/No):", _p('physically_disabled')),
+        field_row("9. Mobile Number of Student:", _p('mobile_student')),
+        field_row("10. Mobile Number of Parent:", _p('mobile_parent')),
+        field_row("11. ABC ID of Student:", _p('abc_id')),
+        field_row("12. Local Address:", _p('local_address')),
+        field_row("13. Permanent Address:", _p('permanent_address')),
+        field_row("14. Income Certificate Number:", _p('income_cert_no')),
+        field_row("15. Parent's Annual Income:", _p('parent_annual_income')),
+        field_row("16. Whether Student has Non-Creamy Layer Certificate (Yes/No):", _p('non_creamy_layer')),
+        field_row("17. First Year admission Fees Receipt Number And Date:", _p('fy_receipt_info')),
         field_row(
             "18. Total Credits Earned in First Year:",
             credits_row_right
@@ -607,9 +643,20 @@ def generate_admission_verification_pdf(data):
     story.append(seals_table)
     story.append(Spacer(1, 6))
 
-    # For Office Use Only Section (Matching blank physical form)
+    # For Office Use Only Section — prefilled from fee assessment + latest ledger payment
     is_eligible = bool(data.get('final_eligible'))
     eligibility_val_html = "<font color='#166534'><b>Yes</b></font>" if is_eligible else "<font color='#dc2626'><b>No</b></font>"
+    _office = data.get('office_use', {}) or {}
+
+    def _oclean(v):
+        v = '' if v is None else str(v).strip()
+        if v in ('', '—', '–', '₹ —'):
+            return '___________________________'
+        return _html.escape(v)
+
+    _fee_amt = _oclean(_office.get('admission_fee_amount', ''))
+    _rcpt = _oclean(_office.get('receipt_number', ''))
+    _utr = _oclean(_office.get('utr_no', ''))
 
     office_data = [
         [
@@ -618,15 +665,15 @@ def generate_admission_verification_pdf(data):
         ],
         [
             Paragraph(f"1. <b>Eligible for Admission:</b> {eligibility_val_html}", style_field_label),
-            Paragraph("2. <b>Admission Fee Amount:</b> ___________________________", style_field_label),
+            Paragraph(f"2. <b>Admission Fee Amount:</b> {_fee_amt}", style_field_val),
         ],
         [
             Paragraph("(Signature of Student Section Clerk) ___________________________", style_field_label),
             "",
         ],
         [
-            Paragraph("3. <b>Admission Fee Receipt Number:</b> ___________________________", style_field_label),
-            Paragraph("4. <b>UTR No:</b> ___________________________", style_field_label),
+            Paragraph(f"3. <b>Admission Fee Receipt Number:</b> {_rcpt}", style_field_val),
+            Paragraph(f"4. <b>UTR No:</b> {_utr}", style_field_val),
         ],
         [
             "",

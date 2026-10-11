@@ -56,6 +56,13 @@ export default function AcademicStructurePage() {
   const [settingCurrentId, setSettingCurrentId] = useState(null);
   const [yearSuccess, setYearSuccess] = useState('');
 
+  // Term rollover (Sysadmin, ODD <-> EVEN)
+  const [showRolloverModal, setShowRolloverModal] = useState(false);
+  const [rolloverTarget, setRolloverTarget] = useState('EVEN');
+  const [isRolling, setIsRolling] = useState(false);
+  const [rolloverError, setRolloverError] = useState('');
+  const [termSuccess, setTermSuccess] = useState('');
+
   const fetchData = useCallback(async () => {
     try {
       setLoading(true);
@@ -115,6 +122,46 @@ export default function AcademicStructurePage() {
       alert(err.response?.data?.detail || 'Failed to update current academic year.');
     } finally {
       setSettingCurrentId(null);
+    }
+  };
+
+  const currentTerm = currentContext?.term ? String(currentContext.term).toUpperCase() : null;
+  const currentYearCode = currentContext?.academic_year_code
+    || academicYears.find((y) => y.is_current)?.code
+    || '';
+  const defaultRolloverTarget = currentTerm === 'ODD' ? 'EVEN' : 'ODD';
+
+  const openRolloverModal = (target) => {
+    const next = target || defaultRolloverTarget;
+    setRolloverTarget(next === 'EVEN' ? 'EVEN' : 'ODD');
+    setRolloverError('');
+    setShowRolloverModal(true);
+  };
+
+  const handleRollover = async () => {
+    setRolloverError('');
+    const currentYear = academicYears.find((y) => y.is_current)
+      || academicYears.find((y) => y.id === currentContext?.academic_year);
+    if (!currentYear) {
+      setRolloverError('No current academic year. Set a current year first, then switch the term.');
+      return;
+    }
+    setIsRolling(true);
+    try {
+      const res = await apiClient.post('/academic/contexts/rollover/', {
+        term: rolloverTarget,
+        academic_year_id: currentYear.id,
+      });
+      setShowRolloverModal(false);
+      const detail = res.data?.detail || `Term is now ${currentYear.code} ${rolloverTarget}.`;
+      setTermSuccess(detail);
+      setYearSuccess('');
+      setTimeout(() => setTermSuccess(''), 8000);
+      await fetchData();
+    } catch (err) {
+      setRolloverError(err.response?.data?.detail || 'Failed to switch term. Please try again.');
+    } finally {
+      setIsRolling(false);
     }
   };
 
@@ -530,6 +577,48 @@ export default function AcademicStructurePage() {
                 <CheckCircle2 size={18} />{yearSuccess}
               </div>
             )}
+            {termSuccess && (
+              <div style={{ marginBottom: '1rem', padding: '0.9rem 1.1rem', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', color: '#1e40af', fontSize: '0.875rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <CheckCircle2 size={18} />{termSuccess}
+              </div>
+            )}
+            {/* Current Term — ODD / EVEN (Sysadmin rollover) */}
+            <div className="edvana-card" style={{ marginBottom: '1.25rem', border: currentTerm ? '2px solid var(--edvana-primary, #1d4ed8)' : '1px solid #e2e8f0' }}>
+              <div className="edvana-card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+                <div>
+                  <h2 className="edvana-card-title">Current Term</h2>
+                  <p className="edvana-card-description">
+                    College-wide active term. ODD = Sem 1, 3, 5, 7 running. EVEN = Sem 2, 4, 6, 8 running.
+                  </p>
+                  {currentTerm ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginTop: '0.6rem', flexWrap: 'wrap' }}>
+                      <Badge variant={currentTerm === 'ODD' ? 'primary' : 'success'}>{currentTerm}</Badge>
+                      {currentYearCode && (
+                        <span style={{ fontSize: '0.9rem', fontWeight: 700, color: '#0f172a' }}>
+                          {currentYearCode} {currentContext?.term_display ? `— ${currentContext.term_display}` : ''}
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <p style={{ marginTop: '0.6rem', fontSize: '0.875rem', color: '#b91c1c', fontWeight: 600 }}>
+                      No active term configured. Set a current year first, then start ODD or EVEN.
+                    </p>
+                  )}
+                </div>
+                {isSysadmin && (
+                  <button
+                    onClick={() => openRolloverModal()}
+                    disabled={isRolling || academicYears.length === 0}
+                    className="edvana-btn edvana-btn-primary"
+                    title={academicYears.length === 0 ? 'Create and set a current academic year first' : `Switch term to ${defaultRolloverTarget}`}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.8125rem', padding: '0.5rem 1rem', opacity: (isRolling || academicYears.length === 0) ? 0.6 : 1 }}
+                  >
+                    <Calendar size={15} />
+                    <span>{isRolling ? 'Switching…' : currentTerm ? `Switch to ${defaultRolloverTarget}` : 'Set Initial Term'}</span>
+                  </button>
+                )}
+              </div>
+            </div>
             <div className="edvana-card" style={{ marginBottom: '1.25rem' }}>
               <div className="edvana-card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
                 <div>
@@ -808,6 +897,65 @@ export default function AcademicStructurePage() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* Switch Term Modal (Sysadmin, ODD <-> EVEN) */}
+      <Modal
+        isOpen={showRolloverModal}
+        onClose={() => { if (!isRolling) setShowRolloverModal(false); }}
+        title="Switch Academic Term"
+        maxWidth="520px"
+      >
+        {rolloverError && (
+          <div style={{ marginBottom: '1rem', padding: '0.75rem 1rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '6px', color: '#991b1b', fontSize: '0.85rem' }}>
+            {rolloverError}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '1rem', fontSize: '0.9rem' }}>
+          <span style={{ color: '#64748b' }}>Current:</span>
+          {currentTerm ? <Badge variant={currentTerm === 'ODD' ? 'primary' : 'success'}>{currentTerm}</Badge> : <Badge variant="neutral">None</Badge>}
+          <span style={{ color: '#64748b' }}>{currentYearCode}</span>
+          <span style={{ color: '#94a3b8' }}>→</span>
+          <Badge variant={rolloverTarget === 'ODD' ? 'primary' : 'success'}>{rolloverTarget}</Badge>
+        </div>
+
+        <FormField label="Target term" required>
+          <select
+            className="edvana-input"
+            value={rolloverTarget}
+            onChange={(e) => setRolloverTarget(e.target.value === 'EVEN' ? 'EVEN' : 'ODD')}
+            disabled={isRolling}
+            style={{ width: '100%' }}
+          >
+            <option value="ODD">ODD — Sem 1, 3, 5, 7</option>
+            <option value="EVEN">EVEN — Sem 2, 4, 6, 8</option>
+          </select>
+        </FormField>
+
+        <p style={{ marginTop: '1rem', fontSize: '0.78rem', color: '#92400e', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '6px', padding: '0.6rem 0.8rem', lineHeight: 1.5 }}>
+          ODD → EVEN in the same year auto-advances Sem 1, 3, 5, 7 students to 2, 4, 6, 8.
+          Repeaters are held for HOD review. A new term record is created — this cannot be undone from here.
+        </p>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', borderTop: '1px solid #e2e8f0', paddingTop: '1.25rem', marginTop: '1.25rem' }}>
+          <button
+            type="button"
+            onClick={() => setShowRolloverModal(false)}
+            disabled={isRolling}
+            className="edvana-btn edvana-btn-secondary"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleRollover}
+            disabled={isRolling}
+            className="edvana-btn edvana-btn-primary"
+          >
+            {isRolling ? 'Switching…' : `Confirm Switch to ${rolloverTarget}`}
+          </button>
+        </div>
       </Modal>
     </>
   );

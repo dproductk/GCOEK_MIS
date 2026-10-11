@@ -59,6 +59,31 @@ def _redact(obj):
     return str(obj)
 
 
+def sensitive_reveal_allowed(actor, limit=30, window_hours=1):
+    """True when the actor may perform another sensitive-value reveal.
+
+    Counts SENSITIVE_REVEAL audit rows by this actor inside the trailing
+    window. Bounds self-service scraping of Aadhaar/PAN/bank numbers while
+    staying generous for legitimate use (default 30/hour). Returns False
+    instead of raising so views can answer 429 with a clear message.
+    """
+    try:
+        if actor is None or not getattr(actor, 'pk', None):
+            return False
+        from datetime import timedelta
+        from django.utils import timezone as _tz
+        since = _tz.now() - timedelta(hours=window_hours)
+        count = AuditLog.objects.filter(
+            actor_id=actor.pk,
+            action=AuditLog.Action.SENSITIVE_REVEAL,
+            timestamp__gte=since,
+        ).count()
+        return count < limit
+    except Exception:
+        logger.exception('sensitive_reveal_allowed check failed; failing closed.')
+        return False
+
+
 def get_client_ip(request):
     """Extract client IP from request, handling proxy headers.
 

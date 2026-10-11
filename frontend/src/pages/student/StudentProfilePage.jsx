@@ -4,6 +4,7 @@ import { useAuth } from '../../context/AuthContext';
 import studentApi from '../../api/studentApi';
 import { LoadingState, ErrorState } from '../../components/common/StateDisplays';
 import PageHeader from '../../components/common/PageHeader';
+import Modal from '../../components/common/Modal';
 import PasswordChangeForm from '../../components/auth/PasswordChangeForm';
 import {
   GraduationCap,
@@ -60,7 +61,7 @@ export default function StudentProfilePage() {
   const [photoPreview, setPhotoPreview] = useState(null);
   const [signaturePreview, setSignaturePreview] = useState(null);
 
-  // Form State initialized to clean defaults & populated from backend
+  // Form State initialized empty (no fake defaults) & populated from backend
   const [formData, setFormData] = useState({
     fullName: '',
     prn: '',
@@ -70,19 +71,19 @@ export default function StudentProfilePage() {
     parentMobile: '',
     motherName: '',
     placeOfBirth: '',
-    dobDay: '1',
-    dobMonth: 'January',
-    dobYear: '2005',
-    gender: 'Male',
+    dobDay: '',
+    dobMonth: '',
+    dobYear: '',
+    gender: '',
     caste: '',
     maritalStatus: '',
     abcId: '',
     admittedYear: '',
-    admissionType: 'CAP',
+    admissionType: '',
     category: '',
     allottedSeatType: '',
     scholarshipApplied: 'No',
-    scholarshipType: 'None',
+    scholarshipType: 'NONE',
     annualIncome: '',
     address: '',
     district: '',
@@ -106,7 +107,7 @@ export default function StudentProfilePage() {
     sscMarksObtained: '',
     sscPercentage: '',
     // HSC / Diploma Marksheet
-    hscStream: 'Class XII (Science)',
+    hscStream: '',
     hscBoard: '',
     hscCollege: '',
     hscPassingYear: '',
@@ -119,20 +120,32 @@ export default function StudentProfilePage() {
 
   // Backend StudentViewSet has no generic update endpoint.
   // Students may edit their OWN profile (no `id` param) via PATCH /students/me/update/.
-  // Identity, admission, Aadhaar number and verified marksheets stay locked for everyone.
+  // Locked for everyone: enrollment, admission, gender, caste, verified flags.
+  // Editable by owner: full name, contact, Aadhaar number + name, address,
+  // guardians, bank, SSC/HSC board records.
   // Teachers/staff opening /students/:id from the directory are strictly read-only.
-  // Edit-lock: everything starts locked; owner clicks Edit to unlock, Save finalizes + re-locks.
+  // Edit-lock: everything starts locked; owner clicks Edit to unlock, Lock finalizes permanently.
+  // One-time rule: once student.profile_locked is True, Edit never appears again
+  // (backend also rejects update/upload with 403 — no re-edit possible).
   const isOwnProfile = !id;
-  const canEdit = isOwnProfile && hasRole('STUDENT');
-  const [saving, setSaving] = useState(false);
+  const profileLocked = Boolean(student?.profile_locked);
+  const canEdit = isOwnProfile && hasRole('STUDENT') && !profileLocked;
   const [isEditing, setIsEditing] = useState(false);
   const [snapshot, setSnapshot] = useState(null);
   const fieldsLocked = !canEdit || !isEditing;
+  // One-time lock modal (renamed Save -> Lock).
+  const [showLockModal, setShowLockModal] = useState(false);
+  const [lockEmptyFields, setLockEmptyFields] = useState([]);
+  const [isLocking, setIsLocking] = useState(false);
+  const [lockError, setLockError] = useState('');
 
   // Switching between own profile and directory records always re-locks.
   useEffect(() => {
     setIsEditing(false);
     setSnapshot(null);
+    setShowLockModal(false);
+    setLockEmptyFields([]);
+    setLockError('');
   }, [id]);
 
   useEffect(() => {
@@ -164,9 +177,9 @@ export default function StudentProfilePage() {
         const bk = data.bank_accounts?.[0] || {};
         const adh = data.aadhaar_details || {};
 
-        let day = '1';
-        let month = 'January';
-        let year = '2005';
+        let day = '';
+        let month = '';
+        let year = '';
         if (p.date_of_birth) {
           const dObj = new Date(p.date_of_birth);
           if (!isNaN(dObj.getTime())) {
@@ -178,13 +191,15 @@ export default function StudentProfilePage() {
 
         const candidateName =
           data.display_name ||
-          `${data.first_name || ''} ${data.last_name || ''}`.trim() ||
-          user?.first_name ||
+          `${data.first_name || ''} ${data.middle_name || ''} ${data.last_name || ''}`.replace(/\s+/g, ' ').trim() ||
           '';
 
         const isDSY = Boolean(data.is_direct_second_year || data.admission_details?.admission_type === 'DIRECT_SECOND_YEAR');
         const adm = data.admission_details || {};
         const enr = data.current_enrollment || {};
+        const boards = data.board_records || [];
+        const sscRec = boards.find((b) => String(b.level || '').toUpperCase() === 'SSC') || {};
+        const hscRec = boards.find((b) => ['HSC', 'DIPLOMA'].includes(String(b.level || '').toUpperCase())) || {};
 
         setFormData((prev) => ({
           ...prev,
@@ -199,12 +214,12 @@ export default function StudentProfilePage() {
           dobDay: day,
           dobMonth: month,
           dobYear: year,
-          gender: p.gender === 'FEMALE' ? 'Female' : p.gender === 'OTHER' ? 'Other' : 'Male',
+          gender: p.gender === 'FEMALE' ? 'Female' : p.gender === 'OTHER' ? 'Other' : p.gender === 'MALE' ? 'Male' : '',
           caste: p.caste || '',
           maritalStatus: p.marital_status || '',
           abcId: p.abc_id || '',
           admittedYear: adm.admission_year || enr.academic_year_code || '',
-          admissionType: adm.admission_type || (isDSY ? 'Direct Second Year' : 'CAP'),
+          admissionType: adm.admission_type || (isDSY ? 'DIRECT_SECOND_YEAR' : ''),
           category: adm.category || '',
           allottedSeatType: adm.allotted_seat_type || adm.seat_type || '',
           scholarshipApplied: data.scholarship_applied ? 'Yes' : 'No',
@@ -217,24 +232,26 @@ export default function StudentProfilePage() {
           state: perm.state || '',
           pincode: perm.pincode || '',
           aadhaarNo: adh.aadhaar_number_masked || '',
-          aadhaarName: candidateName,
+          aadhaarName: adh.name_as_per_aadhaar || '',
           aadhaarMobile: p.student_mobile || '',
-          bankHolderName: bk.account_holder_name || candidateName,
+          bankHolderName: bk.account_holder_name || '',
           bankName: bk.bank_name || '',
           branchName: bk.branch_name || '',
           accountNo: bk.account_number_masked || '',
           ifscCode: bk.ifsc_code || '',
-          ...(isDSY
-            ? {
-                hscStream: 'Polytechnic Diploma',
-                hscBoard: adm.diploma_board || '',
-                hscCollege: adm.diploma_college || '',
-                hscPassingYear: '',
-                hscSeatNo: adm.diploma_seat_no || '',
-                hscPercentage: adm.diploma_percentage ? `${adm.diploma_percentage}%` : '',
-                hscMarksObtained: adm.merit_marks ? `${adm.merit_marks} / 100` : '',
-              }
-            : {}),
+          sscBoard: sscRec.board || '',
+          sscSchool: sscRec.school_college || '',
+          sscPassingYear: sscRec.passing_year || '',
+          sscSeatNo: sscRec.seat_no || '',
+          sscMarksObtained: sscRec.marks_obtained || '',
+          sscPercentage: sscRec.percentage || '',
+          hscStream: hscRec.stream || (isDSY && !hscRec.board ? 'Polytechnic Diploma' : ''),
+          hscBoard: hscRec.board || adm.diploma_board || '',
+          hscCollege: hscRec.school_college || adm.diploma_college || '',
+          hscPassingYear: hscRec.passing_year || '',
+          hscSeatNo: hscRec.seat_no || adm.diploma_seat_no || '',
+          hscPercentage: hscRec.percentage || (adm.diploma_percentage ? `${adm.diploma_percentage}%` : ''),
+          hscMarksObtained: hscRec.marks_obtained || (adm.merit_marks ? `${adm.merit_marks} / 100` : ''),
         }));
       } catch (err) {
         if (ignore) return;
@@ -312,7 +329,7 @@ export default function StudentProfilePage() {
       return;
     }
     if (!canEdit) {
-      showFeedback('Read-only view. Only the student can upload to their own profile.');
+      showFeedback(profileLocked ? 'Profile is locked permanently. Contact Admin Head for corrections.' : 'Read-only view. Only the student can upload to their own profile.');
       e.target.value = '';
       return;
     }
@@ -362,95 +379,231 @@ export default function StudentProfilePage() {
     'July', 'August', 'September', 'October', 'November', 'December',
   ];
 
-  const handleSaveProfile = async () => {
-    if (!canEdit || saving) return;
+  // ---- One-time lock helpers ----
+  // Editable-field labels for the empty-fields warning (locked identity/
+  // admission fields are excluded — never the student's responsibility).
+  const getEmptyEditableFields = () => {
+    const empty = [];
+    const blank = (v) => !String(v || '').trim();
+    if (blank(formData.fullName)) empty.push('Full Name');
+    if (blank(formData.studentEmail)) empty.push('Student Email');
+    if (blank(formData.fatherName)) empty.push("Father's Name");
+    if (blank(formData.parentMobile)) empty.push('Parent Mobile No.');
+    if (blank(formData.motherName)) empty.push("Mother's Name");
+    if (blank(formData.placeOfBirth)) empty.push('Place of Birth');
+    if (!formData.dobDay || !formData.dobMonth || !formData.dobYear) empty.push('Date of Birth');
+    if (blank(formData.maritalStatus)) empty.push('Marital Status');
+    if (blank(formData.abcId)) empty.push('ABC ID');
+    if (blank(formData.annualIncome)) empty.push("Parent's Annual Income");
+    if (formData.scholarshipApplied === 'Yes' && !SCHOLARSHIP_CODE_VALUES.has(formData.scholarshipType)) empty.push('Scholarship Type');
+    if (blank(formData.address)) empty.push('Address');
+    if (blank(formData.district)) empty.push('District');
+    if (blank(formData.state)) empty.push('State');
+    if (blank(formData.pincode)) empty.push('Pincode');
+    if (blank(formData.aadhaarNo)) empty.push('Aadhaar Number');
+    if (blank(formData.aadhaarName)) empty.push('Name As per Aadhaar');
+    if (blank(formData.aadhaarMobile)) empty.push('Mobile No. Linked to Aadhaar');
+    if (blank(formData.bankHolderName)) empty.push('Bank Account Holder Name');
+    if (blank(formData.bankName)) empty.push('Bank Name');
+    if (blank(formData.branchName)) empty.push('Branch Name');
+    if (blank(formData.accountNo)) empty.push('Account No');
+    if (blank(formData.ifscCode)) empty.push('IFSC Code');
+    if (blank(formData.sscBoard)) empty.push('SSC Board Name');
+    if (blank(formData.sscSchool)) empty.push('SSC School Name');
+    if (blank(formData.sscPassingYear)) empty.push('SSC Passing Year');
+    if (blank(formData.sscSeatNo)) empty.push('SSC Seat / Roll Number');
+    if (blank(formData.sscMarksObtained)) empty.push('SSC Total Marks');
+    if (blank(formData.sscPercentage)) empty.push('SSC Percentage / CGPA');
+    if (blank(formData.hscStream)) empty.push('HSC / Diploma Stream');
+    if (blank(formData.hscBoard)) empty.push('HSC / Diploma Board');
+    if (blank(formData.hscCollege)) empty.push('HSC / Diploma College');
+    if (blank(formData.hscPassingYear)) empty.push('HSC / Diploma Passing Year');
+    if (blank(formData.hscSeatNo)) empty.push('HSC / Diploma Seat No.');
+    if (blank(formData.hscMarksObtained)) empty.push('HSC / Diploma Marks');
+    if (blank(formData.hscPercentage)) empty.push('HSC / Diploma Percentage');
+    return empty;
+  };
+
+  // Shared frontend validation + payload build. Returns { payload } or { error }.
+  // Never touches the network — safe to call before opening the warning modal.
+  const buildSavePayload = () => {
+    const parentMobile = String(formData.parentMobile || '').trim().replace(/[\s-]/g, '');
+    if (parentMobile && !/^\+?\d{10,15}$/.test(parentMobile)) {
+      return { error: 'Enter a valid 10-digit Parent Mobile No.' };
+    }
+    const scholarshipYes = formData.scholarshipApplied === 'Yes';
+    if (scholarshipYes && !SCHOLARSHIP_CODE_VALUES.has(formData.scholarshipType)) {
+      return { error: 'Select a Scholarship Type when Scholarship Applied is Yes.' };
+    }
+    const annualIncomeRaw = String(formData.annualIncome || '').replace(/[,₹\s]/g, '');
+    if (annualIncomeRaw && !/^\d+$/.test(annualIncomeRaw)) {
+      return { error: 'Enter Parent Annual Income as a number.' };
+    }
+    const studentEmailRaw = String(formData.studentEmail || '').trim();
+    if (studentEmailRaw && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(studentEmailRaw)) {
+      return { error: 'Enter a valid Student Email address.' };
+    }
+    const dobFilled = [formData.dobDay, formData.dobMonth, formData.dobYear].filter(Boolean).length;
+    let dobIso = null;
+    if (dobFilled > 0) {
+      if (dobFilled < 3) {
+        return { error: 'Select day, month and year for Date of Birth, or leave all blank.' };
+      }
+      const monthNum = String(MONTHS.indexOf(formData.dobMonth) + 1).padStart(2, '0');
+      const dayNum = String(formData.dobDay).padStart(2, '0');
+      dobIso = `${formData.dobYear}-${monthNum}-${dayNum}`;
+    }
+    const addressLine = String(formData.address || '').trim();
+    const districtRaw = String(formData.district || '').trim();
+    const stateRaw = String(formData.state || '').trim();
+    const pincodeRaw = String(formData.pincode || '').trim();
+    if (!addressLine && (districtRaw || stateRaw || pincodeRaw)) {
+      return { error: 'Main address is empty — please fill Address before locking. Nothing was saved.' };
+    }
+    if (pincodeRaw && !/^\d{6}$/.test(pincodeRaw)) {
+      return { error: 'Pincode must be 6 digits.' };
+    }
+    const fullNameRaw = String(formData.fullName || '').trim();
+    const aadhaarDigits = String(formData.aadhaarNo || '').replace(/\D/g, '');
+    const aadhaarSendNumber = formData.aadhaarNo && !String(formData.aadhaarNo).includes('X') && aadhaarDigits
+      ? String(formData.aadhaarNo).trim()
+      : '';
+    const aadhaarNameRaw = String(formData.aadhaarName || '').trim();
+    const sscBlock = [formData.sscBoard, formData.sscSchool, formData.sscPassingYear, formData.sscSeatNo, formData.sscMarksObtained, formData.sscPercentage].some((v) => String(v || '').trim())
+      ? {
+          board: String(formData.sscBoard || '').trim(),
+          school_college: String(formData.sscSchool || '').trim(),
+          passing_year: String(formData.sscPassingYear || '').trim(),
+          seat_no: String(formData.sscSeatNo || '').trim(),
+          marks_obtained: String(formData.sscMarksObtained || '').trim(),
+          percentage: String(formData.sscPercentage || '').trim(),
+        }
+      : null;
+    const hscLevel = student?.is_direct_second_year ? 'DIPLOMA' : 'HSC';
+    const hscBlock = [formData.hscStream, formData.hscBoard, formData.hscCollege, formData.hscPassingYear, formData.hscSeatNo, formData.hscMarksObtained, formData.hscPercentage].some((v) => String(v || '').trim())
+      ? {
+          level: hscLevel,
+          stream: String(formData.hscStream || '').trim(),
+          board: String(formData.hscBoard || '').trim(),
+          school_college: String(formData.hscCollege || '').trim(),
+          passing_year: String(formData.hscPassingYear || '').trim(),
+          seat_no: String(formData.hscSeatNo || '').trim(),
+          marks_obtained: String(formData.hscMarksObtained || '').trim(),
+          percentage: String(formData.hscPercentage || '').trim(),
+        }
+      : null;
+    const payload = {
+      ...(fullNameRaw ? { full_name: fullNameRaw } : {}),
+      personal: {
+        place_of_birth: formData.placeOfBirth,
+        ...(dobIso ? { date_of_birth: dobIso } : {}),
+        student_mobile: formData.aadhaarMobile,
+        student_email: studentEmailRaw,
+        ...(formData.maritalStatus ? { marital_status: formData.maritalStatus } : {}),
+        abc_id: formData.abcId,
+      },
+      scholarship_applied: scholarshipYes,
+      scholarship_type: scholarshipYes ? formData.scholarshipType : 'NONE',
+      guardians: [
+        ...(formData.fatherName || parentMobile || annualIncomeRaw ? [{
+          relationship: 'FATHER',
+          name: formData.fatherName || undefined,
+          mobile: parentMobile || undefined,
+          ...(annualIncomeRaw ? { annual_income: annualIncomeRaw } : {}),
+        }] : []),
+        ...(formData.motherName ? [{ relationship: 'MOTHER', name: formData.motherName }] : []),
+      ],
+      ...(addressLine ? {
+        address: {
+          address_line_1: addressLine,
+          district: districtRaw,
+          state: stateRaw,
+          pincode: pincodeRaw,
+        },
+      } : {}),
+      ...(formData.bankName || formData.accountNo ? {
+        bank: {
+          account_holder_name: formData.bankHolderName,
+          bank_name: formData.bankName,
+          branch_name: formData.branchName,
+          ifsc_code: formData.ifscCode,
+          ...(!String(formData.accountNo || '').includes('X') && formData.accountNo ? { account_number: formData.accountNo } : {}),
+        },
+      } : {}),
+      ...((aadhaarSendNumber || aadhaarNameRaw) ? {
+        aadhaar: {
+          ...(aadhaarSendNumber ? { aadhaar_number: aadhaarSendNumber } : {}),
+          ...(aadhaarNameRaw ? { name_as_per_aadhaar: aadhaarNameRaw } : {}),
+        },
+      } : {}),
+      ...(sscBlock ? { ssc: sscBlock } : {}),
+      ...(hscBlock ? { hsc: hscBlock } : {}),
+    };
+    return { payload };
+  };
+
+  // Step 1: student clicks "Lock Profile" — validate, list empty fields,
+  // then show the warning modal. Nothing is saved yet (no accidental lock).
+  const openLockModal = () => {
+    if (!canEdit || isLocking) return;
     if (!isEditing) {
       showFeedback('Click Edit Profile first to make changes.');
       return;
     }
-    setSaving(true);
+    const { error } = buildSavePayload();
+    if (error) {
+      showFeedback(error);
+      return;
+    }
+    setLockEmptyFields(getEmptyEditableFields());
+    setLockError('');
+    setShowLockModal(true);
+  };
+
+  // Kept for compatibility: the old Save entry now opens the lock warning.
+  const handleSaveProfile = () => openLockModal();
+
+  // Step 2: student confirms "Lock" inside the modal — save first, then
+  // lock permanently. Any failure keeps the modal open with the reason;
+  // nothing is locked on failure (no accidental / partial lock).
+  const handleConfirmLock = async () => {
+    if (!canEdit || isLocking) return;
+    setIsLocking(true);
+    setLockError('');
     try {
-      const parentMobile = String(formData.parentMobile || '').trim().replace(/[\s-]/g, '');
-      if (parentMobile && !/^\+?\d{10,15}$/.test(parentMobile)) {
-        showFeedback('Enter a valid 10-digit Parent Mobile No.');
-        setSaving(false);
+      const { payload, error } = buildSavePayload();
+      if (error) {
+        setLockError(error);
+        setIsLocking(false);
         return;
       }
-      const monthNum = String(MONTHS.indexOf(formData.dobMonth) + 1).padStart(2, '0');
-      const dayNum = String(formData.dobDay).padStart(2, '0');
-      const scholarshipYes = formData.scholarshipApplied === 'Yes';
-      if (scholarshipYes && !SCHOLARSHIP_CODE_VALUES.has(formData.scholarshipType)) {
-        showFeedback('Select a Scholarship Type when Scholarship Applied is Yes.');
-        setSaving(false);
+      try {
+        await studentApi.updateMyProfile(payload);
+      } catch (err) {
+        const data = err.response?.data;
+        setLockError(
+          data?.detail ||
+          (data && typeof data === 'object' ? Object.entries(data).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(' ') : v}`).join(' ') : null) ||
+          'Failed to save profile. Fix the values and try again.'
+        );
+        setIsLocking(false);
         return;
       }
-      const annualIncomeRaw = String(formData.annualIncome || '').replace(/[,₹\s]/g, '');
-      if (annualIncomeRaw && !/^\d+$/.test(annualIncomeRaw)) {
-        showFeedback('Enter Parent Annual Income as a number.');
-        setSaving(false);
-        return;
+      try {
+        const lockRes = await studentApi.lockMyProfile();
+        setShowLockModal(false);
+        setIsEditing(false);
+        setSnapshot(null);
+        const lockedProfile = lockRes.data?.profile;
+        if (lockedProfile) setStudent(lockedProfile);
+        else setRetryCount((c) => c + 1);
+        showFeedback('Profile locked permanently. No further edits are allowed.');
+      } catch (err) {
+        const data = err.response?.data;
+        setLockError(data?.detail || 'Saved, but lock failed. Your edits are saved — try Lock again. Nothing was locked accidentally.');
       }
-      const studentEmailRaw = String(formData.studentEmail || '').trim();
-      if (studentEmailRaw && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(studentEmailRaw)) {
-        showFeedback('Enter a valid Student Email address.');
-        setSaving(false);
-        return;
-      }
-      const payload = {
-        personal: {
-          place_of_birth: formData.placeOfBirth,
-          date_of_birth: `${formData.dobYear}-${monthNum}-${dayNum}`,
-          student_mobile: formData.aadhaarMobile,
-          student_email: studentEmailRaw,
-          // Never overwrite a stored value with an untouched blank select.
-          ...(formData.maritalStatus ? { marital_status: formData.maritalStatus } : {}),
-          abc_id: formData.abcId,
-        },
-        scholarship_applied: scholarshipYes,
-        scholarship_type: scholarshipYes ? formData.scholarshipType : 'NONE',
-        guardians: [
-          ...(formData.fatherName || parentMobile || annualIncomeRaw ? [{
-            relationship: 'FATHER',
-            name: formData.fatherName || undefined,
-            mobile: parentMobile || undefined,
-            ...(annualIncomeRaw ? { annual_income: annualIncomeRaw } : {}),
-          }] : []),
-          ...(formData.motherName ? [{ relationship: 'MOTHER', name: formData.motherName }] : []),
-        ],
-        ...(formData.address ? {
-          address: {
-            address_line_1: formData.address,
-            district: formData.district,
-            state: formData.state,
-            pincode: formData.pincode,
-          },
-        } : {}),
-        ...(formData.bankName || formData.accountNo ? {
-          bank: {
-            account_holder_name: formData.bankHolderName,
-            bank_name: formData.bankName,
-            branch_name: formData.branchName,
-            ifsc_code: formData.ifscCode,
-            // Never send the masked display value back as a new account number.
-            ...(!String(formData.accountNo || '').includes('X') && formData.accountNo ? { account_number: formData.accountNo } : {}),
-          },
-        } : {}),
-      };
-      const res = await studentApi.updateMyProfile(payload);
-      const changed = res.data?.changed?.length ? `: ${res.data.changed.join(', ')}` : '';
-      showFeedback(`Profile updated successfully${changed}. Profile locked.`);
-      setIsEditing(false);
-      setSnapshot(null);
-      setRetryCount((c) => c + 1);
-    } catch (err) {
-      const data = err.response?.data;
-      const msg =
-        data?.detail ||
-        (data && typeof data === 'object' ? Object.entries(data).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(' ') : v}`).join(' ') : null) ||
-        'Failed to save profile. Check highlighted values and try again.';
-      showFeedback(msg);
     } finally {
-      setSaving(false);
+      setIsLocking(false);
     }
   };
 
@@ -529,7 +682,7 @@ export default function StudentProfilePage() {
                 <button
                   className="edvana-btn edvana-btn-secondary"
                   onClick={cancelEditing}
-                  disabled={saving}
+                  disabled={isLocking}
                   style={{
                     backgroundColor: 'rgba(255, 255, 255, 0.18)',
                     color: '#ffffff',
@@ -542,17 +695,17 @@ export default function StudentProfilePage() {
                 <button
                   className="edvana-btn edvana-btn-primary"
                   onClick={handleSaveProfile}
-                  disabled={saving}
+                  disabled={isLocking}
                   style={{
                     backgroundColor: '#ffffff',
                     color: '#1d4ed8',
                     borderColor: '#ffffff',
                     fontWeight: 700,
                   }}
-                  title="Save your contact, address, guardian and bank changes and lock"
+                  title="Review empty fields, then lock your profile permanently"
                 >
                   <CheckCircle2 size={16} />
-                  <span>{saving ? 'Saving…' : 'Save Changes'}</span>
+                  <span>{isLocking ? 'Locking…' : 'Lock Profile'}</span>
                 </button>
               </>
             )}
@@ -614,9 +767,28 @@ export default function StudentProfilePage() {
             <Info size={18} style={{ color: isEditing ? '#2563eb' : '#64748b', flexShrink: 0 }} />
             <span>
               {isEditing
-                ? 'Editing unlocked. Update your contact, address, guardian and bank details, then press Save Changes to finalize and lock. Name, enrollment, admission and marksheet fields stay locked.'
-                : 'Profile is locked. Click Edit Profile to start editing.'}
+                ? 'Editing unlocked (one-time). Update your details, then press Lock Profile to review and lock permanently. Enrollment, admission, gender and caste stay locked.'
+                : 'Profile is locked for editing. Click Edit Profile to start your one-time edit.'}
             </span>
+          </div>
+        ) : profileLocked && isOwnProfile ? (
+          <div
+            style={{
+              backgroundColor: '#fef2f2',
+              border: '1px solid #fecaca',
+              borderRadius: '8px',
+              padding: '0.75rem 1rem',
+              color: '#991b1b',
+              fontSize: '0.8125rem',
+              fontWeight: 600,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+              marginBottom: '1.25rem',
+            }}
+          >
+            <Lock size={18} style={{ color: '#dc2626', flexShrink: 0 }} />
+            <span>Profile locked permanently{student?.profile_locked_at ? ` on ${new Date(student.profile_locked_at).toLocaleDateString()}` : ''}. No further edits are allowed. Contact Admin Head for corrections.</span>
           </div>
         ) : (
           <div
@@ -685,7 +857,7 @@ export default function StudentProfilePage() {
                     <span style={{ fontSize: '0.9375rem', color: '#475569' }}>
                       {enrollment?.department_name ||
                         enrollment?.program_name ||
-                        'Artificial Intelligence and Data Science'}
+                        '—'}
                     </span>
                   </div>
                   <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
@@ -735,8 +907,8 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: identity record. Contact Admin Head for corrections."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit your full name.' : 'Your full name as per records.'}
                       value={formData.fullName}
                       onChange={(e) => handleInputChange('fullName', e.target.value)}
                     />
@@ -1002,6 +1174,7 @@ export default function StudentProfilePage() {
                         value={formData.dobDay}
                         onChange={(e) => handleInputChange('dobDay', e.target.value)}
                       >
+                        <option value="">Day</option>
                         {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
                           <option key={d} value={String(d)}>
                             {d}
@@ -1013,6 +1186,7 @@ export default function StudentProfilePage() {
                         value={formData.dobMonth}
                         onChange={(e) => handleInputChange('dobMonth', e.target.value)}
                       >
+                        <option value="">Month</option>
                         {[
                           'January',
                           'February',
@@ -1037,6 +1211,7 @@ export default function StudentProfilePage() {
                         value={formData.dobYear}
                         onChange={(e) => handleInputChange('dobYear', e.target.value)}
                       >
+                        <option value="">Year</option>
                         {Array.from({ length: 25 }, (_, i) => 2012 - i).map((y) => (
                           <option key={y} value={String(y)}>
                             {y}
@@ -1064,6 +1239,7 @@ export default function StudentProfilePage() {
                       value={formData.gender}
                       onChange={(e) => handleInputChange('gender', e.target.value)}
                     >
+                      <option value="">Select</option>
                       <option value="Male">Male</option>
                       <option value="Female">Female</option>
                       <option value="Other">Other</option>
@@ -1716,8 +1892,9 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: verified identity document."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : '12-digit Aadhaar number. Re-verified by staff after change.'}
+                      placeholder="12-digit Aadhaar number"
                       value={formData.aadhaarNo}
                       onChange={(e) => handleInputChange('aadhaarNo', e.target.value)}
                     />
@@ -1738,8 +1915,9 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: verified identity document."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : 'Name printed on Aadhaar.'}
+                      placeholder="Name as printed on Aadhaar"
                       value={formData.aadhaarName}
                       onChange={(e) => handleInputChange('aadhaarName', e.target.value)}
                     />
@@ -1930,17 +2108,10 @@ export default function StudentProfilePage() {
                 </div>
               </div>
 
-              <div>
-                <button
-                  type="button"
-                  className="edvana-btn edvana-btn-primary"
-                  disabled={fieldsLocked || saving}
-                  title={fieldsLocked ? 'Click Edit Profile first' : 'Save all profile changes and lock'}
-                  onClick={handleSaveProfile}
-                  style={{ padding: '0.625rem 1.5rem', fontWeight: 600, opacity: fieldsLocked ? 0.55 : 1 }}
-                >
-                  {saving ? 'Saving…' : 'Save Changes'}
-                </button>
+              <div style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                {fieldsLocked
+                  ? 'Click Edit Profile at the top to make changes.'
+                  : 'One lock for the whole profile — use Lock Profile at the top to review and lock all tabs together.'}
               </div>
             </div>
           </div>
@@ -2048,8 +2219,8 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: verified academic record."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : undefined}
                       value={formData.sscBoard}
                       onChange={(e) => handleInputChange('sscBoard', e.target.value)}
                     />
@@ -2070,8 +2241,8 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: verified academic record."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : undefined}
                       value={formData.sscSchool}
                       onChange={(e) => handleInputChange('sscSchool', e.target.value)}
                     />
@@ -2092,8 +2263,8 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: verified academic record."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : undefined}
                       value={formData.sscPassingYear}
                       onChange={(e) => handleInputChange('sscPassingYear', e.target.value)}
                     />
@@ -2114,8 +2285,8 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: verified academic record."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : undefined}
                       value={formData.sscSeatNo}
                       onChange={(e) => handleInputChange('sscSeatNo', e.target.value)}
                     />
@@ -2136,8 +2307,8 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: verified academic record."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : undefined}
                       value={formData.sscMarksObtained}
                       onChange={(e) => handleInputChange('sscMarksObtained', e.target.value)}
                     />
@@ -2158,8 +2329,8 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: verified academic record."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : undefined}
                       value={formData.sscPercentage}
                       onChange={(e) => handleInputChange('sscPercentage', e.target.value)}
                     />
@@ -2294,11 +2465,12 @@ export default function StudentProfilePage() {
                     </label>
                     <select
                       className="edvana-select"
-                      disabled
-                      title="Locked: verified academic record."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : undefined}
                       value={formData.hscStream}
                       onChange={(e) => handleInputChange('hscStream', e.target.value)}
                     >
+                      <option value="">Select stream</option>
                       <option value="Polytechnic Diploma">Polytechnic Diploma (Direct Second Year)</option>
                       <option value="Class XII (Science)">Class XII (Science)</option>
                       <option value="Other">Other</option>
@@ -2320,8 +2492,8 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: verified academic record."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : undefined}
                       value={formData.hscBoard}
                       onChange={(e) => handleInputChange('hscBoard', e.target.value)}
                     />
@@ -2342,8 +2514,8 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: verified academic record."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : undefined}
                       value={formData.hscCollege}
                       onChange={(e) => handleInputChange('hscCollege', e.target.value)}
                     />
@@ -2364,8 +2536,8 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: verified academic record."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : undefined}
                       value={formData.hscPassingYear}
                       onChange={(e) => handleInputChange('hscPassingYear', e.target.value)}
                     />
@@ -2386,8 +2558,8 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: verified academic record."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : undefined}
                       value={formData.hscSeatNo}
                       onChange={(e) => handleInputChange('hscSeatNo', e.target.value)}
                     />
@@ -2408,8 +2580,8 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: verified academic record."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : undefined}
                       value={formData.hscMarksObtained}
                       onChange={(e) => handleInputChange('hscMarksObtained', e.target.value)}
                     />
@@ -2430,8 +2602,8 @@ export default function StudentProfilePage() {
                     <input
                       type="text"
                       className="edvana-input"
-                      disabled
-                      title="Locked: verified academic record."
+                      disabled={fieldsLocked}
+                      title={fieldsLocked ? 'Click Edit Profile to edit.' : undefined}
                       value={formData.hscPercentage}
                       onChange={(e) => handleInputChange('hscPercentage', e.target.value)}
                     />
@@ -2493,16 +2665,10 @@ export default function StudentProfilePage() {
               </div>
             </div>
 
-            <div>
-              <button
-                type="button"
-                className="edvana-btn edvana-btn-primary"
-                disabled
-                title="Marksheet records are verified and locked."
-                style={{ padding: '0.625rem 1.5rem', fontWeight: 600, opacity: 0.55 }}
-              >
-                Update Marksheet Details (Locked)
-              </button>
+            <div style={{ fontSize: '0.78rem', color: '#64748b' }}>
+              {fieldsLocked
+                ? 'Click Edit Profile at the top to make changes.'
+                : 'One lock for the whole profile — use Lock Profile at the top to review and lock all tabs together.'}
             </div>
           </div>
         )}
@@ -2528,6 +2694,66 @@ export default function StudentProfilePage() {
           </div>
         )}
       </div>
+
+      {/* One-time lock warning modal — explicit confirm, no accidental lock */}
+      <Modal
+        isOpen={showLockModal}
+        onClose={() => { if (!isLocking) setShowLockModal(false); }}
+        title="Lock Profile Permanently?"
+        maxWidth="560px"
+      >
+        {lockError && (
+          <div style={{ marginBottom: '1rem', padding: '0.75rem 1rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '6px', color: '#991b1b', fontSize: '0.85rem' }}>
+            {lockError}
+          </div>
+        )}
+
+        <p style={{ fontSize: '0.875rem', color: '#334155', lineHeight: 1.6, margin: '0 0 0.75rem' }}>
+          Once you lock, <strong>all changes become permanent and you can never edit again</strong>.
+          The Edit option will disappear. Only Admin Head can fix mistakes after that.
+        </p>
+
+        {lockEmptyFields.length > 0 ? (
+          <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem' }}>
+            <div style={{ fontSize: '0.8125rem', fontWeight: 700, color: '#92400e', marginBottom: '0.4rem' }}>
+              {lockEmptyFields.length} field{lockEmptyFields.length === 1 ? '' : 's'} left empty — they will stay empty forever:
+            </div>
+            <ul style={{ margin: 0, paddingLeft: '1.2rem', fontSize: '0.8125rem', color: '#78350f', lineHeight: 1.6, maxHeight: '180px', overflowY: 'auto' }}>
+              {lockEmptyFields.map((label) => (
+                <li key={label}>{label}</li>
+              ))}
+            </ul>
+          </div>
+        ) : (
+          <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.8125rem', color: '#166534', fontWeight: 600 }}>
+            All editable fields are filled. You can still lock now — it will be permanent.
+          </div>
+        )}
+
+        <p style={{ fontSize: '0.78rem', color: '#64748b', margin: '0 0 1rem' }}>
+          Locked identity fields (enrollment, admission, gender, caste) were never editable and are not listed here.
+        </p>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', borderTop: '1px solid #e2e8f0', paddingTop: '1.25rem' }}>
+          <button
+            type="button"
+            onClick={() => setShowLockModal(false)}
+            disabled={isLocking}
+            className="edvana-btn edvana-btn-secondary"
+          >
+            Keep Editing
+          </button>
+          <button
+            type="button"
+            onClick={handleConfirmLock}
+            disabled={isLocking}
+            className="edvana-btn edvana-btn-primary"
+            style={{ backgroundColor: '#dc2626', borderColor: '#dc2626', color: '#ffffff', fontWeight: 700 }}
+          >
+            {isLocking ? 'Locking…' : 'Lock Permanently'}
+          </button>
+        </div>
+      </Modal>
     </>
   );
 }

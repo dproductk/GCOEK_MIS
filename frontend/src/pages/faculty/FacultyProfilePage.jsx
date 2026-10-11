@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import facultyApi from '../../api/facultyApi';
+import academicApi from '../../api/academicApi';
 import PageHeader from '../../components/common/PageHeader';
 import PasswordChangeForm from '../../components/auth/PasswordChangeForm';
 import {
@@ -27,16 +28,8 @@ const MONTHS = [
 ];
 const YEARS = Array.from({ length: 55 }, (_, i) => String(2005 - i));
 
-const DEPARTMENTS = [
-  'Select Department',
-  'Computer Engineering',
-  'Information Technology',
-  'Mechanical Engineering',
-  'Civil Engineering',
-  'Electrical Engineering',
-  'Electronics & Telecommunication',
-  'Science & Humanities',
-];
+// Departments are DB-driven only (no hardcoded placeholders).
+// Loaded from GET /academic/departments/ in useEffect below.
 
 const DESIGNATIONS = [
   'Assistant Professor',
@@ -90,7 +83,6 @@ const STATES = [
 ];
 
 const CLASSES = [
-  'Select',
   'First Class with Distinction',
   'First Class',
   'Higher Second Class',
@@ -99,7 +91,6 @@ const CLASSES = [
 ];
 
 const UNIVERSITIES = [
-  'Select',
   'Dr. Babasaheb Ambedkar Technological University (BATU)',
   'Savitribai Phule Pune University (SPPU)',
   'University of Mumbai',
@@ -127,26 +118,31 @@ export default function FacultyProfilePage() {
 
   // Form states start blank: every visible value must come from the backend.
   // No sample-person data may live here (production rule).
+  // NOTE: only fields with a real backend column are editable here.
+  // SubjectsTaught (from TeachingAssignment), qualifications, publications,
+  // documents are read-only server data — no fake editable inputs.
+  const [departments, setDepartments] = useState([]);
+  const [serverProfile, setServerProfile] = useState(null);
+  // Non-faculty accounts (e.g. seed admin_head with no Faculty row) get 404
+  // from GET /faculty/me/ — show an honest empty-state instead of a blank form.
+  const [noProfile, setNoProfile] = useState(false);
   const [profileInfo, setProfileInfo] = useState({
     department: '',
     designation: '',
-    facultyName: user?.first_name ? `${user.first_name} ${user.last_name || ''}`.trim() : '',
+    facultyName: '',
     dobDay: '',
     dobMonth: '',
     dobYear: '',
     gender: '',
     nationality: '',
     domicileState: '',
-    subjectsTaught: '',
-    additionalInfo: '',
     dateOfAppointment: '',
     category: '',
-    specialReservation: '',
-    email: user?.email || '',
+    email: '',
     mobile: '',
     resTelephoneStd: '',
     resTelephoneNum: '',
-    officialEmail: user?.email || '',
+    officialEmail: '',
     permanentAddress: {
       address: '',
       district: '',
@@ -169,6 +165,7 @@ export default function FacultyProfilePage() {
       classObtained: '',
       university: '',
       otherUniversity: '',
+      passingYear: '',
     },
     postGraduation: {
       course: '',
@@ -177,18 +174,21 @@ export default function FacultyProfilePage() {
       classObtained: '',
       university: '',
       otherUniversity: '',
+      passingYear: '',
     },
     phd: {
       course: '',
       branchName: '',
       classObtained: '',
       university: '',
+      passingYear: '',
     },
     other: {
       course: '',
       branchName: '',
       classObtained: '',
       university: '',
+      passingYear: '',
     },
   });
 
@@ -219,6 +219,13 @@ export default function FacultyProfilePage() {
     aadhaarFileName: '',
     panNumber: '',
     panFileName: '',
+    aadhaarMasked: '',
+    panMasked: '',
+    passportPhotoFile: null,
+    signatureFile: null,
+    aadhaarFile: null,
+    panFile: null,
+    _docIds: { PHOTO: null, SIGNATURE: null, AADHAAR: null, PAN: null },
   });
 
   useEffect(() => {
@@ -226,7 +233,13 @@ export default function FacultyProfilePage() {
     setSnapshot(null);
     setSuccessMessage('');
     setErrorMessage('');
+    setNoProfile(false);
     loadFacultyData();
+    // Departments for the select: backend is source of truth, fallback is static.
+    academicApi.getDepartments().then((r) => {
+      const list = r?.data?.results || r?.data || [];
+      if (Array.isArray(list) && list.length) setDepartments(list);
+    }).catch(() => {});
   }, [id]);
 
   const loadFacultyData = async () => {
@@ -241,6 +254,7 @@ export default function FacultyProfilePage() {
 
       if (res?.data) {
         const d = res.data;
+        setServerProfile(d);
         setProfileInfo((prev) => {
           // Backend stores one telephone string; split STD-number on load.
           let std = prev.resTelephoneStd;
@@ -300,10 +314,10 @@ export default function FacultyProfilePage() {
               dobDay: bDay,
               dobMonth: bMonth,
               dobYear: bYear,
-              gender: pd.gender === 'FEMALE' ? 'Female' : 'Male',
-              nationality: pd.nationality || prev.nationality,
-              domicileState: pd.domicile_state || prev.domicileState,
-              category: pd.constitutional_category || prev.category,
+              gender: pd.gender === 'FEMALE' ? 'Female' : pd.gender === 'OTHER' ? 'Other' : pd.gender === 'MALE' ? 'Male' : '',
+              nationality: pd.nationality || '',
+              domicileState: pd.domicile_state || '',
+              category: pd.constitutional_category || '',
             };
           });
         }
@@ -329,9 +343,77 @@ export default function FacultyProfilePage() {
             }));
           }
         }
+
+        // Qualifications: map UG/PG/PHD/OTHER rows back to the 4 cards.
+        if (Array.isArray(d.qualifications) && d.qualifications.length) {
+          const byLevel = {};
+          d.qualifications.forEach((q) => { byLevel[q.qualification_level] = q; });
+          setQualifications((prev) => {
+            const next = { ...prev };
+            const fill = (key, row) => {
+              if (!row) return;
+              next[key] = {
+                ...next[key],
+                course: row.degree_name || next[key].course,
+                branchName: row.specialization || '',
+                classObtained: row.class_or_grade || '',
+                university: row.institution_university || '',
+                passingYear: row.passing_year ? String(row.passing_year) : '',
+              };
+            };
+            fill('graduation', byLevel.UG);
+            fill('postGraduation', byLevel.PG);
+            fill('phd', byLevel.PHD);
+            fill('other', byLevel.OTHER);
+            return next;
+          });
+        }
+
+        // Research profile: counts + texts.
+        if (d.research_profile) {
+          const rp = d.research_profile;
+          setAcademicDetail({
+            nationalPapers: rp.national_journal_papers ?? '',
+            internationalPapers: rp.international_journal_papers ?? '',
+            conferenceNational: rp.national_conference_papers ?? '',
+            conferenceInternational: rp.international_conference_papers ?? '',
+            booksPatents: rp.books_patents || '',
+            professionalMembership: rp.professional_membership || '',
+            consultancyActivities: rp.consultancy_activities || '',
+            awards: rp.awards || '',
+            grantsFetched: rp.grants_fetched || '',
+            interactionInstitution: rp.interaction_institution || '',
+          });
+        }
+
+        // Documents: map PHOTO/SIGNATURE/AADHAAR/PAN rows back to inputs.
+        if (Array.isArray(d.documents) && d.documents.length) {
+          const byType = {};
+          d.documents.forEach((doc) => { byType[doc.document_type] = doc; });
+          const baseName = (p) => (p ? String(p).split('/').pop() : '');
+          setDocuments({
+            passportPhotoName: baseName(byType.PHOTO?.file_path) || '',
+            signatureName: baseName(byType.SIGNATURE?.file_path) || '',
+            aadhaarNumber: '',
+            aadhaarFileName: baseName(byType.AADHAAR?.file_path) || '',
+            panNumber: '',
+            panFileName: baseName(byType.PAN?.file_path) || '',
+            aadhaarMasked: byType.AADHAAR?.document_number_masked || '',
+            panMasked: byType.PAN?.document_number_masked || '',
+            _docIds: {
+              PHOTO: byType.PHOTO?.id || null,
+              SIGNATURE: byType.SIGNATURE?.id || null,
+              AADHAAR: byType.AADHAAR?.id || null,
+              PAN: byType.PAN?.id || null,
+            },
+          });
+        }
       }
-    } catch {
-      // Graceful fallback to default values, assuring no blank screen
+      setNoProfile(false);
+    } catch (err) {
+      // 404 = account has no Faculty row (e.g. seed admin_head). Show an
+      // honest empty-state instead of a blank form; Security tab still works.
+      if (!id && err?.response?.status === 404) setNoProfile(true);
     } finally {
       setLoading(false);
     }
@@ -370,56 +452,99 @@ export default function FacultyProfilePage() {
     setErrorMessage('');
   };
 
+  const buildAddressBlock = (addr) => {
+    const line1 = String(addr?.address || '').trim();
+    if (!line1) return undefined; // all-blank = omit, backend treats as no-change
+    const block = { address_line_1: line1 };
+    const district = String(addr?.district || '').trim();
+    const state = String(addr?.state || '').trim();
+    const pincode = String(addr?.pincode || '').trim();
+    if (district) block.district = district;
+    if (state) block.state = state;
+    if (pincode) {
+      if (!/^\d{6}$/.test(pincode)) throw new Error('Pincode must be 6 digits.');
+      block.pincode = pincode;
+    }
+    return block;
+  };
+
   const buildProfilePayload = () => {
-    const monthNum = String(MONTHS.indexOf(profileInfo.dobMonth) + 1).padStart(2, '0');
-    const dayNum = String(profileInfo.dobDay).padStart(2, '0');
+    // DOB: all-empty = omit (no change); partial = frontend error, never "-00-00".
+    const hasDob = profileInfo.dobDay || profileInfo.dobMonth || profileInfo.dobYear;
+    let dobStr;
+    if (hasDob) {
+      if (!profileInfo.dobDay || !profileInfo.dobMonth || !profileInfo.dobYear) {
+        throw new Error('Select complete Date of Birth (day, month and year).');
+      }
+      const mIdx = MONTHS.indexOf(profileInfo.dobMonth);
+      if (mIdx < 0) throw new Error('Select a valid birth month.');
+      const monthNum = String(mIdx + 1).padStart(2, '0');
+      const dayNum = String(profileInfo.dobDay).padStart(2, '0');
+      dobStr = `${profileInfo.dobYear}-${monthNum}-${dayNum}`;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dobStr)) throw new Error('Select a valid Date of Birth.');
+    }
     const telephone = [profileInfo.resTelephoneStd, profileInfo.resTelephoneNum]
       .map((s) => String(s || '').trim())
       .filter(Boolean)
       .join('-');
-    return {
-      display_name: String(profileInfo.facultyName || '').trim(),
-      department: profileInfo.department,
-      designation: profileInfo.designation,
-      mobile: String(profileInfo.mobile || '').trim(),
-      personal_email: String(profileInfo.email || '').trim(),
-      official_email: String(profileInfo.officialEmail || '').trim(),
-      residential_telephone: telephone,
-      date_of_joining: profileInfo.dateOfAppointment || undefined,
-      personal: {
-        date_of_birth: `${profileInfo.dobYear}-${monthNum}-${dayNum}`,
-        gender: String(profileInfo.gender || '').toUpperCase(),
-        nationality: profileInfo.nationality,
-        domicile_state: profileInfo.domicileState,
-        constitutional_category: profileInfo.category,
-      },
-      permanent_address: {
-        address_line_1: profileInfo.permanentAddress.address,
-        district: profileInfo.permanentAddress.district,
-        state: profileInfo.permanentAddress.state,
-        pincode: profileInfo.permanentAddress.pincode,
-      },
-      correspondence_address: {
-        address_line_1: profileInfo.correspondenceAddress.address,
-        district: profileInfo.correspondenceAddress.district,
-        state: profileInfo.correspondenceAddress.state,
-        pincode: profileInfo.correspondenceAddress.pincode,
-      },
-    };
+    const payload = {};
+    const name = String(profileInfo.facultyName || '').trim();
+    if (name) payload.display_name = name;
+    const dept = String(profileInfo.department || '').trim();
+    if (dept) payload.department = dept;
+    const desig = String(profileInfo.designation || '').trim();
+    if (desig) payload.designation = desig;
+    const mobile = String(profileInfo.mobile || '').trim().replace(/\s/g, '');
+    if (mobile) {
+      if (!/^\+?\d{10,15}$/.test(mobile)) throw new Error('Enter a valid 10-15 digit mobile number.');
+      payload.mobile = mobile;
+    }
+    const pEmail = String(profileInfo.email || '').trim();
+    if (pEmail) payload.personal_email = pEmail;
+    const oEmail = String(profileInfo.officialEmail || '').trim();
+    if (oEmail) payload.official_email = oEmail;
+    if (telephone) payload.residential_telephone = telephone;
+    if (profileInfo.dateOfAppointment) payload.date_of_joining = profileInfo.dateOfAppointment;
+
+    const personal = {};
+    if (dobStr) personal.date_of_birth = dobStr;
+    const gender = String(profileInfo.gender || '').trim().toUpperCase();
+    if (gender) personal.gender = gender;
+    const nat = String(profileInfo.nationality || '').trim();
+    if (nat) personal.nationality = nat;
+    const dom = String(profileInfo.domicileState || '').trim();
+    if (dom) personal.domicile_state = dom;
+    const cat = String(profileInfo.category || '').trim();
+    if (cat) personal.constitutional_category = cat;
+    if (Object.keys(personal).length) payload.personal = personal;
+
+    const perm = buildAddressBlock(profileInfo.permanentAddress);
+    if (perm) payload.permanent_address = perm;
+    const corr = buildAddressBlock(profileInfo.correspondenceAddress);
+    if (corr) payload.correspondence_address = corr;
+    return payload;
   };
 
   const buildBankPayload = () => {
     const payload = buildProfilePayload();
-    payload.bank = {
-      account_holder_name: String(profileInfo.facultyName || '').trim(),
-      bank_name: bankDetail.bankName,
-      branch_name: bankDetail.branchName,
-      ifsc_code: String(bankDetail.ifscCode || '').toUpperCase(),
-      // Never send the masked display value back as a new account number.
-      ...(!String(bankDetail.accountNo || '').includes('X') && bankDetail.accountNo
-        ? { account_number: String(bankDetail.accountNo).trim() }
-        : {}),
-    };
+    const bankName = String(bankDetail.bankName || '').trim();
+    const branch = String(bankDetail.branchName || '').trim();
+    const ifsc = String(bankDetail.ifscCode || '').trim().toUpperCase();
+    const accRaw = String(bankDetail.accountNo || '').trim();
+    const hasAccount = accRaw && !accRaw.includes('X');
+    if (!bankName && !branch && !ifsc && !hasAccount) return payload; // nothing to save
+    if (ifsc && !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc)) throw new Error('IFSC must look like SBIN0001234.');
+    if (hasAccount && !/^\d{9,18}$/.test(accRaw.replace(/\D/g, ''))) {
+      throw new Error('Account number must be 9-18 digits.');
+    }
+    payload.bank = {};
+    const holder = String(profileInfo.facultyName || '').trim();
+    if (holder) payload.bank.account_holder_name = holder;
+    if (bankName) payload.bank.bank_name = bankName;
+    if (branch) payload.bank.branch_name = branch;
+    if (ifsc) payload.bank.ifsc_code = ifsc;
+    // Never send the masked display value back as a new account number.
+    if (hasAccount) payload.bank.account_number = accRaw;
     return payload;
   };
 
@@ -449,27 +574,191 @@ export default function FacultyProfilePage() {
     }
   };
 
-  const handleSave = async (tabName) => {
+  const buildQualificationBlock = (q) => {
+    const course = String(q.course === 'Other' ? q.otherCourse : q.course || '').trim();
+    const branch = String(q.branchName || '').trim();
+    const cls = String(q.classObtained || '').trim();
+    const uni = String(q.university === 'Other' ? q.otherUniversity : q.university || '').trim();
+    const py = String(q.passingYear || '').trim();
+    if (!course && !branch && !cls && !uni && !py) return undefined; // untouched = omit
+    if (!course) throw new Error('Qualification course is required.');
+    if (!uni || uni.toLowerCase() === 'select') throw new Error('Qualification university is required.');
+    if (!py) throw new Error('Qualification passing year is required.');
+    if (!/^\d{4}$/.test(py)) throw new Error('Passing year must be YYYY.');
+    const y = Number(py);
+    const cy = new Date().getFullYear();
+    if (y < 1950 || y > cy + 1) throw new Error(`Passing year must be 1950-${cy + 1}.`);
+    return {
+      degree_name: course,
+      specialization: branch,
+      class_or_grade: cls,
+      institution_university: uni,
+      passing_year: py,
+    };
+  };
+
+  const buildQualificationsPayload = () => {
+    const out = {};
+    const g = buildQualificationBlock(qualifications.graduation);
+    if (g) out.graduation = g;
+    const pg = buildQualificationBlock(qualifications.postGraduation);
+    if (pg) out.post_graduation = pg;
+    const phd = buildQualificationBlock(qualifications.phd);
+    if (phd) out.phd = phd;
+    const oth = buildQualificationBlock(qualifications.other);
+    if (oth) out.other = oth;
+    if (!Object.keys(out).length) throw new Error('Fill at least one qualification block (course + university + passing year).');
+    return { qualifications: out };
+  };
+
+  const buildResearchPayload = () => {
+    const num = (v, label) => {
+      const s = String(v ?? '').trim();
+      if (s === '') return undefined;
+      const n = Number(s);
+      if (!Number.isInteger(n) || n < 0 || n > 100000) throw new Error(`${label} must be 0-100000.`);
+      return n;
+    };
+    const rp = {};
+    const n1 = num(academicDetail.nationalPapers, 'National papers');
+    if (n1 !== undefined) rp.national_journal_papers = n1;
+    const n2 = num(academicDetail.internationalPapers, 'International papers');
+    if (n2 !== undefined) rp.international_journal_papers = n2;
+    const n3 = num(academicDetail.conferenceNational, 'Conference national papers');
+    if (n3 !== undefined) rp.national_conference_papers = n3;
+    const n4 = num(academicDetail.conferenceInternational, 'Conference international papers');
+    if (n4 !== undefined) rp.international_conference_papers = n4;
+    ['booksPatents', 'professionalMembership', 'consultancyActivities', 'awards', 'grantsFetched', 'interactionInstitution'].forEach((k) => {
+      const map = {
+        booksPatents: 'books_patents', professionalMembership: 'professional_membership',
+        consultancyActivities: 'consultancy_activities', awards: 'awards',
+        grantsFetched: 'grants_fetched', interactionInstitution: 'interaction_institution',
+      };
+      const v = String(academicDetail[k] || '').trim();
+      if (v) {
+        if (v.length > 5000) throw new Error(`${k} too long (max 5000 chars).`);
+        rp[map[k]] = v;
+      }
+    });
+    if (!Object.keys(rp).length) throw new Error('Fill at least one research field.');
+    return { research_profile: rp };
+  };
+
+  const buildDocumentsPayload = () => {
+    // Numbers go via PATCH (encrypted at rest); files go via multipart upload
+    // after PATCH (see handleSaveAll). Filenames in state are just picker labels.
+    const aad = String(documents.aadhaarNumber || '').trim().replace(/\s/g, '');
+    const pan = String(documents.panNumber || '').trim().toUpperCase();
+    const hasFile = documents.passportPhotoFile || documents.signatureFile || documents.aadhaarFile || documents.panFile;
+    if (!aad && !pan && !hasFile) {
+      throw new Error('Fill Aadhaar/PAN numbers or pick files.');
+    }
+    if (aad && !/^[2-9]\d{11}$/.test(aad)) throw new Error('Aadhaar must be 12 digits starting 2-9.');
+    if (pan && !/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(pan)) throw new Error('PAN must look like ABCDE1234F.');
+    const id = {};
+    if (aad) id.aadhaar_number = aad;
+    if (pan) id.pan_number = pan;
+    if (!Object.keys(id).length) return null; // files only — PATCH has nothing to do
+    return { identity_documents: id };
+  };
+
+  // Single-save: one Edit unlocks every tab, one header Save persists
+  // profile + bank + qualifications + research + documents atomically.
+  // Untouched sections are omitted (not errors); partial/invalid input aborts.
+  const buildFullPayload = () => {
+    const payload = buildProfilePayload();
+    // Bank (omit when untouched; never echo masked X number).
+    try {
+      const bankOnly = buildBankPayload();
+      if (bankOnly.bank && Object.keys(bankOnly.bank).length) payload.bank = bankOnly.bank;
+    } catch (e) {
+      throw e;
+    }
+    const soft = (fn) => {
+      try {
+        return fn();
+      } catch (e) {
+        const msg = e?.message || '';
+        if (/Fill at least one|Fill Aadhaar\/PAN/.test(msg)) return null; // untouched section
+        throw e;
+      }
+    };
+    const q = soft(buildQualificationsPayload);
+    if (q?.qualifications) payload.qualifications = q.qualifications;
+    const r = soft(buildResearchPayload);
+    if (r?.research_profile) payload.research_profile = r.research_profile;
+    const d = soft(buildDocumentsPayload);
+    if (d?.identity_documents) payload.identity_documents = d.identity_documents;
+    return payload;
+  };
+
+  const handleSaveAll = async () => {
     if (!isEditing) {
       showError('Click Edit Profile first to make changes.');
       return;
     }
-    if (tabName === 'Bank Details') {
-      await persistAndLock(buildBankPayload(), tabName);
+    let payload;
+    try {
+      payload = buildFullPayload();
+    } catch (e) {
+      showError(e?.message || 'Fix the highlighted values and try again.');
       return;
     }
-    if (tabName === 'Profile Information') {
-      await persistAndLock(buildProfilePayload(), tabName);
+    const pendingFiles = [
+      documents.passportPhotoFile ? ['PHOTO', documents.passportPhotoFile] : null,
+      documents.signatureFile ? ['SIGNATURE', documents.signatureFile] : null,
+      documents.aadhaarFile ? ['AADHAAR', documents.aadhaarFile] : null,
+      documents.panFile ? ['PAN', documents.panFile] : null,
+    ].filter(Boolean);
+    if ((!payload || !Object.keys(payload).length) && !pendingFiles.length) {
+      showError('Nothing to save — fill at least one field or pick a file.');
       return;
     }
-    // Qualification / Academic / Documents sections have no write API yet
-    // (no upload/verification endpoints) — lock the form again so the
-    // Edit → Save → locked cycle is consistent, without pretending persistence.
-    showSuccess(
-      `${tabName} locked. Note: this section is not yet persisted to the server (no backend write API) — Profile Information and Bank Details are saved.`
-    );
-    setIsEditing(false);
-    setSnapshot(null);
+    if (!isOwnProfile || saving) return;
+    setSaving(true);
+    try {
+      const changed = [];
+      if (payload && Object.keys(payload).length) {
+        const res = await facultyApi.updateMyProfile(payload);
+        changed.push(...(res.data?.changed || []));
+      }
+      const failedUploads = [];
+      for (const [docType, file] of pendingFiles) {
+        try {
+          await facultyApi.uploadMyDocument(docType, file);
+          changed.push(`documents.${docType.toLowerCase()}_file`);
+        } catch (uerr) {
+          const ud = uerr.response?.data;
+          const umsg = ud?.file
+            ? `${docType}: ${Array.isArray(ud.file) ? ud.file.join(' ') : ud.file}`
+            : ud?.detail || `${docType} upload failed.`;
+          failedUploads.push(umsg);
+        }
+      }
+      if (failedUploads.length) {
+        showError(`Profile saved but uploads failed: ${failedUploads.join(' | ')}`);
+      } else if (!changed.length) {
+        showSuccess('Already up to date — no changes detected.');
+      } else {
+        showSuccess(`Profile saved successfully: ${changed.join(', ')}.`);
+      }
+      setIsEditing(false);
+      setSnapshot(null);
+      await loadFacultyData();
+    } catch (err) {
+      const data = err.response?.data;
+      const msg =
+        data?.detail ||
+        (data && typeof data === 'object'
+          ? Object.entries(data)
+              .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(' ') : v}`)
+              .join(' ')
+          : null) ||
+        'Failed to save profile. Check highlighted values and try again.';
+      showError(msg);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleSameAsPermanentToggle = (checked) => {
@@ -499,8 +788,9 @@ export default function FacultyProfilePage() {
   // them render through ProfileDispatcher → FacultyProfilePage.
   const isOwnProfile = !id;
   // Edit-lock: directory views are always read-only; own profile starts
-  // locked and only unlocks after Edit is clicked.
-  const canEdit = isOwnProfile;
+  // locked and only unlocks after Edit is clicked. Accounts with no Faculty
+  // row (404) can never edit — Security tab stays available.
+  const canEdit = isOwnProfile && !noProfile;
   const fieldsLocked = !isEditing;
   const visibleTabs = isOwnProfile
     ? [...tabs, { id: 'security', label: 'Security', icon: Lock }]
@@ -540,13 +830,13 @@ export default function FacultyProfilePage() {
                 </button>
                 <button
                   className="edvana-btn edvana-btn-primary"
-                  onClick={() => handleSave(activeTab === 'profile-info' ? 'Profile Information' : activeTab === 'bank-detail' ? 'Bank Details' : activeTab === 'qualification-detail' ? 'Qualification Details' : activeTab === 'academic-detail' ? 'Academic Details' : 'Documents')}
+                  onClick={handleSaveAll}
                   disabled={saving}
                   style={{ backgroundColor: '#ffffff', color: '#1d4ed8', borderColor: '#ffffff', fontWeight: 700 }}
-                  title="Save changes and lock the profile"
+                  title="Save everything across all tabs and lock the profile"
                 >
                   <CheckCircle2 size={16} />
-                  <span>{saving ? 'Saving…' : 'Save Changes'}</span>
+                  <span>{saving ? 'Saving…' : 'Save All Changes'}</span>
                 </button>
               </>
             )}
@@ -610,9 +900,11 @@ export default function FacultyProfilePage() {
           <span>
             {id
               ? 'Read-only view. This faculty record can only be edited by its owner from their own profile.'
-              : isEditing
-                ? 'Editing unlocked. Change any field, then press Save Changes to finalize and lock the profile again.'
-                : 'Profile is locked. Click Edit Profile to start editing.'}
+              : noProfile
+                ? `No faculty record is linked to this login (${user?.username || 'account'}). Use the Security tab to change your password; ask Sysadmin to onboard a faculty profile (POST /faculty/) if this account needs one.`
+                : isEditing
+                  ? 'Editing unlocked. Change anything on any tab, then press Save All Changes at the top once to save everything and lock again.'
+                  : 'Profile is locked. Click Edit Profile to start editing.'}
           </span>
         </div>
 
@@ -678,9 +970,13 @@ export default function FacultyProfilePage() {
                       value={profileInfo.department}
                       onChange={(e) => setProfileInfo({ ...profileInfo, department: e.target.value })}
                     >
-                      {DEPARTMENTS.map((d) => (
-                        <option key={d} value={d}>{d}</option>
-                      ))}
+                      <option value="">{departments.length ? 'Select Department' : 'Loading departments…'}</option>
+                      {departments.map((d) => {
+                        const name = typeof d === 'string' ? d : d.name;
+                        return (
+                          <option key={typeof d === 'string' ? d : d.id || d.name} value={name}>{name}</option>
+                        );
+                      })}
                     </select>
                     <ChevronDown size={16} className="profile-select-icon" />
                   </div>
@@ -696,6 +992,7 @@ export default function FacultyProfilePage() {
                       value={profileInfo.designation}
                       onChange={(e) => setProfileInfo({ ...profileInfo, designation: e.target.value })}
                     >
+                      <option value="">Select Designation</option>
                       {DESIGNATIONS.map((des) => (
                         <option key={des} value={des}>{des}</option>
                       ))}
@@ -735,6 +1032,7 @@ export default function FacultyProfilePage() {
                           value={profileInfo.dobDay}
                           onChange={(e) => setProfileInfo({ ...profileInfo, dobDay: e.target.value })}
                         >
+                          <option value="">Day</option>
                           {DAYS.map((d) => (
                             <option key={d} value={d}>{d}</option>
                           ))}
@@ -747,6 +1045,7 @@ export default function FacultyProfilePage() {
                           value={profileInfo.dobMonth}
                           onChange={(e) => setProfileInfo({ ...profileInfo, dobMonth: e.target.value })}
                         >
+                          <option value="">Month</option>
                           {MONTHS.map((m) => (
                             <option key={m} value={m}>{m}</option>
                           ))}
@@ -759,6 +1058,7 @@ export default function FacultyProfilePage() {
                           value={profileInfo.dobYear}
                           onChange={(e) => setProfileInfo({ ...profileInfo, dobYear: e.target.value })}
                         >
+                          <option value="">Year</option>
                           {YEARS.map((y) => (
                             <option key={y} value={y}>{y}</option>
                           ))}
@@ -773,7 +1073,7 @@ export default function FacultyProfilePage() {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1.25rem' }}>
                   <div>
                     <label className="profile-field-label">
-                      Gender <span className="req-star">*</span>
+                      Gender
                     </label>
                     <div style={{ position: 'relative' }}>
                       <select
@@ -781,6 +1081,7 @@ export default function FacultyProfilePage() {
                         value={profileInfo.gender}
                         onChange={(e) => setProfileInfo({ ...profileInfo, gender: e.target.value })}
                       >
+                        <option value="">Select Gender</option>
                         <option value="Male">Male</option>
                         <option value="Female">Female</option>
                         <option value="Other">Other</option>
@@ -791,7 +1092,7 @@ export default function FacultyProfilePage() {
 
                   <div>
                     <label className="profile-field-label">
-                      Nationality <span className="req-star">*</span>
+                      Nationality
                     </label>
                     <div style={{ position: 'relative' }}>
                       <select
@@ -799,6 +1100,7 @@ export default function FacultyProfilePage() {
                         value={profileInfo.nationality}
                         onChange={(e) => setProfileInfo({ ...profileInfo, nationality: e.target.value })}
                       >
+                        <option value="">Select Nationality</option>
                         <option value="Indian">Indian</option>
                         <option value="Other">Other</option>
                       </select>
@@ -808,7 +1110,7 @@ export default function FacultyProfilePage() {
 
                   <div>
                     <label className="profile-field-label">
-                      Domicile State <span className="req-star">*</span>
+                      Domicile State
                     </label>
                     <div style={{ position: 'relative' }}>
                       <select
@@ -816,6 +1118,7 @@ export default function FacultyProfilePage() {
                         value={profileInfo.domicileState}
                         onChange={(e) => setProfileInfo({ ...profileInfo, domicileState: e.target.value })}
                       >
+                        <option value="">Select State</option>
                         {STATES.map((st) => (
                           <option key={st} value={st}>{st}</option>
                         ))}
@@ -825,32 +1128,25 @@ export default function FacultyProfilePage() {
                   </div>
                 </div>
 
-                {/* Subjects Taught & Additional Info */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1.25rem' }}>
-                  <div>
-                    <label className="profile-field-label">
-                      Subjects Taught <span className="req-star">*</span>
-                    </label>
-                    <textarea
-                      rows={3}
-                      className="profile-field-textarea"
-                      value={profileInfo.subjectsTaught}
-                      onChange={(e) => setProfileInfo({ ...profileInfo, subjectsTaught: e.target.value })}
-                    />
-                  </div>
-
-                  <div>
-                    <label className="profile-field-label">Additional Information</label>
-                    <textarea
-                      rows={3}
-                      className="profile-field-textarea"
-                      value={profileInfo.additionalInfo}
-                      onChange={(e) => setProfileInfo({ ...profileInfo, additionalInfo: e.target.value })}
-                    />
-                  </div>
+                {/* Current subjects: read-only server truth (assigned by HOD).
+                    No self-typed Subjects Taught box — it had no storage and
+                    never survived refresh. */}
+                <div className="profile-section-card" style={{ backgroundColor: '#F8FAFC' }}>
+                  <h2 className="profile-section-title" style={{ marginBottom: '0.5rem' }}>Current Subjects (assigned by HOD)</h2>
+                  {(serverProfile?.teaching_assignments || []).filter((a) => a.is_active).length ? (
+                    <ul style={{ margin: 0, paddingLeft: '1.25rem', fontSize: '0.875rem', color: '#0F172A' }}>
+                      {(serverProfile.teaching_assignments || []).filter((a) => a.is_active).map((a) => (
+                        <li key={a.id}>{a.subject_code} — {a.subject_name} ({a.division_name || a.division})</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p style={{ margin: 0, fontSize: '0.8125rem', color: '#64748B' }}>
+                      No active subject assignments. Your HOD assigns subjects from Academic Structure.
+                    </p>
+                  )}
                 </div>
 
-                {/* Date of Appointment, Category, Reservation */}
+                {/* Date of Appointment, Category */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1.25rem' }}>
                   <div>
                     <label className="profile-field-label">
@@ -866,7 +1162,7 @@ export default function FacultyProfilePage() {
 
                   <div>
                     <label className="profile-field-label">
-                      Constitutional Category of Admission <span className="req-star">*</span>
+                      Constitutional Category
                     </label>
                     <div style={{ position: 'relative' }}>
                       <select
@@ -874,26 +1170,9 @@ export default function FacultyProfilePage() {
                         value={profileInfo.category}
                         onChange={(e) => setProfileInfo({ ...profileInfo, category: e.target.value })}
                       >
+                        <option value="">Select Category</option>
                         {CATEGORIES.map((cat) => (
                           <option key={cat} value={cat}>{cat}</option>
-                        ))}
-                      </select>
-                      <ChevronDown size={16} className="profile-select-icon" />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="profile-field-label">
-                      Special Reservation, if any <span className="req-star">*</span>
-                    </label>
-                    <div style={{ position: 'relative' }}>
-                      <select
-                        className="profile-field-select"
-                        value={profileInfo.specialReservation}
-                        onChange={(e) => setProfileInfo({ ...profileInfo, specialReservation: e.target.value })}
-                      >
-                        {RESERVATIONS.map((r) => (
-                          <option key={r} value={r}>{r}</option>
                         ))}
                       </select>
                       <ChevronDown size={16} className="profile-select-icon" />
@@ -965,13 +1244,13 @@ export default function FacultyProfilePage() {
               </div>
             </div>
 
-            {/* Card 3: Permanent Address */}
+            {/* Card 3: Permanent Address (optional — leave blank to keep existing) */}
             <div className="profile-section-card">
               <h2 className="profile-section-title">Permanent Address</h2>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
                 <div>
                   <label className="profile-field-label">
-                    Address <span className="req-star">*</span>
+                    Address
                   </label>
                   <textarea
                     rows={3}
@@ -996,7 +1275,7 @@ export default function FacultyProfilePage() {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1.25rem' }}>
                   <div>
                     <label className="profile-field-label">
-                      District <span className="req-star">*</span>
+                      District
                     </label>
                     <input
                       type="text"
@@ -1020,7 +1299,7 @@ export default function FacultyProfilePage() {
 
                   <div>
                     <label className="profile-field-label">
-                      State <span className="req-star">*</span>
+                      State
                     </label>
                     <div style={{ position: 'relative' }}>
                       <select
@@ -1040,6 +1319,7 @@ export default function FacultyProfilePage() {
                           });
                         }}
                       >
+                        <option value="">Select State</option>
                         {STATES.map((st) => (
                           <option key={st} value={st}>{st}</option>
                         ))}
@@ -1050,7 +1330,7 @@ export default function FacultyProfilePage() {
 
                   <div>
                     <label className="profile-field-label">
-                      Pincode <span className="req-star">*</span>
+                      Pincode
                     </label>
                     <input
                       type="text"
@@ -1100,7 +1380,7 @@ export default function FacultyProfilePage() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
                 <div>
                   <label className="profile-field-label">
-                    Address <span className="req-star">*</span>
+                    Address
                   </label>
                   <textarea
                     rows={3}
@@ -1119,7 +1399,7 @@ export default function FacultyProfilePage() {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1.25rem' }}>
                   <div>
                     <label className="profile-field-label">
-                      District <span className="req-star">*</span>
+                      District
                     </label>
                     <input
                       type="text"
@@ -1137,7 +1417,7 @@ export default function FacultyProfilePage() {
 
                   <div>
                     <label className="profile-field-label">
-                      State <span className="req-star">*</span>
+                      State
                     </label>
                     <div style={{ position: 'relative' }}>
                       <select
@@ -1151,6 +1431,7 @@ export default function FacultyProfilePage() {
                           })
                         }
                       >
+                        <option value="">Select State</option>
                         {STATES.map((st) => (
                           <option key={st} value={st}>{st}</option>
                         ))}
@@ -1161,7 +1442,7 @@ export default function FacultyProfilePage() {
 
                   <div>
                     <label className="profile-field-label">
-                      Pincode <span className="req-star">*</span>
+                      Pincode
                     </label>
                     <input
                       type="text"
@@ -1182,17 +1463,10 @@ export default function FacultyProfilePage() {
 
             </fieldset>
 
-            {/* Bottom Save Changes Button */}
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: '0.5rem' }}>
-              <button
-                className="profile-action-btn"
-                onClick={() => handleSave('Profile Information')}
-                disabled={fieldsLocked || saving}
-                style={{ opacity: fieldsLocked ? 0.55 : 1 }}
-                title={fieldsLocked ? 'Click Edit Profile first' : 'Save changes and lock the profile'}
-              >
-                {saving ? 'Saving…' : 'Save Changes'}
-              </button>
+              <p style={{ fontSize: '0.8125rem', color: '#64748B', margin: 0 }}>
+                Edit anything on any tab, then press <strong>Save All Changes</strong> at the top once — everything saves together.
+              </p>
             </div>
           </div>
         )}
@@ -1218,6 +1492,7 @@ export default function FacultyProfilePage() {
                         })
                       }
                     >
+                      <option value="">Select Course</option>
                       <option value="B.E.">B.E.</option>
                       <option value="B.Tech">B.Tech</option>
                       <option value="B.Sc">B.Sc</option>
@@ -1270,6 +1545,7 @@ export default function FacultyProfilePage() {
                         })
                       }
                     >
+                      <option value="">Select Class</option>
                       {CLASSES.map((c) => (
                         <option key={c} value={c}>{c}</option>
                       ))}
@@ -1291,6 +1567,7 @@ export default function FacultyProfilePage() {
                         })
                       }
                     >
+                      <option value="">Select University</option>
                       {UNIVERSITIES.map((u) => (
                         <option key={u} value={u}>{u}</option>
                       ))}
@@ -1313,6 +1590,24 @@ export default function FacultyProfilePage() {
                     />
                   )}
                 </div>
+
+                <div>
+                  <label className="profile-field-label">Passing Year <span className="req-star">*</span></label>
+                  <input
+                    type="number"
+                    min="1950"
+                    max={new Date().getFullYear() + 1}
+                    placeholder="YYYY"
+                    className="profile-field-input"
+                    value={qualifications.graduation.passingYear}
+                    onChange={(e) =>
+                      setQualifications({
+                        ...qualifications,
+                        graduation: { ...qualifications.graduation, passingYear: e.target.value },
+                      })
+                    }
+                  />
+                </div>
               </div>
             </div>
 
@@ -1333,6 +1628,7 @@ export default function FacultyProfilePage() {
                         })
                       }
                     >
+                      <option value="">Select Course</option>
                       <option value="M.E.">M.E.</option>
                       <option value="M.Tech">M.Tech</option>
                       <option value="M.S.">M.S.</option>
@@ -1385,6 +1681,7 @@ export default function FacultyProfilePage() {
                         })
                       }
                     >
+                      <option value="">Select Class</option>
                       {CLASSES.map((c) => (
                         <option key={c} value={c}>{c}</option>
                       ))}
@@ -1406,6 +1703,7 @@ export default function FacultyProfilePage() {
                         })
                       }
                     >
+                      <option value="">Select University</option>
                       {UNIVERSITIES.map((u) => (
                         <option key={u} value={u}>{u}</option>
                       ))}
@@ -1427,6 +1725,24 @@ export default function FacultyProfilePage() {
                       }
                     />
                   )}
+                </div>
+
+                <div>
+                  <label className="profile-field-label">Passing Year <span className="req-star">*</span></label>
+                  <input
+                    type="number"
+                    min="1950"
+                    max={new Date().getFullYear() + 1}
+                    placeholder="YYYY"
+                    className="profile-field-input"
+                    value={qualifications.postGraduation.passingYear}
+                    onChange={(e) =>
+                      setQualifications({
+                        ...qualifications,
+                        postGraduation: { ...qualifications.postGraduation, passingYear: e.target.value },
+                      })
+                    }
+                  />
                 </div>
               </div>
             </div>
@@ -1478,6 +1794,7 @@ export default function FacultyProfilePage() {
                         })
                       }
                     >
+                      <option value="">Select Status</option>
                       <option value="Awarded">Awarded</option>
                       <option value="Pursuing">Pursuing</option>
                       <option value="Submitted">Thesis Submitted</option>
@@ -1496,6 +1813,24 @@ export default function FacultyProfilePage() {
                       setQualifications({
                         ...qualifications,
                         phd: { ...qualifications.phd, university: e.target.value },
+                      })
+                    }
+                  />
+                </div>
+
+                <div>
+                  <label className="profile-field-label">Passing Year <span className="req-star">*</span></label>
+                  <input
+                    type="number"
+                    min="1950"
+                    max={new Date().getFullYear() + 1}
+                    placeholder="YYYY"
+                    className="profile-field-input"
+                    value={qualifications.phd.passingYear}
+                    onChange={(e) =>
+                      setQualifications({
+                        ...qualifications,
+                        phd: { ...qualifications.phd, passingYear: e.target.value },
                       })
                     }
                   />
@@ -1550,6 +1885,7 @@ export default function FacultyProfilePage() {
                         })
                       }
                     >
+                      <option value="">Select Class</option>
                       <option value="Distinction">Distinction</option>
                       <option value="First Class">First Class</option>
                       <option value="Pass">Pass</option>
@@ -1572,22 +1908,33 @@ export default function FacultyProfilePage() {
                     }
                   />
                 </div>
+
+                <div>
+                  <label className="profile-field-label">Passing Year <span className="req-star">*</span></label>
+                  <input
+                    type="number"
+                    min="1950"
+                    max={new Date().getFullYear() + 1}
+                    placeholder="YYYY"
+                    className="profile-field-input"
+                    value={qualifications.other.passingYear}
+                    onChange={(e) =>
+                      setQualifications({
+                        ...qualifications,
+                        other: { ...qualifications.other, passingYear: e.target.value },
+                      })
+                    }
+                  />
+                </div>
               </div>
             </div>
 
             </fieldset>
 
-            {/* Bottom Save Changes Button */}
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: '0.5rem' }}>
-              <button
-                className="profile-action-btn"
-                onClick={() => handleSave('Qualification Details')}
-                disabled={fieldsLocked || saving}
-                style={{ opacity: fieldsLocked ? 0.55 : 1 }}
-                title={fieldsLocked ? 'Click Edit Profile first' : 'Save changes and lock the profile'}
-              >
-                {saving ? 'Saving…' : 'Save Changes'}
-              </button>
+              <p style={{ fontSize: '0.8125rem', color: '#64748B', margin: 0 }}>
+                Edit anything on any tab, then press <strong>Save All Changes</strong> at the top once — everything saves together.
+              </p>
             </div>
           </div>
         )}
@@ -1740,17 +2087,10 @@ export default function FacultyProfilePage() {
 
             </fieldset>
 
-            {/* Bottom Save Changes Button */}
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: '0.5rem' }}>
-              <button
-                className="profile-action-btn"
-                onClick={() => handleSave('Academic Details')}
-                disabled={fieldsLocked || saving}
-                style={{ opacity: fieldsLocked ? 0.55 : 1 }}
-                title={fieldsLocked ? 'Click Edit Profile first' : 'Save changes and lock the profile'}
-              >
-                {saving ? 'Saving…' : 'Save Changes'}
-              </button>
+              <p style={{ fontSize: '0.8125rem', color: '#64748B', margin: 0, textAlign: 'center' }}>
+                Edit anything on any tab, then press <strong>Save All Changes</strong> at the top once — everything saves together.
+              </p>
             </div>
           </div>
         )}
@@ -1816,15 +2156,9 @@ export default function FacultyProfilePage() {
 
             {/* Bottom Save Changes Button */}
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: '0.5rem' }}>
-              <button
-                className="profile-action-btn"
-                onClick={() => handleSave('Bank Details')}
-                disabled={fieldsLocked || saving}
-                style={{ opacity: fieldsLocked ? 0.55 : 1 }}
-                title={fieldsLocked ? 'Click Edit Profile first' : 'Save changes and lock the profile'}
-              >
-                {saving ? 'Saving…' : 'Save Changes'}
-              </button>
+              <p style={{ fontSize: '0.8125rem', color: '#64748B', margin: 0 }}>
+                Edit anything on any tab, then press <strong>Save All Changes</strong> at the top once — everything saves together.
+              </p>
             </div>
           </div>
         )}
@@ -1862,8 +2196,14 @@ export default function FacultyProfilePage() {
                       accept=".jpg,.jpeg,.png"
                       style={{ display: 'none' }}
                       onChange={(e) => {
-                        if (e.target.files[0]) {
-                          setDocuments({ ...documents, passportPhotoName: e.target.files[0].name });
+                        const f = e.target.files[0];
+                        if (f) {
+                          if (f.size > 150 * 1024) {
+                            showError(`Photo too large (${Math.round(f.size / 1024)} KB). Max 150 KB (same as student side).`);
+                            e.target.value = '';
+                            return;
+                          }
+                          setDocuments({ ...documents, passportPhotoName: f.name, passportPhotoFile: f });
                         }
                       }}
                     />
@@ -1903,8 +2243,14 @@ export default function FacultyProfilePage() {
                       accept=".jpg,.jpeg,.png"
                       style={{ display: 'none' }}
                       onChange={(e) => {
-                        if (e.target.files[0]) {
-                          setDocuments({ ...documents, signatureName: e.target.files[0].name });
+                        const f = e.target.files[0];
+                        if (f) {
+                          if (f.size > 150 * 1024) {
+                            showError(`Signature too large (${Math.round(f.size / 1024)} KB). Max 150 KB (same as student side).`);
+                            e.target.value = '';
+                            return;
+                          }
+                          setDocuments({ ...documents, signatureName: f.name, signatureFile: f });
                         }
                       }}
                     />
@@ -1939,10 +2285,15 @@ export default function FacultyProfilePage() {
                   </label>
                   <input
                     type="text"
+                    inputMode="numeric"
+                    placeholder={documents.aadhaarMasked || '12-digit Aadhaar'}
                     className="profile-field-input"
                     value={documents.aadhaarNumber}
-                    onChange={(e) => setDocuments({ ...documents, aadhaarNumber: e.target.value })}
+                    onChange={(e) => setDocuments({ ...documents, aadhaarNumber: e.target.value.replace(/\D/g, '').slice(0, 12) })}
                   />
+                  {documents.aadhaarMasked && (
+                    <p style={{ fontSize: '0.75rem', color: '#64748B', margin: '0.25rem 0 0' }}>Stored: {documents.aadhaarMasked} (encrypted, unverified until admin checks)</p>
+                  )}
                 </div>
 
                 <div>
@@ -1957,8 +2308,14 @@ export default function FacultyProfilePage() {
                         accept=".pdf"
                         style={{ display: 'none' }}
                         onChange={(e) => {
-                          if (e.target.files[0]) {
-                            setDocuments({ ...documents, aadhaarFileName: e.target.files[0].name });
+                          const f = e.target.files[0];
+                          if (f) {
+                            if (f.size > 300 * 1024) {
+                              showError(`Aadhaar file too large (${Math.round(f.size / 1024)} KB). Max 300 KB.`);
+                              e.target.value = '';
+                              return;
+                            }
+                            setDocuments({ ...documents, aadhaarFileName: f.name, aadhaarFile: f });
                           }
                         }}
                       />
@@ -1981,10 +2338,14 @@ export default function FacultyProfilePage() {
                   </label>
                   <input
                     type="text"
+                    placeholder={documents.panMasked || 'ABCDE1234F'}
                     className="profile-field-input"
                     value={documents.panNumber}
-                    onChange={(e) => setDocuments({ ...documents, panNumber: e.target.value.toUpperCase() })}
+                    onChange={(e) => setDocuments({ ...documents, panNumber: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10) })}
                   />
+                  {documents.panMasked && (
+                    <p style={{ fontSize: '0.75rem', color: '#64748B', margin: '0.25rem 0 0' }}>Stored: {documents.panMasked} (encrypted, unverified until admin checks)</p>
+                  )}
                 </div>
 
                 <div>
@@ -1999,8 +2360,14 @@ export default function FacultyProfilePage() {
                         accept=".pdf"
                         style={{ display: 'none' }}
                         onChange={(e) => {
-                          if (e.target.files[0]) {
-                            setDocuments({ ...documents, panFileName: e.target.files[0].name });
+                          const f = e.target.files[0];
+                          if (f) {
+                            if (f.size > 300 * 1024) {
+                              showError(`PAN file too large (${Math.round(f.size / 1024)} KB). Max 300 KB.`);
+                              e.target.value = '';
+                              return;
+                            }
+                            setDocuments({ ...documents, panFileName: f.name, panFile: f });
                           }
                         }}
                       />
@@ -2015,17 +2382,10 @@ export default function FacultyProfilePage() {
 
             </fieldset>
 
-            {/* Bottom Upload Documents Button */}
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: '0.5rem' }}>
-              <button
-                className="profile-action-btn"
-                onClick={() => handleSave('Documents')}
-                disabled={fieldsLocked || saving}
-                style={{ opacity: fieldsLocked ? 0.55 : 1 }}
-                title={fieldsLocked ? 'Click Edit Profile first' : 'Save changes and lock the profile'}
-              >
-                {saving ? 'Saving…' : 'Upload Documents'}
-              </button>
+              <p style={{ fontSize: '0.8125rem', color: '#64748B', margin: 0 }}>
+                Edit anything on any tab, then press <strong>Save All Changes</strong> at the top once — everything saves together.
+              </p>
             </div>
           </div>
         )}

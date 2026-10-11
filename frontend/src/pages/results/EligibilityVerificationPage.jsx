@@ -35,7 +35,7 @@ export default function EligibilityVerificationPage() {
   const isViewingAsHOD = activeRole?.codename === 'HOD';
 
   const canEndorseHOD = !isViewingAsTeacher && (isViewingAsHOD || hasRole('HOD') || hasRole('ADMIN_HEAD') || user?.is_superuser);
-  const canReviewTeacher = isViewingAsTeacher || hasRole('CLASS_TEACHER') || hasRole('ADMIN_HEAD') || user?.is_superuser;
+  const canReviewTeacher = isViewingAsTeacher || hasRole('CLASS_TEACHER') || user?.is_superuser;
 
   // Class cards state
   const [classes, setClasses] = useState([]);
@@ -68,6 +68,13 @@ export default function EligibilityVerificationPage() {
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [studentResults, setStudentResults] = useState([]);
   const [loadingStudentResults, setLoadingStudentResults] = useState(false);
+  // Bulk flag-a-cross-semesters state (one remarks, many rows, atomic).
+  const [studentEVs, setStudentEVs] = useState([]);
+  const [loadingStudentEVs, setLoadingStudentEVs] = useState(false);
+  const [bulkSelected, setBulkSelected] = useState([]);
+  const [bulkRemarks, setBulkRemarks] = useState('');
+  const [bulkError, setBulkError] = useState(null);
+  const [bulkFlagging, setBulkFlagging] = useState(false);
   const [actionType, setActionType] = useState('TEACHER_REVIEW'); // 'TEACHER_REVIEW' | 'HOD_ENDORSE' | 'VIEW_ONLY'
   const [reviewMode, setReviewMode] = useState(null); // null | 'APPROVE' | 'FLAG' | 'FAIL'
   const [decisionRemarks, setDecisionRemarks] = useState('');
@@ -218,6 +225,11 @@ export default function EligibilityVerificationPage() {
     setReviewMode(null);
     setDecisionRemarks('');
     setReviewError(null);
+    // Bulk-flag picker resets per student.
+    setStudentEVs([]);
+    setBulkSelected([]);
+    setBulkRemarks('');
+    setBulkError(null);
 
     // Fetch complete semester results for this student
     setLoadingStudentResults(true);
@@ -227,10 +239,66 @@ export default function EligibilityVerificationPage() {
       })
       .catch(() => setStudentResults([]))
       .finally(() => setLoadingStudentResults(false));
+
+    // Fetch this student's verification rows across semesters for bulk flag.
+    setLoadingStudentEVs(true);
+    resultsApi.getEligibilities({ student_id: student.student_id })
+      .then((res) => {
+        setStudentEVs(res.data?.results || res.data || []);
+      })
+      .catch(() => setStudentEVs([]))
+      .finally(() => setLoadingStudentEVs(false));
+  };
+
+  const toggleBulkSemester = (targetNum) => {
+    setBulkSelected((prev) =>
+      prev.includes(targetNum) ? prev.filter((n) => n !== targetNum) : [...prev, targetNum]
+    );
+  };
+
+  const handleBulkFlagSubmit = async () => {
+    if (!selectedStudent) return;
+    if (bulkSelected.length === 0) {
+      setBulkError('Tick at least one semester to flag.');
+      return;
+    }
+    if (!bulkRemarks.trim()) {
+      setBulkError('Remarks are required — they become the permanent audit record.');
+      return;
+    }
+    try {
+      setBulkFlagging(true);
+      setBulkError(null);
+      const res = await resultsApi.bulkFlagSemesters(
+        selectedStudent.student_id, bulkSelected, bulkRemarks.trim()
+      );
+      showNotice(res.data?.detail || `Flagged ${bulkSelected.length} semester(s). Only those reopen for the student.`, 6000);
+      setBulkSelected([]);
+      setBulkRemarks('');
+      // Refresh roster + this student's rows so checkboxes and statuses update.
+      if (selectedClass) loadClassRoster(selectedClass.division_id);
+      loadClasses();
+      const evRes = await resultsApi.getEligibilities({ student_id: selectedStudent.student_id });
+      setStudentEVs(evRes.data?.results || evRes.data || []);
+    } catch (err) {
+      setBulkError(err.response?.data?.detail || 'Failed to flag semesters. Nothing was flagged.');
+    } finally {
+      setBulkFlagging(false);
+    }
   };
 
   const handleReviewSubmit = async (statusChoice, remarksText) => {
     if (!selectedStudent || !selectedStudent.eligibility_id) return;
+    // Client-side mirror of the backend gate: never send a review the
+    // server will reject — show the exact blocking reason instead.
+    if (!selectedStudent.result_filled) {
+      setReviewError('Semester results are not yet filled for this student. Review is blocked until all results are filled.');
+      return;
+    }
+    if (selectedStudent.profile_locked === false) {
+      setReviewError('Student has not locked their profile yet. Review is blocked until the student fills all details and locks their profile.');
+      return;
+    }
     if ((statusChoice === 'FLAGGED' || statusChoice === 'REJECTED') && !remarksText.trim()) {
       setReviewError('Please specify the reason — it becomes the permanent audit record.');
       return;
@@ -1062,6 +1130,45 @@ export default function EligibilityVerificationPage() {
                               {s.current_semester !== selectedClass?.semester_number ? ' · moved up' : ''}
                             </span>
                           </div>
+                          <div style={{ marginTop: '4px' }}>
+                            {s.profile_locked ? (
+                              <span
+                                title="Student filled all details and locked their profile"
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  fontSize: '0.68rem',
+                                  fontWeight: 700,
+                                  padding: '0.1rem 0.5rem',
+                                  borderRadius: '6px',
+                                  backgroundColor: '#f0fdf4',
+                                  color: '#15803d',
+                                  border: '1px solid #bbf7d0',
+                                }}
+                              >
+                                <Lock size={10} style={{ marginRight: '3px' }} />
+                                Profile Locked
+                              </span>
+                            ) : (
+                              <span
+                                title="Review is blocked until the student fills all details and locks their profile"
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  fontSize: '0.68rem',
+                                  fontWeight: 700,
+                                  padding: '0.1rem 0.5rem',
+                                  borderRadius: '6px',
+                                  backgroundColor: '#fffbeb',
+                                  color: '#b45309',
+                                  border: '1px solid #fde68a',
+                                }}
+                              >
+                                <Clock size={10} style={{ marginRight: '3px' }} />
+                                Profile Not Locked — review blocked
+                              </span>
+                            )}
+                          </div>
                         </td>
 
                         {/* 1. Result Filled */}
@@ -1322,6 +1429,13 @@ export default function EligibilityVerificationPage() {
                               <button
                                 type="button"
                                 onClick={() => handleOpenReviewModal(s, 'VIEW_ONLY')}
+                                title={
+                                  !s.result_filled
+                                    ? 'Results not yet filled — review blocked until all results are filled'
+                                    : s.profile_locked === false
+                                    ? 'Waiting for student to lock profile — review blocked'
+                                    : 'View results'
+                                }
                                 className="edvana-btn edvana-btn-secondary"
                                 style={{
                                   padding: '0.35rem 0.65rem',
@@ -1658,6 +1772,33 @@ export default function EligibilityVerificationPage() {
               </div>
             </div>
 
+            {/* Prerequisite gate: profile lock + ALL results filled */}
+            {(selectedStudent.review_blocked_reason || selectedStudent.profile_locked === false) && (
+              <div
+                style={{
+                  backgroundColor: '#fffbeb',
+                  border: '1px solid #fde68a',
+                  borderRadius: '10px',
+                  padding: '0.85rem 1.1rem',
+                  display: 'flex',
+                  gap: '0.6rem',
+                  alignItems: 'flex-start',
+                  fontSize: '0.8125rem',
+                  color: '#92400e',
+                  lineHeight: 1.5,
+                }}
+              >
+                <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '1px' }} />
+                <span>
+                  {selectedStudent.review_blocked_reason === 'PROFILE_UNLOCKED' || selectedStudent.profile_locked === false
+                    ? 'Student has not locked their profile yet. Review is blocked until the student fills all details and locks their profile.'
+                    : (selectedStudent.missing_result_semesters || []).length > 0
+                    ? `Semester results missing for Sem ${(selectedStudent.missing_result_semesters || []).join(', Sem ')}. Review is blocked until all results (Sem 1 to current) are filled.`
+                    : 'Semester results are not yet filled for this student. Review is blocked until all results are filled.'}
+                </span>
+              </div>
+            )}
+
             {/* Semester Results Marksheets */}
             <div>
               <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#0f172a', marginBottom: '0.75rem' }}>
@@ -1752,6 +1893,120 @@ export default function EligibilityVerificationPage() {
                 </div>
               )}
             </div>
+
+            {/* Bulk flag across semesters (teacher picks sems, only those reopen) */}
+            {actionType === 'TEACHER_REVIEW' && canReviewTeacher && (
+              <div
+                style={{
+                  border: '1px solid #fde68a',
+                  backgroundColor: '#fffbeb',
+                  borderRadius: '10px',
+                  padding: '1rem 1.25rem',
+                }}
+              >
+                <h4 style={{ fontSize: '0.9rem', fontWeight: 800, color: '#92400e', margin: '0 0 0.25rem' }}>
+                  Flag corrections for several semesters at once
+                </h4>
+                <p style={{ fontSize: '0.78rem', color: '#78350f', margin: '0 0 0.75rem', lineHeight: 1.5 }}>
+                  Tick the semesters that need correction, write one note, and flag them together.
+                  Only the ticked semesters reopen for the student — everything else keeps its state.
+                  All-or-nothing: if one cannot be flagged, none are.
+                </p>
+                {loadingStudentEVs ? (
+                  <div style={{ fontSize: '0.8125rem', color: '#92400e' }}>Loading semester rows…</div>
+                ) : studentEVs.length === 0 ? (
+                  <div style={{ fontSize: '0.8125rem', color: '#92400e' }}>
+                    No verification rows for this student yet. Start verification first.
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                      {[...studentEVs]
+                        .sort((a, b) => (a.target_semester_number || 0) - (b.target_semester_number || 0))
+                        .map((ev) => {
+                          const num = ev.target_semester_number;
+                          const lockedRow = Boolean(ev.is_locked_for_teacher);
+                          const checked = bulkSelected.includes(num);
+                          return (
+                            <label
+                              key={ev.id}
+                              title={lockedRow ? 'Already decided — HOD must flag it back before it can be flagged again' : `Flag Sem ${num} for correction`}
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '0.4rem',
+                                padding: '0.4rem 0.75rem',
+                                borderRadius: '8px',
+                                fontSize: '0.8rem',
+                                fontWeight: 700,
+                                backgroundColor: checked ? '#fef3c7' : '#ffffff',
+                                color: lockedRow ? '#94a3b8' : '#92400e',
+                                border: checked ? '2px solid #d97706' : '1px solid #fde68a',
+                                cursor: lockedRow ? 'not-allowed' : 'pointer',
+                                opacity: lockedRow ? 0.65 : 1,
+                              }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={lockedRow || bulkFlagging}
+                                onChange={() => toggleBulkSemester(num)}
+                              />
+                              <span>Sem {num}</span>
+                              <span style={{ fontWeight: 500, fontSize: '0.72rem' }}>
+                                ({ev.class_teacher_status_display || ev.class_teacher_status})
+                              </span>
+                            </label>
+                          );
+                        })}
+                    </div>
+                    <textarea
+                      className="edvana-input"
+                      rows={2}
+                      placeholder="One correction note for all ticked semesters (e.g. Sem 2 and 3 marksheets need re-upload)…"
+                      value={bulkRemarks}
+                      onChange={(e) => setBulkRemarks(e.target.value)}
+                      disabled={bulkFlagging}
+                      style={{ width: '100%', marginBottom: '0.6rem' }}
+                    />
+                    {bulkError && (
+                      <div style={{ fontSize: '0.8rem', color: '#b91c1c', fontWeight: 600, marginBottom: '0.6rem' }}>
+                        {bulkError}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleBulkFlagSubmit}
+                      disabled={bulkFlagging || bulkSelected.length === 0}
+                      className="edvana-btn"
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '0.45rem',
+                        padding: '0.55rem 1.1rem',
+                        borderRadius: '8px',
+                        fontSize: '0.83rem',
+                        fontWeight: 700,
+                        backgroundColor: '#b45309',
+                        color: '#ffffff',
+                        border: 'none',
+                        cursor: bulkFlagging || bulkSelected.length === 0 ? 'not-allowed' : 'pointer',
+                        opacity: bulkFlagging || bulkSelected.length === 0 ? 0.6 : 1,
+                      }}
+                    >
+                      <Flag size={14} />
+                      <span>
+                        {bulkFlagging
+                          ? 'Flagging…'
+                          : bulkSelected.length === 0
+                          ? 'Tick semesters to flag'
+                          : `Flag ${bulkSelected.length} semester${bulkSelected.length === 1 ? '' : 's'} together`}
+                      </span>
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
 
             {/* Review Error Display */}
             {reviewError && (

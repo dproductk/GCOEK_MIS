@@ -80,10 +80,45 @@ class SubjectViewSet(_SysadminWriteMixin, viewsets.ModelViewSet):
                       reason='Sysadmin curriculum configuration',
                       description=f"Created subject {obj.code}.")
 
+    #: Fields that change marks-entry validation (results/services.py reads
+    #: them live from Subject) or credit/SGPA inputs. Editing these on a
+    #: subject already used outside DRAFT schemes would silently move the
+    #: goalposts for published cohorts. Title/abbreviation/is_active stay
+    #: editable as harmless metadata fixes.
+    RESULT_AFFECTING_FIELDS = frozenset({
+        'code', 'course_category', 'lecture_hours', 'practical_hours',
+        'ca_max_marks', 'mse_max_marks', 'ese_max_marks',
+        'practical_ca_max_marks', 'practical_ese_max_marks', 'credits',
+    })
+
     def update(self, request, *args, **kwargs):
         denied = self._deny_unless_manager()
         if denied:
             return denied
+        obj = self.get_object()
+        data = request.data or {}
+        # Identifier stability: the marks engine looks subjects up by code.
+        if 'code' in data and str(data.get('code') or '').strip().lower() != str(obj.code or '').lower():
+            if obj.scheme_occurrences.exists() or obj.elective_options.exists():
+                return Response(
+                    {'code': 'Subject is used by a scheme; code cannot be renamed. Create a new subject instead.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        touched = [f for f in self.RESULT_AFFECTING_FIELDS if f in data and f != 'code']
+        if touched:
+            live_use = (
+                obj.scheme_occurrences.exclude(scheme__status=Scheme.Status.DRAFT).exists()
+                or obj.elective_options.exclude(elective_group__scheme__status=Scheme.Status.DRAFT).exists()
+            )
+            if live_use:
+                return Response(
+                    {'detail': (
+                        'Subject is used by a published/retired scheme. '
+                        f'Result-affecting fields ({", ".join(sorted(touched))}) are frozen; '
+                        'create a new subject code and a new scheme version instead.'
+                    )},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         return super().update(request, *args, **kwargs)
 
     def perform_update(self, serializer):
@@ -287,6 +322,123 @@ class SchemeViewSet(_SysadminWriteMixin, viewsets.ModelViewSet):
                   reason='Scheme retired',
                   description=f"Retired scheme {obj.code} v{obj.version}.")
         return Response(SchemeSerializer(obj).data)
+
+    @action(detail=True, methods=['post'], url_path='clone')
+    def clone_version(self, request, pk=None):
+        """Atomically create version+1 DRAFT + copy all subject links.
+
+        Body: {} (auto version+1) or {"version": N, "effective_from_year": <id>}.
+        All-or-nothing: any link failure rolls back the whole clone.
+        """
+        denied = self._deny_unless_manager()
+        if denied:
+            return denied
+        src = self.get_object()
+        req_version = request.data.get('version', None)
+        try:
+            next_version = int(req_version) if req_version not in (None, '') else int(src.version or 1) + 1
+        except (TypeError, ValueError):
+            return Response({'version': 'Version must be a number.'}, status=status.HTTP_400_BAD_REQUEST)
+        if next_version <= int(src.version or 1):
+            return Response(
+                {'version': f'New version must be greater than the source version ({src.version}).'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        from_year = request.data.get('effective_from_year', None) or src.effective_from_year_id
+        from apps.academic_structure.models import AcademicYear
+        if from_year is not None and not AcademicYear.objects.filter(id=from_year).exists():
+            return Response({'effective_from_year': 'Academic year not found.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            with transaction.atomic():
+                clone = Scheme.objects.create(
+                    code=src.code,
+                    name=request.data.get('name', None) or src.name,
+                    program=src.program,
+                    department=src.department,
+                    effective_from_year_id=from_year,
+                    effective_to_year=None,
+                    version=next_version,
+                    status=Scheme.Status.DRAFT,
+                    min_theory_marks=src.min_theory_marks,
+                    min_total_marks=src.min_total_marks,
+                    max_backlogs_for_atkt=src.max_backlogs_for_atkt,
+                )
+                from apps.curriculum.models import SchemeElectiveGroup, SchemeElectiveOption
+                group_map = {}
+                for grp in src.elective_groups.all().order_by('semester_number', 'group_code'):
+                    new_grp = SchemeElectiveGroup.objects.create(
+                        scheme=clone,
+                        semester_number=grp.semester_number,
+                        group_code=grp.group_code,
+                        title=grp.title,
+                        minimum_selection=grp.minimum_selection,
+                        maximum_selection=grp.maximum_selection,
+                    )
+                    group_map[str(grp.id)] = new_grp
+                copied = 0
+                link_map = {}
+                for link in src.scheme_subjects.all().order_by('semester_number', 'display_order'):
+                    new_link = SchemeSubject.objects.create(
+                        scheme=clone,
+                        subject=link.subject,
+                        semester_number=link.semester_number,
+                        course_code=link.course_code,
+                        course_level_code=link.course_level_code,
+                        course_type_code=link.course_type_code,
+                        credits=link.credits,
+                        total_marks=link.total_marks,
+                        is_elective=link.is_elective,
+                        elective_group=group_map.get(str(link.elective_group_id)) if link.elective_group_id else None,
+                        display_order=link.display_order,
+                    )
+                    link_map[str(link.id)] = new_link
+                    copied += 1
+                for opt in SchemeElectiveOption.objects.filter(elective_group__scheme=src).select_related('elective_group'):
+                    new_grp = group_map.get(str(opt.elective_group_id))
+                    if new_grp is None:
+                        continue
+                    SchemeElectiveOption.objects.create(
+                        elective_group=new_grp,
+                        subject=opt.subject,
+                        scheme_subject=link_map.get(str(opt.scheme_subject_id)) if opt.scheme_subject_id else None,
+                        display_order=opt.display_order,
+                    )
+                assessment_warnings = []
+                try:
+                    from apps.curriculum.services import ensure_assessment_components
+                    for link in clone.scheme_subjects.all():
+                        try:
+                            ensure_assessment_components(link)
+                        except Exception as _link_exc:
+                            assessment_warnings.append(
+                                f'{link.course_code}: {str(_link_exc)[:200]}'
+                            )
+                except Exception as _svc_exc:
+                    assessment_warnings.append(f'setup skipped: {str(_svc_exc)[:200]}')
+                if assessment_warnings:
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        'Scheme clone %s v%s: %d assessment-component warning(s): %s',
+                        clone.code, clone.version, len(assessment_warnings),
+                        '; '.join(assessment_warnings[:5]),
+                    )
+                audit_log(request=request, actor=request.user, action=AuditLog.Action.CREATE,
+                          target_type='Scheme', target_id=str(clone.id),
+                          target_display=f'{clone.code} v{clone.version}',
+                          new_value={'code': clone.code, 'version': clone.version, 'copied_subjects': copied,
+                                     'assessment_warnings': assessment_warnings[:10]},
+                          reason=f'Cloned from {src.code} v{src.version}',
+                          description=f"Cloned scheme {src.code} v{src.version} to v{clone.version} ({copied} subjects).")
+                payload = SchemeSerializer(clone).data
+                if assessment_warnings:
+                    payload['assessment_warnings'] = assessment_warnings
+                    payload['detail'] = (
+                        f'Cloned with {len(assessment_warnings)} assessment-component warning(s); '
+                        'review components before publishing.'
+                    )
+                return Response(payload, status=status.HTTP_201_CREATED)
+        except IntegrityError:
+            return Response({'detail': 'Scheme code+version already exists.'}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class _SchemeChildMixin(_SysadminWriteMixin):

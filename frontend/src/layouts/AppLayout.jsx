@@ -78,7 +78,6 @@ const NAV_CONFIG = {
         links: [
           { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
           { to: '/students', label: 'Student Directory', icon: Users },
-          { to: '/eligibility', label: 'Student Result Verification', icon: ClipboardList },
           { to: '/departments', label: 'Academic Structure', icon: Building2 },
           { to: '/schemes', label: 'Schemes & Subjects', icon: BookOpen },
           { to: '/profile', label: 'Profile', icon: UserCircle },

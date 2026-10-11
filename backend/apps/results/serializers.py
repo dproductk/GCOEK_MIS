@@ -113,6 +113,7 @@ class EligibilityVerificationSerializer(serializers.ModelSerializer):
     class_teacher_name = serializers.SerializerMethodField()
     hod_name = serializers.SerializerMethodField()
     semester_results = serializers.SerializerMethodField()
+    student_profile_locked = serializers.BooleanField(source='student.profile_locked', read_only=True)
 
     class Meta:
         model = EligibilityVerification
@@ -139,6 +140,7 @@ class EligibilityVerificationSerializer(serializers.ModelSerializer):
             'hod_name',
             'final_eligible',
             'is_locked_for_teacher',
+            'student_profile_locked',
             'semester_results',
         ]
 

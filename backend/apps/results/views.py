@@ -48,6 +48,38 @@ def staff_display_name(user):
     return full or getattr(user, 'username', '')
 
 
+def _admission_student_allowed(user, scopes, student):
+    """Scope check for admission-form-data/pdf (PII-heavy). Mirrors class-roster."""
+    if scopes.get('is_system_wide') or 'ADMIN_HEAD' in scopes.get('roles', []):
+        return True
+    if 'ACCOUNTANT' in scopes.get('roles', []):
+        # Fee desk needs admission data college-wide (same as eligible-candidates).
+        return True
+    roles = scopes.get('roles', [])
+    # Student own only
+    if 'STUDENT' in roles and len([r for r in roles if r in ('HOD', 'CLASS_TEACHER', 'FACULTY', 'ACCOUNTANT', 'ADMIN_HEAD')]) == 0:
+        return getattr(student, 'user_id', None) == getattr(user, 'id', None)
+    if 'HOD' in roles:
+        enr = student.enrollments.filter(is_current=True).first()
+        if enr and str(enr.department_id) in {str(d) for d in scopes.get('department_ids', [])}:
+            return True
+        # Historical dept membership also counts (promoted-out still viewable).
+        if student.enrollments.filter(department_id__in=scopes.get('department_ids', [])).exists():
+            return True
+        return False
+    if 'CLASS_TEACHER' in roles:
+        enr = student.enrollments.filter(is_current=True).select_related('division').first()
+        div = getattr(enr, 'division', None) if enr else None
+        if div is None:
+            return False
+        assigned = {str(x) for x in scopes.get('division_ids', [])}
+        if div.class_teacher_id == getattr(user, 'id', None) or str(div.id) in assigned:
+            return True
+        return False
+    # Plain FACULTY: no PII access (eligibility link removed from nav).
+    return False
+
+
 class SemesterResultViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Semester Marksheet and Results ViewSet.
@@ -116,7 +148,8 @@ class SemesterResultViewSet(viewsets.ReadOnlyModelViewSet):
                 qs = qs.filter(student__enrollments__division_id__in=div_ids, student__enrollments__is_current=True)
             elif 'STUDENT' in scopes['roles']:
                 qs = qs.filter(student__user_id=user.id, is_published=True)
-            elif 'FACULTY' not in scopes['roles']:
+            else:
+                # Plain FACULTY and unknown roles get nothing without student_id.
                 return SemesterResult.objects.none()
 
         semester_param = self.request.query_params.get('semester_number') or self.request.query_params.get('semester')
@@ -362,6 +395,41 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
             'student__semester_results__subject_results',
         )
 
+        # Per-student filter for the review modal's semester picker
+        # (one student, many target semesters). Same scoping as the
+        # semester-results endpoint: staff see scoped students, students
+        # see only themselves. History enrollments count (promoted-out
+        # students stay flaggable).
+        student_param = self.request.query_params.get('student_id') or self.request.query_params.get('student')
+        if student_param:
+            if 'STUDENT' in scopes['roles'] and not (scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']):
+                own = Student.objects.filter(user_id=user.id).values_list('id', flat=True)
+                if str(student_param) not in {str(x) for x in own}:
+                    return EligibilityVerification.objects.none()
+                qs = qs.filter(student_id=student_param)
+            elif scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']:
+                qs = qs.filter(student_id=student_param)
+            elif 'HOD' in scopes['roles']:
+                qs = qs.filter(
+                    student_id=student_param,
+                    student__enrollments__department_id__in=scopes['department_ids'],
+                )
+            elif 'CLASS_TEACHER' in scopes['roles']:
+                # Assigned-division only (matches class-roster strictness).
+                # Dept-wide fallback removed: unassigned CTs get nothing here.
+                from apps.academic_structure.models import Division as _Division
+                _ct_div_ids = {str(x) for x in (scopes.get('division_ids') or [])}
+                _ct_div_ids |= {str(x) for x in _Division.objects.filter(class_teacher_id=user.id).values_list('id', flat=True)}
+                if not _ct_div_ids:
+                    return EligibilityVerification.objects.none()
+                qs = qs.filter(
+                    student_id=student_param,
+                    student__enrollments__division_id__in=list(_ct_div_ids),
+                )
+            else:
+                return EligibilityVerification.objects.none()
+            return qs.distinct().order_by('target_semester__number')
+
         dept_param = self.request.query_params.get('department_id') or self.request.query_params.get('department')
         if dept_param:
             qs = qs.filter(department_id=dept_param)
@@ -376,13 +444,14 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
         elif 'HOD' in scopes['roles']:
             filtered_qs = qs.filter(department_id__in=scopes['department_ids'])
         elif 'CLASS_TEACHER' in scopes['roles']:
-            if scopes['division_ids']:
-                filtered_qs = qs.filter(student__enrollments__division_id__in=scopes['division_ids'], student__enrollments__is_current=True)
-            elif scopes['department_ids']:
-                filtered_qs = qs.filter(department_id__in=scopes['department_ids'])
-            else:
-                # F-S3-004: Deny by default if CLASS_TEACHER has no division or department scope
+            # Assigned divisions only (matches classes()/roster). No dept fallback.
+            from apps.academic_structure.models import Division as _Division
+            _assigned = {str(x) for x in (scopes.get('division_ids') or [])}
+            _assigned |= {str(x) for x in _Division.objects.filter(class_teacher_id=user.id).values_list('id', flat=True)}
+            if not _assigned:
                 filtered_qs = qs.none()
+            else:
+                filtered_qs = qs.filter(student__enrollments__division_id__in=list(_assigned), student__enrollments__is_current=True)
         elif 'STUDENT' in scopes['roles']:
             return qs.filter(student__user_id=user.id)
         else:
@@ -740,6 +809,27 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
             )
         }
 
+        # One-time profile lock per student (1 query, no N+1). Missing rows
+        # (should not happen — enrollments always point at students) default
+        # to unlocked so the teacher sees the blocking reason, never a 500.
+        locked_map = dict(
+            Student.objects.filter(id__in=student_ids).values_list('id', 'profile_locked')
+        )
+        # Strict gate mirror: filled-results coverage per student (1 query)
+        # plus DSY start (lateral entry starts at Sem 3). Roster rows gate
+        # review on EVERY semester 1..current being published.
+        stu_info = {
+            r['id']: r for r in Student.objects.filter(
+                id__in=student_ids).values('id', 'is_direct_second_year', 'admission_type')
+        }
+        filled_map = {}
+        for _sid, _num in SemesterResult.objects.filter(
+            student_id__in=student_ids, is_published=True,
+        ).exclude(
+            result_status=SemesterResult.ResultStatus.NOT_YET_HELD
+        ).values_list('student_id', 'semester__number'):
+            filled_map.setdefault(_sid, set()).add(_num)
+
         can_teacher_review = (
             scopes['is_system_wide'] or
             request.user.is_superuser or
@@ -759,6 +849,22 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
             ev = ev_map.get(stu.id)
 
             has_result = sr is not None and sr.result_status != SemesterResult.ResultStatus.NOT_YET_HELD
+            profile_locked = bool(locked_map.get(stu.id, False))
+            # Strict mirror of services._require_student_ready_for_review:
+            # EVERY semester start..current must be published (DSY from 3).
+            _info = stu_info.get(stu.id, {})
+            _dsy = bool(_info.get('is_direct_second_year')) or str(
+                _info.get('admission_type') or '').upper() == 'DSE'
+            _need = set(range(3 if _dsy else 1, (current_sem_num or 1) + 1))
+            missing_result_semesters = sorted(_need - filled_map.get(stu.id, set()))
+            # Mirror of services._require_student_ready_for_review so the UI
+            # disables Review with the exact blocking reason (no silent fail).
+            if not profile_locked:
+                review_blocked_reason = 'PROFILE_UNLOCKED'
+            elif missing_result_semesters:
+                review_blocked_reason = 'RESULT_PENDING'
+            else:
+                review_blocked_reason = None
 
             if moved_up:
                 stage = 'PROMOTED'
@@ -807,12 +913,16 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
                 'final_eligible': ev.final_eligible if ev else False,
                 'is_locked_for_teacher': ev.is_locked_for_teacher if ev else False,
                 'pipeline_stage': stage,
-                'can_review_teacher': (not moved_up) and can_teacher_review and (ev is not None and not ev.is_locked_for_teacher),
+                'profile_locked': profile_locked,
+                'review_blocked_reason': review_blocked_reason,
+                'missing_result_semesters': missing_result_semesters,
+                'can_review_teacher': (not moved_up) and can_teacher_review and (
+                    ev is not None and not ev.is_locked_for_teacher and review_blocked_reason is None),
                 'can_endorse_hod': (not moved_up) and can_hod_endorse and (
                     ev is not None and (
                         ev.class_teacher_status in (EligibilityVerification.StageStatus.APPROVED, EligibilityVerification.StageStatus.REJECTED)
                         or ev.hod_status == EligibilityVerification.StageStatus.REJECTED
-                    )
+                    ) and review_blocked_reason is None
                 ),
             }
 
@@ -993,16 +1103,15 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
             enroll_qs = StudentEnrollment.objects.filter(
                 is_current=True, department_id__in=scopes['department_ids'])
         elif 'CLASS_TEACHER' in scopes['roles']:
-            if scopes['division_ids']:
-                enroll_qs = StudentEnrollment.objects.filter(
-                    is_current=True, division_id__in=scopes['division_ids'])
-            elif scopes['department_ids']:
-                enroll_qs = StudentEnrollment.objects.filter(
-                    is_current=True, department_id__in=scopes['department_ids'])
-            else:
+            from apps.academic_structure.models import Division as _Division
+            _assigned = {str(x) for x in (scopes.get('division_ids') or [])}
+            _assigned |= {str(x) for x in _Division.objects.filter(class_teacher_id=request.user.id).values_list('id', flat=True)}
+            if not _assigned:
                 return Response(
                     {'detail': 'No class assigned to you yet.'},
                     status=status.HTTP_400_BAD_REQUEST)
+            enroll_qs = StudentEnrollment.objects.filter(
+                is_current=True, division_id__in=list(_assigned))
         else:
             return Response(
                 {'detail': 'Only Class Teacher, HOD, or Admin can initialize verifications.'},
@@ -1062,7 +1171,13 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
         HOD uses the separate endorse step. Students without a division fall
         back to any same-department class teacher. Sysadmin may override.
         """
-        ev = self.get_object()
+        # Fetch directly (not via filtered get_queryset) so list scoping
+        # (assigned-only) never turns an allowed review into a 404.
+        # The scope check below is authoritative.
+        try:
+            ev = EligibilityVerification.objects.select_related('student').get(id=pk)
+        except EligibilityVerification.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         scopes = get_user_scopes(request.user)
         allowed = scopes['is_system_wide'] or request.user.is_superuser
         if not allowed and user_has_role(request.user, 'CLASS_TEACHER'):
@@ -1097,10 +1212,134 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+    @action(detail=False, methods=['post'], url_path='bulk-flag')
+    def bulk_flag(self, request):
+        """Flag corrections for one student across several semesters at once.
+
+        Body: {student_id, target_semester_numbers: [2, 3, ...], remarks}.
+        The teacher ticks semesters in the review modal, writes ONE remarks
+        note, and flags all chosen rows in a single atomic transaction:
+        either every chosen row is flagged or none is (no partial flags).
+        Only FLAGGED is allowed here — approvals stay single-row so each
+        decision keeps its own audit trail. Only the flagged rows reopen
+        for student correction; every other row keeps its state.
+        Same scope + prerequisite gates as single review, per row.
+        Teacher-only by design (mirrors review-class-teacher): HODs flag
+        back one semester at a time via endorse-hod.
+        """
+        from django.db import transaction as _transaction
+        from apps.academic_structure.models import Semester as _Semester
+
+        student_id = request.data.get('student_id')
+        raw_numbers = request.data.get('target_semester_numbers') or []
+        remarks = str(request.data.get('remarks') or '').strip()
+        if not student_id:
+            return Response({'detail': 'student_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not remarks:
+            return Response(
+                {'detail': 'Remarks are required — they become the permanent audit record.'},
+                status=status.HTTP_400_BAD_REQUEST)
+        if len(remarks) > 500:
+            return Response(
+                {'detail': 'Remarks must be 500 characters or fewer (audit record limit).'},
+                status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(raw_numbers, list) or not raw_numbers:
+            return Response(
+                {'detail': 'target_semester_numbers list is required (e.g. [2, 3]).'},
+                status=status.HTTP_400_BAD_REQUEST)
+        try:
+            numbers = sorted({int(n) for n in raw_numbers})
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'target_semester_numbers must be integers 1-8.'},
+                status=status.HTTP_400_BAD_REQUEST)
+        if any(n < 1 or n > 8 for n in numbers):
+            return Response(
+                {'detail': 'target_semester_numbers must be integers 1-8.'},
+                status=status.HTTP_400_BAD_REQUEST)
+        if len(numbers) > 8:
+            return Response({'detail': 'Too many semesters at once.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        student = Student.objects.filter(id=student_id).first()
+        if student is None:
+            return Response({'detail': 'Student not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Scope check once for the student (mirrors single review: assigned
+        # division teacher, division scope, or same-department fallback).
+        scopes = get_user_scopes(request.user)
+        allowed = scopes['is_system_wide'] or request.user.is_superuser
+        if not allowed and user_has_role(request.user, 'CLASS_TEACHER'):
+            enr = student.enrollments.filter(is_current=True).select_related('division').first()
+            div_id = enr.division_id if enr and enr.division_id else None
+            if div_id:
+                from apps.academic_structure.models import Division
+                div = Division.objects.filter(id=div_id).first()
+                if div and div.class_teacher_id == request.user.id:
+                    allowed = True
+                elif str(div_id) in {str(d) for d in scopes.get('division_ids', [])}:
+                    allowed = True
+            elif enr and str(enr.department_id) in {str(d) for d in scopes.get('department_ids', [])}:
+                allowed = True
+        if not allowed:
+            return Response(
+                {'detail': 'Only the assigned class teacher of this student may bulk-flag. '
+                           'HODs flag semesters back one at a time via endorse-hod.'},
+                status=status.HTTP_403_FORBIDDEN)
+
+        # Resolve each chosen semester to its verification row: the latest
+        # academic year wins when history rows exist for the same target.
+        targets = []
+        missing = []
+        for num in numbers:
+            sem = _Semester.objects.filter(number=num).first()
+            if sem is None:
+                missing.append(num)
+                continue
+            ev = EligibilityVerification.objects.filter(
+                student=student, target_semester=sem
+            ).select_related('academic_year').order_by(
+                '-academic_year__start_date', '-created_at').first()
+            if ev is None:
+                missing.append(num)
+            else:
+                targets.append((num, ev))
+        if missing:
+            return Response(
+                {'detail': f"No verification row for Sem {', '.join(str(n) for n in missing)}. Start verification first."},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with _transaction.atomic():
+                flagged = []
+                for num, ev in sorted(targets, key=lambda t: str(t[1].id)):
+                    locked_ev = EligibilityVerification.objects.select_for_update().get(id=ev.id)
+                    updated = class_teacher_review_eligibility(
+                        eligibility_id=str(locked_ev.id),
+                        reviewer_user=request.user,
+                        status_decision=EligibilityVerification.StageStatus.FLAGGED,
+                        remarks=remarks,
+                        request=request,
+                    )
+                    flagged.append({
+                        'eligibility_id': str(updated.id),
+                        'target_semester_number': num,
+                        'class_teacher_status': updated.class_teacher_status,
+                    })
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {'detail': f"Flagged {len(flagged)} semester(s) for correction. Only those semesters reopen for the student.",
+             'flagged': flagged},
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=True, methods=['post'], url_path='endorse-hod')
     def endorse_hod(self, request, pk=None):
         """HOD approves or flags/rejects candidate eligibility."""
-        ev = self.get_object()
+        try:
+            ev = EligibilityVerification.objects.select_related('student').get(id=pk)
+        except EligibilityVerification.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         scopes = get_user_scopes(request.user)
         if not (scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']):
             if 'HOD' in scopes['roles']:
@@ -1138,8 +1377,12 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
         eligibility_id = request.query_params.get('eligibility_id')
 
         student = None
-        if student_id and (scopes['is_system_wide'] or any(r in scopes['roles'] for r in ('ADMIN_HEAD', 'ACCOUNTANT', 'HOD', 'CLASS_TEACHER', 'FACULTY'))):
+        if student_id:
             student = Student.objects.filter(id=student_id).first()
+            if not student:
+                return Response({'detail': 'Student profile not found.'}, status=status.HTTP_404_NOT_FOUND)
+            if not _admission_student_allowed(user, scopes, student):
+                return Response({'detail': 'You do not have access to this student.'}, status=status.HTTP_403_FORBIDDEN)
         elif hasattr(user, 'student_profile'):
             student = user.student_profile
         else:
@@ -1166,8 +1409,12 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
         eligibility_id = request.query_params.get('eligibility_id')
 
         student = None
-        if student_id and (scopes['is_system_wide'] or any(r in scopes['roles'] for r in ('ADMIN_HEAD', 'ACCOUNTANT', 'HOD', 'CLASS_TEACHER', 'FACULTY'))):
+        if student_id:
             student = Student.objects.filter(id=student_id).first()
+            if not student:
+                return Response({'detail': 'Student profile not found.'}, status=status.HTTP_404_NOT_FOUND)
+            if not _admission_student_allowed(user, scopes, student):
+                return Response({'detail': 'You do not have access to this student.'}, status=status.HTTP_403_FORBIDDEN)
         elif hasattr(user, 'student_profile'):
             student = user.student_profile
         else:
@@ -1182,6 +1429,12 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
 
         from apps.results.pdf_service import get_student_admission_form_data, generate_admission_verification_pdf
         data = get_student_admission_form_data(student, eligibility=ev)
+        # UI gate is not enough: students may download only when HOD-endorsed.
+        # Staff (HOD/CT/Accountant/Admin) still need pre-approval access for review.
+        _roles = scopes.get('roles', [])
+        _is_staff = bool(scopes.get('is_system_wide') or any(r in _roles for r in ('ADMIN_HEAD', 'ACCOUNTANT', 'HOD', 'CLASS_TEACHER')))
+        if not _is_staff and not data.get('can_download'):
+            return Response({'detail': 'Official PDF unlocks once approved by HOD.'}, status=status.HTTP_403_FORBIDDEN)
         try:
             pdf_bytes = generate_admission_verification_pdf(data)
         except RuntimeError as exc:

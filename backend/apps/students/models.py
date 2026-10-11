@@ -112,6 +112,16 @@ class Student(BaseModel):
         default=ScholarshipType.NONE,
         help_text='Scholarship scheme applied for (NONE when not applied).',
     )
+    profile_locked = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text='One-time self-service lock. When True the student can no longer edit their profile or upload own documents.',
+    )
+    profile_locked_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='When the student locked their profile.',
+    )
     is_active = models.BooleanField(default=True)
 
     class Meta:
@@ -255,6 +265,12 @@ class StudentAadhaarDetail(TimestampedModel):
         primary_key=True,
         related_name='aadhaar_details',
     )
+    name_as_per_aadhaar = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text='Name printed on the Aadhaar card (editable by student, re-verified by staff).',
+    )
     aadhaar_number_encrypted = models.CharField(
         max_length=255,
         help_text='Encrypted Aadhaar number.',
@@ -298,6 +314,53 @@ class StudentBankAccount(BaseModel):
 
     def __str__(self):
         return f'{self.bank_name} - {self.account_number_masked} ({self.student})'
+
+
+class StudentBoardRecord(BaseModel):
+    """
+    Self-reported 10th / 12th / Diploma qualifying examination details.
+
+    Editable by the student via self-service (marksheets stay verified
+    separately through document uploads). One row per level per student.
+    """
+
+    class Level(models.TextChoices):
+        SSC = 'SSC', 'SSC (Class 10th)'
+        HSC = 'HSC', 'HSC (Class 12th)'
+        DIPLOMA = 'DIPLOMA', 'Polytechnic Diploma'
+
+    student = models.ForeignKey(
+        Student,
+        on_delete=models.CASCADE,
+        related_name='board_records',
+    )
+    level = models.CharField(
+        max_length=10,
+        choices=Level.choices,
+        default=Level.SSC,
+        db_index=True,
+    )
+    stream = models.CharField(max_length=100, blank=True, default='')
+    board = models.CharField(max_length=150, blank=True, default='')
+    school_college = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text='School name (SSC) or college/institute name (HSC/Diploma).',
+    )
+    passing_year = models.CharField(max_length=10, blank=True, default='')
+    seat_no = models.CharField(max_length=50, blank=True, default='')
+    marks_obtained = models.CharField(max_length=50, blank=True, default='')
+    percentage = models.CharField(max_length=20, blank=True, default='')
+    is_verified = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = 'student_board_records'
+        ordering = ['student', 'level']
+        unique_together = ['student', 'level']
+
+    def __str__(self):
+        return f'{self.get_level_display()} - {self.student}'
 
 
 class StudentDocument(BaseModel):
