@@ -1,10 +1,13 @@
 import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import resultsApi from '../../api/resultsApi';
+import academicApi from '../../api/academicApi';
 import PageHeader from '../../components/common/PageHeader';
+import Modal from '../../components/common/Modal';
 import { LoadingState, ErrorState, EmptyState } from '../../components/common/StateDisplays';
 import {
   CheckCircle2,
+  Check,
   Search,
   Play,
   RefreshCw,
@@ -14,6 +17,7 @@ import {
   XCircle,
   Pencil,
   X,
+  GraduationCap,
 } from 'lucide-react';
 
 /**
@@ -46,6 +50,7 @@ export default function MarkEligibilityPage() {
   const [loadingClasses, setLoadingClasses] = useState(true);
   const [classesError, setClassesError] = useState(null);
   const [startingDivId, setStartingDivId] = useState(null);
+  const [promotingDivId, setPromotingDivId] = useState(null);
   const [notice, setNotice] = useState(null);
   const noticeTimer = useRef(null);
 
@@ -60,6 +65,13 @@ export default function MarkEligibilityPage() {
   // Pen re-opens the two buttons for that student only.
   const [editingId, setEditingId] = useState(null);
   const [bulkApproving, setBulkApproving] = useState(false);
+
+  // Promote Class state (same flow as Result Verification: dry-run preview
+  // modal with ready/unpaid/failed/blocked buckets + repeater class).
+  const [promoteTarget, setPromoteTarget] = useState(null);
+  const [promotePreview, setPromotePreview] = useState(null);
+  const [executingPromote, setExecutingPromote] = useState(false);
+  const [selectedRepeaterStudents, setSelectedRepeaterStudents] = useState([]);
 
   const showNotice = (msg, ms = 5000) => {
     setNotice(msg);
@@ -256,6 +268,56 @@ export default function MarkEligibilityPage() {
     }
   };
 
+  const handlePromoteClass = async (e, cls) => {
+    e.stopPropagation();
+    try {
+      setPromotingDivId(cls.division_id);
+      const preview = await academicApi.promoteClass(cls.division_id, { dry_run: true });
+      const data = preview.data || {};
+      setPromoteTarget(cls);
+      setPromotePreview(data);
+      // Pre-select failed students for the repeater class (backend preselection),
+      // falling back to the failed bucket when preselection is absent.
+      const preselected =
+        data.default_repeater?.preselected_student_ids ||
+        data.buckets?.failed?.map((s) => s.id) ||
+        [];
+      setSelectedRepeaterStudents(preselected);
+    } catch (err) {
+      showNotice(err.response?.data?.detail || 'Failed to preview promotion.', 6000);
+    } finally {
+      setPromotingDivId(null);
+    }
+  };
+
+  const handlePromoteConfirm = async () => {
+    if (!promoteTarget || !promotePreview) return;
+    const readyCount = promotePreview.ready_to_move_count ?? promotePreview.buckets?.ready_to_move?.length ?? 0;
+    const willPromote = promotePreview.will_promote ?? readyCount;
+    // Allow repeater-only promotion (ready == 0 but repeater students selected).
+    if ((promotePreview.blocked || 0) > 0) return;
+    if (readyCount === 0 && selectedRepeaterStudents.length === 0 && !willPromote) return;
+    const cls = promoteTarget;
+    try {
+      setExecutingPromote(true);
+      const res = await academicApi.promoteClass(cls.division_id, {
+        repeater_student_ids: selectedRepeaterStudents,
+      });
+      showNotice(res.data?.detail || 'Class promoted.');
+      setPromoteTarget(null);
+      setPromotePreview(null);
+      setSelectedRepeaterStudents([]);
+      await loadClasses();
+      if (selectedClass && selectedClass.division_id === cls.division_id) {
+        await loadClassRoster(cls.division_id);
+      }
+    } catch (err) {
+      showNotice(err.response?.data?.detail || 'Failed to promote class.', 6000);
+    } finally {
+      setExecutingPromote(false);
+    }
+  };
+
   const teacherDone = (rosterData?.students || []).filter(
     (s) => s.class_teacher_status === 'APPROVED'
   ).length;
@@ -389,6 +451,39 @@ export default function MarkEligibilityPage() {
                         >
                           {isStarting ? <RefreshCw size={14} className="animate-spin" /> : <Play size={14} />}
                           <span>{isStarting ? 'Starting...' : 'Start Verification'}</span>
+                        </button>
+                      )}
+                      {/* Promote Class Button */}
+                      {cls.can_promote_class && cls.is_verification_started && (
+                        <button
+                          type="button"
+                          onClick={(e) => handlePromoteClass(e, cls)}
+                          disabled={promotingDivId === cls.division_id}
+                          className="edvana-btn"
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '0.45rem',
+                            padding: '0.55rem 1rem',
+                            borderRadius: '10px',
+                            fontSize: '0.85rem',
+                            fontWeight: 700,
+                            backgroundColor: '#16a34a',
+                            color: '#ffffff',
+                            border: 'none',
+                            boxShadow: '0 2px 6px rgba(22,163,74,0.25)',
+                            cursor: promotingDivId === cls.division_id ? 'not-allowed' : 'pointer',
+                            transition: 'all 0.15s ease',
+                          }}
+                        >
+                          {promotingDivId === cls.division_id ? (
+                            <RefreshCw size={14} className="animate-spin" />
+                          ) : (
+                            <GraduationCap size={14} />
+                          )}
+                          <span>
+                            {promotingDivId === cls.division_id ? 'Promoting...' : `Promote to Sem ${cls.target_semester_number}`}
+                          </span>
                         </button>
                       )}
                       <button
@@ -696,6 +791,240 @@ export default function MarkEligibilityPage() {
           )}
         </div>
       )}
+
+      {/* Promote Class confirmation */}
+      <Modal
+        isOpen={Boolean(promoteTarget && promotePreview)}
+        onClose={() => {
+          if (!executingPromote) {
+            setPromoteTarget(null);
+            setPromotePreview(null);
+            setSelectedRepeaterStudents([]);
+          }
+        }}
+        title={`Promote class to Sem ${(promotePreview?.target_semester || promotePreview?.to_semester) ?? ''}`}
+        maxWidth="680px"
+        footer={
+          <>
+            <button
+              type="button"
+              className="edvana-btn edvana-btn-secondary"
+              disabled={executingPromote}
+              onClick={() => {
+                setPromoteTarget(null);
+                setPromotePreview(null);
+                setSelectedRepeaterStudents([]);
+              }}
+              style={{ padding: '0.55rem 1rem', borderRadius: '10px', fontWeight: 600 }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="edvana-btn"
+              disabled={
+                executingPromote ||
+                (promotePreview?.blocked || 0) > 0 ||
+                ((promotePreview?.ready_to_move_count || 0) === 0 && selectedRepeaterStudents.length === 0 && !promotePreview?.will_promote)
+              }
+              onClick={handlePromoteConfirm}
+              style={{
+                padding: '0.55rem 1.1rem',
+                borderRadius: '10px',
+                fontWeight: 700,
+                backgroundColor: '#16a34a',
+                color: '#ffffff',
+                border: 'none',
+                cursor: (executingPromote || (promotePreview?.blocked || 0) > 0 || ((promotePreview?.ready_to_move_count || 0) === 0 && selectedRepeaterStudents.length === 0 && !promotePreview?.will_promote)) ? 'not-allowed' : 'pointer',
+                opacity: (promotePreview?.blocked || 0) > 0 || ((promotePreview?.ready_to_move_count || 0) === 0 && selectedRepeaterStudents.length === 0 && !promotePreview?.will_promote) ? 0.55 : 1,
+              }}
+            >
+              {executingPromote
+                ? 'Processing...'
+                : (promotePreview?.blocked || 0) > 0
+                ? `Blocked (${promotePreview.blocked} pending decision)`
+                : selectedRepeaterStudents.length > 0 && (promotePreview?.ready_to_move_count || 0) > 0
+                ? `Promote (${promotePreview.ready_to_move_count}) & Repeat (${selectedRepeaterStudents.length})`
+                : selectedRepeaterStudents.length > 0
+                ? `Move to Repeater (${selectedRepeaterStudents.length}) & Flip`
+                : `Promote (${promotePreview?.ready_to_move_count || (promotePreview?.will_promote ? 'Class' : 0)})`}
+            </button>
+          </>
+        }
+      >
+        {promotePreview && (() => {
+          const readyCount = promotePreview.ready_to_move_count ?? (promotePreview.buckets?.ready_to_move?.length || 0);
+          const alreadyCount = promotePreview.already_promoted_count ?? (promotePreview.buckets?.already_promoted?.length || 0);
+          const unpaidCount = promotePreview.fees_pending_count ?? (promotePreview.buckets?.fees_pending?.length || 0);
+          const failedCount = promotePreview.failed_count ?? (promotePreview.buckets?.failed?.length || 0);
+          const blockedCount = promotePreview.blocked ?? (promotePreview.buckets?.blocked?.length || 0);
+          const targetSem = promotePreview.target_semester || promotePreview.to_semester;
+          const fromSem = promotePreview.from_semester;
+
+          const failedList = promotePreview.buckets?.failed || [];
+          const unpaidList = promotePreview.buckets?.fees_pending || [];
+          const repeaterCandidates = [...failedList, ...unpaidList];
+
+          const activeBefore =
+            promotePreview.total_students != null
+              ? promotePreview.total_students - alreadyCount
+              : readyCount + unpaidCount + failedCount + blockedCount;
+          // Active = ready + unpaid + failed + blocked (already-promoted are a separate cohort).
+          // Remaining = those not promoted and not moved to repeater.
+          const remainingActive = activeBefore - readyCount - (selectedRepeaterStudents?.length || 0);
+          const willFlip = remainingActive === 0 && blockedCount === 0;
+
+          const toggleRepeaterStudent = (id) => {
+            setSelectedRepeaterStudents((prev) =>
+              prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+            );
+          };
+
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              {/* 5 Distinct Bucket Stat Cards */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: '0.5rem' }}>
+                <div style={{ backgroundColor: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '10px', padding: '0.65rem 0.5rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#15803d' }}>{readyCount}</div>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: '#166534' }}>Ready to move</div>
+                </div>
+                <div style={{ backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '0.65rem 0.5rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#1d4ed8' }}>{alreadyCount}</div>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: '#1e40af' }}>Already in Sem {targetSem}</div>
+                </div>
+                <div style={{ backgroundColor: '#fffbeb', border: '1px solid #fde68a', borderRadius: '10px', padding: '0.65rem 0.5rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#b45309' }}>{unpaidCount}</div>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: '#92400e' }}>Fees pending</div>
+                </div>
+                <div style={{ backgroundColor: '#fff1f2', border: '1px solid #fecdd3', borderRadius: '10px', padding: '0.65rem 0.5rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#e11d48' }}>{failedCount}</div>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: '#9f1239' }}>Failed</div>
+                </div>
+                <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '0.65rem 0.5rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#475569' }}>{blockedCount}</div>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: '#334155' }}>Blocked</div>
+                </div>
+              </div>
+
+              {/* Class Flip Rule Status Banner */}
+              {willFlip ? (
+                <div style={{ backgroundColor: '#f0fdf4', border: '1px solid #86efac', borderRadius: '10px', padding: '0.75rem 1rem', fontSize: '0.82rem', color: '#166534' }}>
+                  <div style={{ fontWeight: 800, marginBottom: '0.2rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <Check size={16} /> Strict 0-Active Student Flip Met
+                  </div>
+                  <div>
+                    All active Sem {fromSem} students will move to Sem {targetSem} or to the repeater class (Div R).
+                    This class will flip to <strong>Sem {targetSem}</strong> in-place!
+                  </div>
+                </div>
+              ) : (
+                <div style={{ backgroundColor: '#fef2f2', border: '1px solid #fecaca', borderRadius: '10px', padding: '0.75rem 1rem', fontSize: '0.82rem', color: '#991b1b' }}>
+                  <div style={{ fontWeight: 800, marginBottom: '0.2rem' }}>
+                    Note: {remainingActive} student(s) will remain active in Sem {fromSem}.
+                  </div>
+                  <div>
+                    In accordance with college rules, the class remains in Sem {fromSem} until all active students either promote or move to a repeater class.
+                  </div>
+                </div>
+              )}
+
+              {/* Repeater Class Creation Section */}
+              {repeaterCandidates.length > 0 && (
+                <div style={{ backgroundColor: '#f8fafc', border: '1.5px solid #cbd5e1', borderRadius: '12px', padding: '1rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                    <div>
+                      <div style={{ fontSize: '0.9rem', fontWeight: 800, color: '#0f172a' }}>
+                        Create Repeater Class
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                        Sem {fromSem} · Div {promotePreview.default_repeater?.division_name || 'R'}
+                        {promotePreview.default_repeater?.class_teacher_name ? ` · Teacher: ${promotePreview.default_repeater.class_teacher_name}` : ''}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#0369a1', backgroundColor: '#e0f2fe', padding: '0.2rem 0.6rem', borderRadius: '6px' }}>
+                      {selectedRepeaterStudents.length} selected for Repeater
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '0.78rem', color: '#475569', marginBottom: '0.75rem' }}>
+                    Move failed and unpaid students into the repeater division so they don't block the class transition.
+                    Failed students are pre-selected; unpaid students can optionally be moved.
+                  </div>
+
+                  <div style={{ maxHeight: '180px', overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: '8px', backgroundColor: '#ffffff' }}>
+                    {repeaterCandidates.map((s) => {
+                      const isFailed = failedList.some((f) => f.id === s.id);
+                      const isChecked = selectedRepeaterStudents.includes(s.id);
+                      return (
+                        <label
+                          key={s.id}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: '0.75rem',
+                            padding: '0.5rem 0.85rem',
+                            borderBottom: '1px solid #f1f5f9',
+                            fontSize: '0.8rem',
+                            cursor: 'pointer',
+                            backgroundColor: isChecked ? '#f8fafc' : '#ffffff',
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => toggleRepeaterStudent(s.id)}
+                              style={{ cursor: 'pointer' }}
+                            />
+                            <span style={{ fontWeight: 600, color: '#0f172a' }}>{s.name}</span>
+                            <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                              ({s.enrollment_no || s.roll_number || 'No ID'})
+                            </span>
+                          </div>
+                          <span
+                            style={{
+                              fontSize: '0.72rem',
+                              fontWeight: 700,
+                              padding: '0.1rem 0.45rem',
+                              borderRadius: '4px',
+                              backgroundColor: isFailed ? '#ffe4e6' : '#fef3c7',
+                              color: isFailed ? '#be123c' : '#92400e',
+                            }}
+                          >
+                            {isFailed ? 'Failed' : 'Eligible, Unpaid'}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Blocked students alert */}
+              {blockedCount > 0 && (
+                <div>
+                  <div style={{ backgroundColor: '#fef2f2', border: '1.5px solid #f87171', borderRadius: '10px', padding: '0.75rem 1rem', fontSize: '0.82rem', color: '#991b1b' }}>
+                    <div style={{ fontWeight: 800, marginBottom: '0.35rem' }}>
+                      Blocked: Verification undecided for {blockedCount} student(s).
+                    </div>
+                    <div style={{ fontWeight: 500 }}>
+                      Every student must be either eligible or failed before the class can move. Complete teacher approval or HOD endorsement first.
+                    </div>
+                  </div>
+                  <div style={{ maxHeight: '140px', overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: '8px', marginTop: '0.5rem' }}>
+                    {(promotePreview.buckets?.blocked || promotePreview.blocked_students || []).map((s) => (
+                      <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', padding: '0.45rem 0.8rem', borderBottom: '1px solid #f1f5f9', fontSize: '0.78rem' }}>
+                        <span style={{ fontWeight: 600, color: '#0f172a' }}>{s.name}</span>
+                        <span style={{ color: '#b91c1c', textAlign: 'right' }}>{s.reason || 'Verification incomplete'}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </Modal>
     </div>
   );
 }
