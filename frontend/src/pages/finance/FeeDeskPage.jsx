@@ -77,13 +77,24 @@ export default function FeeDeskPage() {
   const [paymentRecords, setPaymentRecords] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
 
+  // Student whose fee was just set (from Set Fee page) pins at the top of
+  // the desk so Mark Fee is one click away. Cleared via Clear Filters.
+  const [pinnedId, setPinnedId] = useState(null);
+
   useEffect(() => {
     if (location.state?.successMsg) {
       setSuccessMsg(location.state.successMsg);
-      // Clear state in history so toast doesn't re-appear on reload
-      window.history.replaceState({}, document.title);
       const timer = setTimeout(() => setSuccessMsg(''), 4500);
       return () => clearTimeout(timer);
+    }
+  }, [location.state]);
+
+  useEffect(() => {
+    if (location.state?.justSetStudentId) {
+      setPinnedId(String(location.state.justSetStudentId));
+      setCurrentPage(1);
+      // Clear state in history so toast/pin don't re-apply on reload
+      window.history.replaceState({}, document.title);
     }
   }, [location.state]);
 
@@ -253,8 +264,11 @@ export default function FeeDeskPage() {
   };
 
   useEffect(() => {
-
-    fetchData();
+    // Debounced backend search: filters stay live without spamming the API.
+    const t = setTimeout(() => {
+      fetchData();
+    }, search.trim() ? 400 : 0);
+    return () => clearTimeout(t);
   }, [search]);
 
   // Client-side filtering across departments, academic year & fee statuses
@@ -284,21 +298,30 @@ export default function FeeDeskPage() {
     return true;
   });
 
+  // Pin the just-fee-set student first (when visible under current filters).
+  const sortedStudents = [...filteredStudents].sort((a, b) => {
+    if (!pinnedId) return 0;
+    if (String(a.id) === String(pinnedId)) return -1;
+    if (String(b.id) === String(pinnedId)) return 1;
+    return 0;
+  });
+
   // Count of manual desk candidates (excluding online payment enabled)
   const manualCandidatesCount = students.filter(s => !feesMap[s.id]?.allowOnlinePayment).length;
   const onlineCandidatesCount = students.filter(s => feesMap[s.id]?.allowOnlinePayment).length;
 
   const hasActiveFilters = Boolean(search.trim() || selectedDept || selectedFeeStatus || selectedYear);
-  const totalPages = Math.ceil(filteredStudents.length / PAGE_SIZE) || 1;
+  const totalPages = Math.ceil(sortedStudents.length / PAGE_SIZE) || 1;
   const startIndex = (currentPage - 1) * PAGE_SIZE;
-  const endIndex = Math.min(startIndex + PAGE_SIZE, filteredStudents.length);
-  const currentStudents = filteredStudents.slice(startIndex, endIndex);
+  const endIndex = Math.min(startIndex + PAGE_SIZE, sortedStudents.length);
+  const currentStudents = sortedStudents.slice(startIndex, endIndex);
 
   const handleClearFilters = () => {
     setSearch('');
     setSelectedDept('');
     setSelectedFeeStatus('');
     setSelectedYear('');
+    setPinnedId(null);
     setCurrentPage(1);
   };
 
@@ -857,15 +880,18 @@ export default function FeeDeskPage() {
                           const genderDept = [genderPart.toUpperCase(), deptPart.toUpperCase()]
                             .filter(Boolean).join(' • ') || '—';
 
+                          const isPinned = pinnedId && String(stu.id) === String(pinnedId);
                           return (
-                            <tr 
-                              key={stu.id} 
-                              style={{ 
+                            <tr
+                              key={stu.id}
+                              style={{
                                 borderBottom: '1px solid #f1f5f9',
-                                transition: 'background 0.15s ease'
+                                transition: 'background 0.15s ease',
+                                background: isPinned ? '#f0fdf4' : '#ffffff',
+                                boxShadow: isPinned ? 'inset 3px 0 0 #16a34a' : 'none',
                               }}
-                              onMouseEnter={(e) => e.currentTarget.style.background = '#f8fafc'}
-                              onMouseLeave={(e) => e.currentTarget.style.background = '#ffffff'}
+                              onMouseEnter={(e) => e.currentTarget.style.background = isPinned ? '#dcfce7' : '#f8fafc'}
+                              onMouseLeave={(e) => e.currentTarget.style.background = isPinned ? '#f0fdf4' : '#ffffff'}
                             >
                               {/* S.N. (Paginated) */}
                               <td style={{ padding: '0.85rem 1.15rem', fontSize: '0.85rem', color: '#64748b', fontWeight: 500 }}>
@@ -890,6 +916,20 @@ export default function FeeDeskPage() {
                                 <div style={{ color: '#64748b', fontSize: '0.75rem', fontWeight: 500, marginTop: '0.15rem', textTransform: 'uppercase' }}>
                                   {genderDept}
                                 </div>
+                                {isPinned && (
+                                  <div style={{
+                                    display: 'inline-block',
+                                    marginTop: '0.3rem',
+                                    background: '#16a34a',
+                                    color: '#ffffff',
+                                    borderRadius: '9999px',
+                                    padding: '0.1rem 0.6rem',
+                                    fontSize: '0.68rem',
+                                    fontWeight: 700,
+                                  }}>
+                                    Fee just set — ready to Mark Fee
+                                  </div>
+                                )}
                               </td>
 
                               {/* FATHER'S NAME */}

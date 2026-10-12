@@ -23,8 +23,10 @@ from apps.results.serializers import (
     SemesterResultSerializer,
 )
 from apps.results.services import (
+    class_teacher_mark_simple,
     class_teacher_review_eligibility,
     hod_endorse_eligibility,
+    hod_mark_simple,
 )
 from apps.students.models import Student, StudentEnrollment
 
@@ -1572,6 +1574,209 @@ class EligibilityVerificationViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(data, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], url_path='mark-teacher-simple')
+    def mark_teacher_simple(self, request, pk=None):
+        """Profile-only Class Teacher marking (temporary; results frozen).
+
+        Body: {status: APPROVED|REJECTED, remarks?: str}.
+        Only profile_locked is required; result coverage is ignored.
+        Reversible toggle; HOD REJECTED-closed rows stay locked.
+        Same scope as review-class-teacher (assigned division teacher).
+        """
+        try:
+            ev = EligibilityVerification.objects.select_related('student').get(id=pk)
+        except EligibilityVerification.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        scopes = get_user_scopes(request.user)
+        allowed = scopes['is_system_wide'] or request.user.is_superuser
+        if not allowed and user_has_role(request.user, 'CLASS_TEACHER'):
+            enr = ev.student.enrollments.filter(is_current=True).select_related('division').first()
+            div_id = enr.division_id if enr and enr.division_id else None
+            if div_id:
+                from apps.academic_structure.models import Division
+                div = Division.objects.filter(id=div_id).first()
+                if div and div.class_teacher_id == request.user.id:
+                    allowed = True
+                elif str(div_id) in {str(d) for d in scopes.get('division_ids', [])}:
+                    allowed = True
+            elif enr and str(enr.department_id) in {str(d) for d in scopes.get('department_ids', [])}:
+                allowed = True
+        if not allowed:
+            return Response(
+                {'detail': 'Only the assigned class teacher of this student may mark.'},
+                status=status.HTTP_403_FORBIDDEN)
+
+        decision = request.data.get('status', 'APPROVED')
+        remarks = request.data.get('remarks', '')
+        try:
+            updated_ev = class_teacher_mark_simple(
+                eligibility_id=ev.id,
+                reviewer_user=request.user,
+                status_decision=decision,
+                remarks=remarks,
+                request=request,
+            )
+            return Response(EligibilityVerificationSerializer(updated_ev).data, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], url_path='mark-hod-simple')
+    def mark_hod_simple(self, request, pk=None):
+        """Profile-only HOD marking (temporary; results frozen).
+
+        Body: {status: APPROVED|REJECTED, remarks?: str}.
+        Requires class teacher to have marked first (never PENDING) and
+        only profile_locked (no result gate). Both APPROVED unlocks the
+        candidate ledger + admission PDF. Reversible toggle.
+        """
+        try:
+            ev = EligibilityVerification.objects.select_related('student').get(id=pk)
+        except EligibilityVerification.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        scopes = get_user_scopes(request.user)
+        if not (scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']):
+            if 'HOD' in scopes['roles']:
+                allowed = {str(d) for d in scopes.get('department_ids', [])}
+                live_enr = ev.student.enrollments.filter(is_current=True).first()
+                if live_enr and live_enr.department_id:
+                    if str(live_enr.department_id) not in allowed:
+                        return Response({'detail': 'HOD may only mark eligibility for their own department.'}, status=status.HTTP_403_FORBIDDEN)
+                elif str(ev.department_id) not in allowed:
+                    return Response({'detail': 'HOD may only mark eligibility for their own department.'}, status=status.HTTP_403_FORBIDDEN)
+            else:
+                return Response({'detail': 'Only the HOD or Admin can mark departmental eligibility.'}, status=status.HTTP_403_FORBIDDEN)
+
+        decision = request.data.get('status', 'APPROVED')
+        remarks = request.data.get('remarks', '')
+        try:
+            updated_ev = hod_mark_simple(
+                eligibility_id=ev.id,
+                hod_user=request.user,
+                status_decision=decision,
+                remarks=remarks,
+                request=request,
+            )
+            data = EligibilityVerificationSerializer(updated_ev).data
+            outcome = getattr(updated_ev, '_promotion_outcome', None)
+            if outcome is not None:
+                data['promotion'] = outcome
+            return Response(data, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], url_path='bulk-mark-hod-simple')
+    def bulk_mark_hod_simple(self, request):
+        """HOD-only bulk approval (temporary profile-only flow; results frozen).
+
+        Body: {division_id: uuid}.
+        Approves every row in the division that is teacher-APPROVED and
+        HOD-PENDING with a locked student profile. Anything else
+        (unlocked profile, no row, teacher pending/rejected, HOD already
+        decided) is skipped and counted — never force-approved.
+        Per-student atomic (one bad row never aborts the batch) and
+        idempotent (re-click only processes still-pending rows).
+        """
+        import uuid as _uuid
+        from apps.academic_structure.models import Division
+        from apps.students.models import Student
+
+        division_id = request.data.get('division_id')
+        if not division_id:
+            return Response({'detail': 'division_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            _uuid.UUID(str(division_id))
+        except (ValueError, AttributeError, TypeError):
+            return Response({'detail': 'Invalid division_id.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        div = Division.objects.filter(id=division_id).select_related('department').first()
+        if not div:
+            return Response({'detail': 'Division not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        scopes = get_user_scopes(request.user)
+        if not (scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']):
+            if 'HOD' in scopes['roles']:
+                allowed = {str(d) for d in scopes.get('department_ids', [])}
+                if str(div.department_id) not in allowed:
+                    return Response(
+                        {'detail': 'HOD may only bulk-approve their own department.'},
+                        status=status.HTTP_403_FORBIDDEN)
+            else:
+                return Response(
+                    {'detail': 'Only the HOD or Admin can bulk-approve eligibility.'},
+                    status=status.HTTP_403_FORBIDDEN)
+
+        enrollments = list(StudentEnrollment.objects.filter(
+            division=div, is_current=True
+        ).values_list('student_id', flat=True))
+        if not enrollments:
+            return Response(
+                {'detail': 'No active students in this division.', 'approved': 0, 'skipped': 0, 'failed': 0},
+                status=status.HTTP_200_OK)
+
+        candidates = list(EligibilityVerification.objects.filter(
+            student_id__in=enrollments,
+            class_teacher_status=EligibilityVerification.StageStatus.APPROVED,
+            hod_status=EligibilityVerification.StageStatus.PENDING,
+        ).select_related('student', 'target_semester'))
+        if len(candidates) > 500:
+            return Response(
+                {'detail': 'Batch too large (>500). Approve in smaller classes.'},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        locked_map = dict(
+            Student.objects.filter(id__in=[ev.student_id for ev in candidates]).values_list('id', 'profile_locked')
+        )
+
+        approved, skipped_unlocked, failed = 0, 0, []
+        for ev in candidates:
+            if not locked_map.get(ev.student_id, False):
+                skipped_unlocked += 1
+                continue
+            try:
+                hod_mark_simple(
+                    eligibility_id=ev.id,
+                    hod_user=request.user,
+                    status_decision=EligibilityVerification.StageStatus.APPROVED,
+                    remarks='Bulk HOD approval (profile-only)',
+                    request=request,
+                )
+                approved += 1
+            except Exception as exc:
+                logger.exception('bulk-mark-hod-simple: failed EV %s', ev.id)
+                failed.append({'eligibility_id': str(ev.id), 'detail': str(exc)[:200]})
+
+        skipped_other = (
+            len(enrollments)
+            - len(candidates)
+            - skipped_unlocked
+        )
+        from apps.audit.models import AuditLog
+        from apps.audit.services import audit_log
+        audit_log(
+            request=request, actor=request.user, action=AuditLog.Action.VERIFY,
+            target_type='EligibilityVerification', target_id=str(div.id),
+            target_display=f'Bulk HOD approval for Div {div.name} ({approved} approved)',
+            new_value={'division_id': str(div.id), 'approved': approved,
+                       'skipped_unlocked': skipped_unlocked, 'failed': len(failed)},
+            reason='Bulk HOD approval (profile-only)',
+            description=(
+                f"HOD bulk-approved {approved} teacher-eligible student(s) in Div {div.name} "
+                f"({skipped_unlocked} skipped: profile unlocked, {len(failed)} failed)."),
+        )
+        return Response({
+            'detail': (
+                f'{approved} student(s) marked Eligible.'
+                + (f' {skipped_unlocked} skipped (profile not locked).' if skipped_unlocked else '')
+                + (f' {len(failed)} failed.' if failed else '')
+                + ('' if approved or skipped_unlocked or failed else ' Nothing pending HOD approval.')
+            ),
+            'approved': approved,
+            'skipped_unlocked': skipped_unlocked,
+            'skipped_other': max(skipped_other, 0),
+            'failed': failed,
+            'division_id': str(div.id),
+        }, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'], url_path='admission-form-data')
     def admission_form_data(self, request):

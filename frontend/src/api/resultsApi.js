@@ -50,6 +50,25 @@ export const resultsApi = {
       remarks,
     }),
 
+  // Profile-only marking (temporary flow, results frozen).
+  // Eligible -> APPROVED, Not Eligible -> REJECTED. No remarks needed.
+  markTeacherSimple: (id, status) =>
+    client.post(`/results/eligibility/${id}/mark-teacher-simple/`, {
+      status,
+      remarks: '',
+    }),
+
+  markHodSimple: (id, status) =>
+    client.post(`/results/eligibility/${id}/mark-hod-simple/`, {
+      status,
+      remarks: '',
+    }),
+
+  bulkMarkHodSimple: (divisionId) =>
+    client.post('/results/eligibility/bulk-mark-hod-simple/', {
+      division_id: divisionId,
+    }),
+
   getAdmissionFormData: (params = {}) =>
     client.get('/results/eligibility/admission-form-data/', { params }),
 

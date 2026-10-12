@@ -21,6 +21,7 @@ import ProfileDispatcher from './pages/ProfileDispatcher';
 import AdmissionImportPage from './pages/admissions/AdmissionImportPage';
 import ResultHistoryPage from './pages/results/ResultHistoryPage';
 import EligibilityVerificationPage from './pages/results/EligibilityVerificationPage';
+import MarkEligibilityPage from './pages/eligibility/MarkEligibilityPage';
 import MyClassPage from './pages/class_teacher/MyClassPage';
 import HODDivisionsBatchesPage from './pages/hod/HODDivisionsBatchesPage';
 import FeeHeadConfigPage from './pages/finance/FeeHeadConfigPage';
@@ -83,9 +84,11 @@ export default function App() {
           {/* Admissions */}
           <Route path="/admissions/import" element={<AdmissionImportPage />} />
           
-          {/* Results & Eligibility */}
+          {/* Results & Eligibility — results frozen, profile-only marking is active */}
           <Route path="/results" element={<ResultHistoryPage />} />
           <Route path="/eligibility" element={<EligibilityVerificationPage />} />
+          <Route path="/mark-eligible" element={<MarkEligibilityPage />} />
+          <Route path="/mark-eligibility" element={<MarkEligibilityPage />} />
           
           {/* Classes & Divisions — rebuilt flow (pending imports, create
               class, merge DSE, subject teachers) lives in

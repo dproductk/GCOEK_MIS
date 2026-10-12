@@ -6,6 +6,7 @@ import PageHeader from '../../components/common/PageHeader';
 import Badge from '../../components/common/Badge';
 import Modal from '../../components/common/Modal';
 import { LoadingState, ErrorState, EmptyState } from '../../components/common/StateDisplays';
+import FrozenFeatureGuard from '../../components/common/FrozenFeatureGuard';
 import {
   Eye,
   Edit3,
@@ -96,7 +97,29 @@ const CURRICULUM = {
   ],
 };
 
+// Temporary freeze: students do not fill results while eligibility runs on
+// profile-lock only. Code kept intact for future use.
+const RESULTS_FROZEN = true;
+
 export default function ResultHistoryPage() {
+  if (RESULTS_FROZEN) {
+    return (
+      <div style={{ maxWidth: '900px', margin: '0 auto', padding: '1.5rem 1rem' }}>
+        <FrozenFeatureGuard
+          storageKey="frozen_popup_results"
+          title="Results paused"
+          message="Result filling is paused for now. No action needed from students — eligibility is decided on profile lock by your Class Teacher and HOD."
+        />
+        <div className="edvana-card" style={{ padding: '2rem', textAlign: 'center' }}>
+          <h2 style={{ margin: '0 0 0.5rem 0' }}>Results are paused</h2>
+          <p style={{ color: '#64748b', fontSize: '0.9rem' }}>
+            You do not need to fill any results. Your Class Teacher and HOD will mark eligibility
+            once your profile is locked. Please keep your profile complete and locked.
+          </p>
+        </div>
+      </div>
+    );
+  }
   const [results, setResults] = useState([]);
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);

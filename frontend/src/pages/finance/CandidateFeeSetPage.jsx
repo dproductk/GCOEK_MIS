@@ -174,10 +174,12 @@ export default function CandidateFeeSetPage() {
         setExistingAssessment(res.data);
       }
 
-      // Automatically navigate back to candidate student list with success message
+      // Automatically navigate back to candidate student list with success message.
+      // justSetStudentId pins this student at the top of the desk for quick Mark Fee.
       navigate('/finance/fee-desk', {
         state: {
-          successMsg: `Admission fee of ₹${totalAdmissionFees.toLocaleString('en-IN')} configured successfully for ${student?.display_name}!`
+          successMsg: `Admission fee of ₹${totalAdmissionFees.toLocaleString('en-IN')} configured successfully for ${student?.display_name}!`,
+          justSetStudentId: studentId,
         }
       });
     } catch (err) {

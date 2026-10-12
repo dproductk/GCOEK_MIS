@@ -7,6 +7,7 @@ import Badge from '../../components/common/Badge';
 import Modal from '../../components/common/Modal';
 import FormField from '../../components/common/FormField';
 import { LoadingState, ErrorState, EmptyState } from '../../components/common/StateDisplays';
+import FrozenFeatureGuard from '../../components/common/FrozenFeatureGuard';
 import {
   Users,
   ArrowLeft,
@@ -29,7 +30,32 @@ import {
   XCircle,
 } from 'lucide-react';
 
+// Temporary freeze: results workflow paused while eligibility runs on
+// profile-lock only via /mark-eligible. Code kept intact for future use.
+const RESULTS_FROZEN = true;
+
 export default function EligibilityVerificationPage() {
+  if (RESULTS_FROZEN) {
+    return (
+      <div style={{ maxWidth: '900px', margin: '0 auto', padding: '1.5rem 1rem' }}>
+        <FrozenFeatureGuard
+          storageKey="frozen_popup_eligibility"
+          title="Result Verification paused"
+          message="Results are paused while eligibility runs on profile-lock only. Please use Mark Student Eligibility for now."
+        />
+        <div className="edvana-card" style={{ padding: '2rem', textAlign: 'center' }}>
+          <h2 style={{ margin: '0 0 0.5rem 0' }}>Result Verification is paused</h2>
+          <p style={{ color: '#64748b', fontSize: '0.9rem' }}>
+            This workflow is frozen until subjects/scheme data is available.
+            Use <strong>Mark Student Eligibility</strong> from the sidebar to mark Eligible / Not Eligible.
+          </p>
+          <a href="/mark-eligible" className="edvana-btn edvana-btn-primary" style={{ display: 'inline-block', marginTop: '1rem', padding: '0.6rem 1.2rem', borderRadius: '10px', fontWeight: 700 }}>
+            Go to Mark Student Eligibility
+          </a>
+        </div>
+      </div>
+    );
+  }
   const { user, activeRole, hasRole } = useAuth();
   const isViewingAsTeacher = activeRole?.codename === 'CLASS_TEACHER';
   const isViewingAsHOD = activeRole?.codename === 'HOD';

@@ -425,6 +425,191 @@ def hod_endorse_eligibility(eligibility_id, hod_user, status_decision, remarks='
         return ev
 
 
+def _require_profile_locked_only(student, reviewer=None):
+    """
+    Temporary profile-only gate for the Mark-Eligibility flow.
+
+    Results/subjects are unavailable, so eligibility is decided on
+    profile lock alone (frozen results workflow; see MarkEligibilityPage).
+    - Student must have locked their profile.
+    - Student must have an active enrollment.
+    Sysadmin / superuser bypass. Teachers and HODs never do.
+    """
+    from rest_framework.exceptions import ValidationError
+
+    if reviewer is not None and getattr(reviewer, 'is_superuser', False):
+        return
+    if reviewer is not None:
+        try:
+            from apps.authentication.permissions import user_has_role as _has_role
+            if _has_role(reviewer, 'SYSADMIN'):
+                return
+        except Exception:
+            pass
+
+    locked = Student.objects.filter(id=student.id).values_list('profile_locked', flat=True).first()
+    if not locked:
+        raise ValidationError(
+            'Student has not locked their profile yet. '
+            'Marking is blocked until the student fills all details and locks their profile.'
+        )
+    enrollment = StudentEnrollment.objects.filter(
+        student_id=student.id, is_current=True
+    ).first()
+    if enrollment is None or enrollment.semester_id is None:
+        raise ValidationError('Student has no active enrollment. Marking is blocked.')
+
+
+def class_teacher_mark_simple(eligibility_id, reviewer_user, status_decision, remarks='', request=None):
+    """
+    Profile-only Class Teacher marking (temporary; results frozen).
+
+    - Only profile_locked is required; SemesterResult coverage is ignored.
+    - Reversible: APPROVED <-> REJECTED toggle allowed (no teacher lock).
+    - HOD REJECTED-closed cases stay untouchable by the teacher.
+    - APPROVED moves the row to HOD queue (hod PENDING, final False).
+    Audited like the full review workflow.
+    """
+    from rest_framework.exceptions import ValidationError
+
+    allowed = {
+        EligibilityVerification.StageStatus.APPROVED,
+        EligibilityVerification.StageStatus.REJECTED,
+    }
+    if status_decision not in allowed:
+        raise ValidationError('Invalid decision. Use APPROVED (Eligible) or REJECTED (Not Eligible).')
+
+    with transaction.atomic():
+        ev = EligibilityVerification.objects.select_for_update().get(id=eligibility_id)
+        _require_profile_locked_only(ev.student, reviewer_user)
+
+        # Reversible by design: teacher can always re-mark (even after HOD
+        # decided). Any teacher re-mark resets HOD to PENDING so HOD must
+        # re-confirm — this is why the teacher button never locks.
+        old_snapshot = {
+            'class_teacher_status': ev.class_teacher_status,
+            'hod_status': ev.hod_status,
+            'final_eligible': ev.final_eligible,
+        }
+        ev.class_teacher = reviewer_user
+        ev.class_teacher_status = status_decision
+        ev.class_teacher_remarks = remarks or ''
+        ev.class_teacher_reviewed_at = timezone.now()
+
+        ev.hod_status = EligibilityVerification.StageStatus.PENDING
+        ev.final_eligible = False
+
+        ev.save()
+        from apps.audit.models import AuditLog as _AuditLog
+        from apps.audit.services import audit_log as _audit_log
+        _audit_log(
+            request=request,
+            actor=reviewer_user,
+            action=_AuditLog.Action.VERIFY,
+            target_type='EligibilityVerification',
+            target_id=str(ev.id),
+            target_display=f'{ev.student.display_name} -> Sem {ev.target_semester.number if ev.target_semester else "?"}',
+            old_value=old_snapshot,
+            new_value={
+                'class_teacher_status': ev.class_teacher_status,
+                'hod_status': ev.hod_status,
+                'final_eligible': ev.final_eligible,
+            },
+            reason=str(remarks or 'Class-teacher simple eligibility marking (profile-only)')[:500],
+            description=(
+                f"Class teacher marked {ev.student.display_name} {status_decision} "
+                f"(profile-only, target Sem {ev.target_semester.number if ev.target_semester else '?'})."
+            ),
+        )
+        return ev
+
+
+def hod_mark_simple(eligibility_id, hod_user, status_decision, remarks='', request=None):
+    """
+    Profile-only HOD marking (temporary; results frozen).
+
+    - Only profile_locked is required; SemesterResult coverage is ignored.
+    - Strict order: class teacher must have decided (APPROVED/REJECTED),
+      never PENDING. HOD APPROVE additionally requires teacher APPROVED.
+    - Reversible: HOD can toggle APPROVED <-> REJECTED.
+    - Both APPROVED => final_eligible True (candidate ledger + admission PDF
+      unlock). Anything else => final_eligible False.
+    """
+    from rest_framework.exceptions import ValidationError as _ValidationError
+
+    allowed = {
+        EligibilityVerification.StageStatus.APPROVED,
+        EligibilityVerification.StageStatus.REJECTED,
+    }
+    if status_decision not in allowed:
+        raise _ValidationError('Invalid decision. Use APPROVED (Eligible) or REJECTED (Not Eligible).')
+
+    with transaction.atomic():
+        ev = EligibilityVerification.objects.select_for_update().get(id=eligibility_id)
+        _require_profile_locked_only(ev.student, hod_user)
+
+        if ev.class_teacher_status == EligibilityVerification.StageStatus.PENDING:
+            raise _ValidationError('Class Teacher must mark first. HOD cannot mark while teacher review is pending.')
+        if status_decision == EligibilityVerification.StageStatus.APPROVED:
+            if ev.class_teacher_status != EligibilityVerification.StageStatus.APPROVED:
+                raise _ValidationError('Class Teacher must mark Eligible first. HOD cannot approve otherwise.')
+
+        old_snapshot = {
+            'hod_status': ev.hod_status,
+            'final_eligible': ev.final_eligible,
+            'class_teacher_status': ev.class_teacher_status,
+        }
+        ev.hod = hod_user
+        ev.hod_status = status_decision
+        ev.hod_remarks = remarks or ''
+        ev.hod_reviewed_at = timezone.now()
+
+        if (
+            ev.class_teacher_status == EligibilityVerification.StageStatus.APPROVED
+            and status_decision == EligibilityVerification.StageStatus.APPROVED
+        ):
+            ev.final_eligible = True
+            ev._promotion_outcome = {'attempted': True, 'promoted': False, 'message': ''}
+            try:
+                from apps.students.services import check_and_promote_student
+                ok, msg = check_and_promote_student(ev.student_id, actor=hod_user, request=request)
+                ev._promotion_outcome.update(promoted=bool(ok), message=msg or '')
+            except Exception:
+                import logging as _logging
+                _logging.getLogger(__name__).exception(
+                    'Auto-promotion failed after HOD simple endorsement for EV %s; endorsement stands.', ev.id)
+                ev._promotion_outcome.update(
+                    promoted=False,
+                    message='Auto-promotion deferred by an unexpected error; endorsement stands. Use Promote Class.')
+        else:
+            ev.final_eligible = False
+            ev._promotion_outcome = {'attempted': False, 'promoted': False, 'message': ''}
+
+        ev.save()
+        from apps.audit.models import AuditLog as _AuditLog
+        from apps.audit.services import audit_log as _audit_log
+        _audit_log(
+            request=request,
+            actor=hod_user,
+            action=_AuditLog.Action.VERIFY,
+            target_type='EligibilityVerification',
+            target_id=str(ev.id),
+            target_display=f'{ev.student.display_name} -> Sem {ev.target_semester.number if ev.target_semester else "?"}',
+            old_value=old_snapshot,
+            new_value={
+                'hod_status': ev.hod_status,
+                'final_eligible': ev.final_eligible,
+                'class_teacher_status': ev.class_teacher_status,
+            },
+            reason=str(remarks or 'HOD simple eligibility marking (profile-only)')[:500],
+            description=(
+                f"HOD marked {ev.student.display_name} {status_decision} "
+                f"(profile-only, final_eligible={ev.final_eligible})."
+            ),
+        )
+        return ev
+
+
 def submit_semester_marks(student, semester_number, exam_session, subjects_data, seat_number='', actor=None, request=None):
     """
     Process student marks submission / correction.
