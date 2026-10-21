@@ -717,6 +717,13 @@ class DivisionViewSet(viewsets.ModelViewSet):
                 from apps.academic_structure.services import sync_class_teacher
                 sync_class_teacher(div, new_teacher, user, self.request,
                                    reason='HOD class-teacher assignment')
+                # Re-fetch so the response body reflects the DB: the sync
+                # service updates a fresh copy of the row, leaving the
+                # in-memory instance with the stale class teacher — which
+                # would make every first assignment LOOK failed to the HOD
+                # (UI shows the old teacher until a second PATCH re-fetches).
+                serializer.instance = type(div).objects.select_related(
+                    'class_teacher').get(pk=div.pk)
     @action(detail=True, methods=['get'], url_path='subjects')
     def division_subjects(self, request, pk=None):
         """Scheme subject slots for this division (drives the HOD teacher UI).

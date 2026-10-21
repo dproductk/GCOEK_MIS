@@ -4,7 +4,6 @@ import { useAuth } from '../../context/AuthContext';
 import facultyApi from '../../api/facultyApi';
 import academicApi from '../../api/academicApi';
 import PageHeader from '../../components/common/PageHeader';
-import PasswordChangeForm from '../../components/auth/PasswordChangeForm';
 import {
   User,
   Award,
@@ -18,7 +17,6 @@ import {
   Info,
   ChevronDown,
   ArrowLeft,
-  Lock,
 } from 'lucide-react';
 
 const DAYS = Array.from({ length: 31 }, (_, i) => String(i + 1));
@@ -798,11 +796,9 @@ export default function FacultyProfilePage() {
   ];
 
   // Password change is strictly self-service: the backend ChangePasswordView
-  // only ever updates request.user, so expose the Security tab solely on the
-  // viewer's OWN profile (/profile), never on another faculty record
-  // (/faculty/:id) opened from the directory. This one tab covers Faculty,
-  // Class Teacher, HOD, Accountant, Admin Head and Sysadmin, since all of
-  // them render through ProfileDispatcher → FacultyProfilePage.
+  // only ever updates request.user. The Security tab moved out of the tabs
+  // and now lives at /profile/security (sidebar link), which every
+  // non-student role reaches through its own sidebar entry.
   const isOwnProfile = !id;
   // Option A (strict): student-only cannot open directory portfolios.
   // Backend also returns 403. Own-profile path (!id) never happens for
@@ -833,12 +829,10 @@ export default function FacultyProfilePage() {
   }
   // Edit-lock: directory views are always read-only; own profile starts
   // locked and only unlocks after Edit is clicked. Accounts with no Faculty
-  // row (404) can never edit — Security tab stays available.
+  // row (404) can never edit.
   const canEdit = isOwnProfile && !noProfile;
   const fieldsLocked = !isEditing;
-  const visibleTabs = isOwnProfile
-    ? [...tabs, { id: 'security', label: 'Security', icon: Lock }]
-    : tabs;
+  const visibleTabs = tabs;
 
   return (
     <>
@@ -2434,20 +2428,8 @@ export default function FacultyProfilePage() {
           </div>
         )}
 
-        {/* Tab 6: Security — update password (same experience as first-login
-            password change; self-service only, covers all non-student roles) */}
-        {activeTab === 'security' && isOwnProfile && (
-          <div style={{ marginTop: '1.25rem', display: 'flex', justifyContent: 'center' }}>
-            <div className="profile-section-card" style={{ width: '100%', maxWidth: '560px' }}>
-              <h2 className="profile-section-title">Update Password</h2>
-              <p style={{ fontSize: '0.8125rem', color: '#64748B', margin: '0 0 1.25rem 0' }}>
-                Choose a strong, unique password for your account. Same security
-                policy as your first-login password setup.
-              </p>
-              <PasswordChangeForm embedded />
-            </div>
-          </div>
-        )}
+        {/* Security/password-change tab removed — moved to /profile/security
+            (sidebar link). Same ChangePasswordPage + endpoint for all roles. */}
       </div>
 
       {/* Embedded scoped styling for profile controls */}

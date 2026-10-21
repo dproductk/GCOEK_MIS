@@ -22,6 +22,7 @@ import {
   ChevronRight,
   Mail,
   Award,
+  Lock,
 } from 'lucide-react';
 
 /**
@@ -36,7 +37,8 @@ const NAV_CONFIG = {
           { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
           { to: '/fees', label: 'Payment History', icon: CreditCard },
           { to: '/results', label: 'Results', icon: Award },
-          { to: '/profile', label: 'View/Update Profile', icon: UserCircle },
+          { to: '/profile', label: 'View/Update Profile', icon: UserCircle, end: true },
+          { to: '/profile/security', label: 'Security', icon: Lock },
         ],
       },
     ],
@@ -66,7 +68,8 @@ const NAV_CONFIG = {
         links: [
           { to: '/departments', label: 'Academic Structure', icon: Building2 },
           { to: '/schemes', label: 'Schemes & Subjects', icon: BookOpen },
-          { to: '/profile', label: 'Profile', icon: UserCircle },
+          { to: '/profile', label: 'Profile', icon: UserCircle, end: true },
+          { to: '/profile/security', label: 'Security', icon: Lock },
         ],
       },
     ],
@@ -80,7 +83,8 @@ const NAV_CONFIG = {
           { to: '/students', label: 'Student Directory', icon: Users },
           { to: '/departments', label: 'Academic Structure', icon: Building2 },
           { to: '/schemes', label: 'Schemes & Subjects', icon: BookOpen },
-          { to: '/profile', label: 'Profile', icon: UserCircle },
+          { to: '/profile', label: 'Profile', icon: UserCircle, end: true },
+          { to: '/profile/security', label: 'Security', icon: Lock },
         ],
       },
     ],
@@ -93,7 +97,8 @@ const NAV_CONFIG = {
           { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
           { to: '/departments', label: 'Academic Structure', icon: Building2 },
           { to: '/schemes', label: 'Schemes & Subjects', icon: BookOpen },
-          { to: '/profile', label: 'Profile', icon: UserCircle },
+          { to: '/profile', label: 'Profile', icon: UserCircle, end: true },
+          { to: '/profile/security', label: 'Security', icon: Lock },
         ],
       },
     ],
@@ -110,7 +115,8 @@ const NAV_CONFIG = {
           { to: '/eligibility', label: 'Result Verification (Paused)', icon: ClipboardList },
           { to: '/departments', label: 'Academic Structure', icon: Building2 },
           { to: '/schemes', label: 'Schemes & Subjects', icon: BookOpen },
-          { to: '/profile', label: 'Profile', icon: UserCircle },
+          { to: '/profile', label: 'Profile', icon: UserCircle, end: true },
+          { to: '/profile/security', label: 'Security', icon: Lock },
         ],
       },
     ],
@@ -122,12 +128,14 @@ const NAV_CONFIG = {
         links: [
           { to: '/dashboard', label: 'Department Dashboard', icon: LayoutDashboard },
           { to: '/department/students', label: 'Student Directory', icon: Users },
+          { to: '/department/students-admin', label: 'Student Account Admin', icon: UserCog },
           { to: '/department/classes', label: 'Classes & Divisions', icon: GraduationCap },
           { to: '/mark-eligible', label: 'Mark Student Eligibility', icon: ClipboardList },
           { to: '/eligibility', label: 'Result Verification (Paused)', icon: ClipboardList },
           { to: '/departments', label: 'Academic Structure', icon: Building2 },
           { to: '/schemes', label: 'Schemes & Subjects', icon: BookOpen },
-          { to: '/profile', label: 'Profile', icon: UserCircle },
+          { to: '/profile', label: 'Profile', icon: UserCircle, end: true },
+          { to: '/profile/security', label: 'Security', icon: Lock },
         ],
       },
     ],
@@ -148,7 +156,8 @@ const NAV_CONFIG = {
           { to: '/students', label: 'Student Directory', icon: Users },
           { to: '/departments', label: 'Academic Structure', icon: Building2 },
           { to: '/schemes', label: 'Schemes & Subjects', icon: BookOpen },
-          { to: '/profile', label: 'Profile', icon: UserCircle },
+          { to: '/profile', label: 'Profile', icon: UserCircle, end: true },
+          { to: '/profile/security', label: 'Security', icon: Lock },
         ],
       },
     ],
@@ -169,7 +178,8 @@ const NAV_CONFIG = {
         links: [
           { to: '/admin/departments', label: 'Academic Structure', icon: Building2 },
           { to: '/admin/schemes', label: 'Schemes & Subjects', icon: BookOpen },
-          { to: '/profile', label: 'Profile', icon: UserCircle },
+          { to: '/profile', label: 'Profile', icon: UserCircle, end: true },
+          { to: '/profile/security', label: 'Security', icon: Lock },
         ],
       },
     ],
@@ -317,6 +327,7 @@ export default function AppLayout() {
                   <NavLink
                     key={`${link.to}-${lIdx}`}
                     to={link.to}
+                    end={Boolean(link.end)}
                     className={({ isActive }) =>
                       `app-sidebar-link ${isActive ? 'active' : ''}`
                     }

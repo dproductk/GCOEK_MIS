@@ -24,6 +24,7 @@ import EligibilityVerificationPage from './pages/results/EligibilityVerification
 import MarkEligibilityPage from './pages/eligibility/MarkEligibilityPage';
 import MyClassPage from './pages/class_teacher/MyClassPage';
 import HODDivisionsBatchesPage from './pages/hod/HODDivisionsBatchesPage';
+import HODStudentAdminPage from './pages/hod/HODStudentAdminPage';
 import FeeHeadConfigPage from './pages/finance/FeeHeadConfigPage';
 import FeeDeskPage from './pages/finance/FeeDeskPage';
 import CandidateFeeSetPage from './pages/finance/CandidateFeeSetPage';
@@ -96,6 +97,7 @@ export default function App() {
               keeps stats + intake overview. */}
           <Route path="/my-class" element={<MyClassPage />} />
           <Route path="/department/classes" element={<HODDivisionsBatchesPage />} />
+          <Route path="/department/students-admin" element={<HODStudentAdminPage />} />
           <Route path="/department/divisions" element={<Navigate to="/department/classes" replace />} />
           <Route path="/classes" element={<Navigate to="/department/classes" replace />} />
           <Route path="/divisions" element={<Navigate to="/department/classes" replace />} />

@@ -5,7 +5,6 @@ import studentApi from '../../api/studentApi';
 import { LoadingState, ErrorState } from '../../components/common/StateDisplays';
 import PageHeader from '../../components/common/PageHeader';
 import Modal from '../../components/common/Modal';
-import PasswordChangeForm from '../../components/auth/PasswordChangeForm';
 import {
   GraduationCap,
   Image as ImageIcon,
@@ -23,12 +22,27 @@ import {
 // Server enforces: Applied=No -> NONE; Applied=Yes requires a real type.
 const SCHOLARSHIP_OPTIONS = [
   { value: 'NONE', label: 'None' },
-  { value: 'EBC', label: 'EBC (Economically Backward Class)' },
-  { value: 'OBC_FREESHIP', label: 'OBC Freeship' },
-  { value: 'SC', label: 'SC Scholarship' },
-  { value: 'ST', label: 'ST Scholarship' },
-  { value: 'NT_C', label: 'NT-C' },
-  { value: 'MINORITY', label: 'Minority Scholarship' },
+  { value: 'DTE_MINORITY', label: 'Directorate of Technical Education - Scholarship for students of minority communities pursuing Higher and Professional courses (DTE)' },
+  { value: 'DTE_EBC_RCS', label: 'Directorate of Technical Education - Rajarshi Chhatrapati Shahu Maharaj Shikshan Shulk Shishyavrutti Yojna (EBC)' },
+  { value: 'OBC_VJNT_SBC_MAINT', label: 'OBC, SEBC, VJNT & SBC Welfare Department - Payment of Maintenance Allowance to VJNT and SBC Students Studying in Professional Courses and Living in Hostel Attached to Professional Colleges' },
+  { value: 'OBC_GIRLS_TF_EF', label: 'OBC, SEBC, VJNT & SBC Welfare Department - Payment of Tuition Fees and Examination Fees to OBC Girls Pursuing Professional Courses' },
+  { value: 'OBC_PMS', label: 'OBC, SEBC, VJNT & SBC Welfare Department - Post Matric Scholarship to OBC Students' },
+  { value: 'SBC_PMS', label: 'OBC, SEBC, VJNT & SBC Welfare Department - Post Matric Scholarship to SBC Students' },
+  { value: 'OBC_GIRLS_PMS', label: 'OBC, SEBC, VJNT & SBC Welfare Department - Post Matric Scholarship to the Girls Belonging to Other Backward Classes taking admission in Professional Courses' },
+  { value: 'VJNT_PMS', label: 'OBC, SEBC, VJNT & SBC Welfare Department - Post Matric Scholarship to VJNT Students' },
+  { value: 'OBC_TF_EF', label: 'OBC, SEBC, VJNT & SBC Welfare Department - Tuition Fees and Examination Fees to OBC Students' },
+  { value: 'SBC_TF_EF', label: 'OBC, SEBC, VJNT & SBC Welfare Department - Tuition Fees and Examination Fees to SBC Students' },
+  { value: 'VJNT_TF_EF', label: 'OBC, SEBC, VJNT & SBC Welfare Department - Tuition Fees and Examination Fees to VJNT Students' },
+  { value: 'PWD_PMS', label: 'Persons with Disabilities Welfare Department - Post-Matric Scholarship for persons with disability' },
+  { value: 'SC_GOI_PMS', label: 'Social Justice and Special Assistance Department (SC) - Government of India Post-Matric Scholarship' },
+  { value: 'SC_MAINT', label: 'Social Justice and Special Assistance Department (SC) - Maintenance Allowance for student Studying in professional courses' },
+  { value: 'SC_FREESHIP', label: 'Social Justice and Special Assistance Department (SC) - Post-Matric Tuition Fee and Examination Fee (Freeship)' },
+  { value: 'ST_GOI_PMS', label: 'Tribal Development Department (ST) - Post Matric Scholarship Scheme (Government Of India)' },
+  { value: 'ST_FREESHIP', label: 'Tribal Development Department (ST) - Tuition Fee & Exam Fee for Tribal Students (Freeship)' },
+  { value: 'NSP_TOPCLASS_PWD', label: 'NSP - Scholarship for Top Class Education for students with Disabilities' },
+  { value: 'NSP_PRAGATI', label: 'NSP - Pragati Scholarship Scheme (Diploma/Degree)' },
+  { value: 'NSP_SAKSHAM', label: 'NSP - Saksham Scholarship Scheme (Diploma/Degree)' },
+  { value: 'NSP_SWANATH', label: 'NSP - Swanath Scholarship Scheme Diploma /Degree)' },
 ];
 const SCHOLARSHIP_CODE_VALUES = new Set(SCHOLARSHIP_OPTIONS.map((o) => o.value));
 // Map legacy label values (previously stored/selected) to codes.
@@ -36,12 +50,25 @@ const normalizeScholarshipLabel = (v) => {
   const key = String(v || '').trim().toUpperCase();
   const map = {
     'NONE': 'NONE', '': 'NONE',
-    'EBC': 'EBC',
-    'OBC FREESHIP': 'OBC_FREESHIP', 'OBC_FREESHIP': 'OBC_FREESHIP',
-    'SC SCHOLARSHIP': 'SC', 'SC': 'SC',
-    'ST SCHOLARSHIP': 'ST', 'ST': 'ST',
-    'NT-C': 'NT_C', 'NT_C': 'NT_C', 'NTC': 'NT_C',
-    'MINORITY SCHOLARSHIP': 'MINORITY', 'MINORITY': 'MINORITY',
+    // Current codes
+    'DTE MINORITY': 'DTE_MINORITY', 'DTE_MINORITY': 'DTE_MINORITY',
+    'DTE EBC RCS': 'DTE_EBC_RCS', 'DTE_EBC_RCS': 'DTE_EBC_RCS',
+    'OBC_VJNT_SBC_MAINT': 'OBC_VJNT_SBC_MAINT',
+    'OBC_GIRLS_TF_EF': 'OBC_GIRLS_TF_EF',
+    'OBC_PMS': 'OBC_PMS', 'SBC_PMS': 'SBC_PMS', 'OBC_GIRLS_PMS': 'OBC_GIRLS_PMS',
+    'VJNT_PMS': 'VJNT_PMS', 'OBC_TF_EF': 'OBC_TF_EF', 'SBC_TF_EF': 'SBC_TF_EF',
+    'VJNT_TF_EF': 'VJNT_TF_EF', 'PWD_PMS': 'PWD_PMS',
+    'SC_GOI_PMS': 'SC_GOI_PMS', 'SC_MAINT': 'SC_MAINT', 'SC_FREESHIP': 'SC_FREESHIP',
+    'ST_GOI_PMS': 'ST_GOI_PMS', 'ST_FREESHIP': 'ST_FREESHIP',
+    'NSP_TOPCLASS_PWD': 'NSP_TOPCLASS_PWD', 'NSP_PRAGATI': 'NSP_PRAGATI',
+    'NSP_SAKSHAM': 'NSP_SAKSHAM', 'NSP_SWANATH': 'NSP_SWANATH',
+    // Legacy short labels -> closest new scheme code
+    'EBC': 'DTE_EBC_RCS',
+    'OBC FREESHIP': 'OBC_TF_EF', 'OBC_FREESHIP': 'OBC_TF_EF',
+    'SC SCHOLARSHIP': 'SC_GOI_PMS', 'SC': 'SC_GOI_PMS',
+    'ST SCHOLARSHIP': 'ST_GOI_PMS', 'ST': 'ST_GOI_PMS',
+    'NT-C': 'VJNT_TF_EF', 'NT_C': 'VJNT_TF_EF', 'NTC': 'VJNT_TF_EF',
+    'MINORITY SCHOLARSHIP': 'DTE_MINORITY', 'MINORITY': 'DTE_MINORITY',
   };
   return map[key] || 'NONE';
 };
@@ -697,12 +724,10 @@ export default function StudentProfilePage() {
   ];
 
   // Password change is strictly self-service: the backend ChangePasswordView
-  // only ever updates request.user, so expose the Security tab solely on the
-  // student's OWN profile (/profile), never on another student's record
-  // (/students/:id) opened from the directory.
-  const visibleTabs = isOwnProfile
-    ? [...tabs, { id: 'security', label: 'Security', icon: Lock }]
-    : tabs;
+  // only ever updates request.user. It moved out of these tabs and now lives
+  // at /profile/security (sidebar link), available on the user's own account
+  // only — the Security tab used to appear solely on that same condition.
+  const visibleTabs = tabs;
 
   return (
     <>
@@ -2725,26 +2750,9 @@ export default function StudentProfilePage() {
           </div>
         )}
 
-        {/* ========================================================
-            TAB 6: Security — update password (same experience as
-            first-login password change; self-service only)
-            ======================================================== */}
-        {activeTab === 'security' && isOwnProfile && (
-          <div style={{ display: 'flex', justifyContent: 'center' }}>
-            <div className="edvana-card" style={{ width: '100%', maxWidth: '560px' }}>
-              <div className="edvana-card-header">
-                <h3 className="edvana-card-title">Update Password</h3>
-                <p className="edvana-card-description">
-                  Choose a strong, unique password for your account. Same security
-                  policy as your first-login password setup.
-                </p>
-              </div>
-              <div className="edvana-card-body">
-                <PasswordChangeForm embedded />
-              </div>
-            </div>
-          </div>
-        )}
+        {/* Password change used to live here as "TAB 6: Security". It was
+            moved to /profile/security (sidebar link) — same form, same
+            endpoint; see ChangePasswordPage. */}
       </div>
 
       {/* One-time lock warning modal — explicit confirm, no accidental lock */}

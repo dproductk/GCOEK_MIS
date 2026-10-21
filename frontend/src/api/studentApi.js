@@ -43,6 +43,21 @@ export const studentApi = {
     return client.post(`/students/${id}/assign-division/`, body);
   },
 
+  /**
+   * Staff/HOD unlock of a locked student profile (recourse for one more edit).
+   * Server enforces department scoping for HODs; reason is mandatory and audited.
+   */
+  unlockStudentProfile: (id, reason) =>
+    client.post(`/students/${id}/unlock/`, { reason }),
+
+  /**
+   * Staff/HOD password reset typed by the caller (department-scoped on server).
+   * The student is forced to change the password at next login.
+   * Body: { new_password, reason }. The password is never echoed back.
+   */
+  resetStudentPassword: (id, payload) =>
+    client.post(`/students/${id}/reset-password/`, payload),
+
   // ─── Student documents (photo / signature / allotment / marksheets) ───
   // Size policy: ALLOTMENT_LETTER max 200 KB, all others max 150 KB (enforced server-side too).
   documentSizeLimits: {

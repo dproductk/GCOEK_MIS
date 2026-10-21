@@ -232,6 +232,7 @@ class StudentListSerializer(serializers.ModelSerializer):
             'gender',
             'username',
             'has_login',
+            'profile_locked',
             'is_eligible',
             'suggested_semester',
             'suggested_year',

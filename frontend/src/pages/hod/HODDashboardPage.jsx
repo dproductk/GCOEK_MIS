@@ -172,7 +172,7 @@ export default function HODDashboardPage() {
       setDivisions(divRes.data?.results || divRes.data || []);
       setDepartments(deptRes.data?.results || deptRes.data || []);
       const _allFac = facRes.data?.results || facRes.data || [];
-      setFaculties(_allFac.filter((f) => !['DEPUTED', 'TEMPORARY_USANWARI'].includes(f.employment_type)));
+      setFaculties(_allFac.filter((f) => !['TEMPORARY_USANWARI'].includes(f.employment_type)));
       setStudents(stuRes.data?.results || stuRes.data || []);
       setEligibilities(eligRes.data?.results || eligRes.data || []);
       setSemesters(semRes.data?.results || semRes.data || []);
@@ -338,7 +338,7 @@ export default function HODDashboardPage() {
         return !f.department_id && !f.department_code ? true : false;
       })
     : faculties
-  ).filter((f) => !['DEPUTED', 'TEMPORARY_USANWARI'].includes(f.employment_type));
+  ).filter((f) => !['TEMPORARY_USANWARI'].includes(f.employment_type));
 
   const deptStudents = hodDeptCode
     ? students.filter((s) => s.department_code === hodDeptCode)
@@ -1002,7 +1002,7 @@ export default function HODDashboardPage() {
                     scheme_id: '',
                     year_label: semObj ? ({ 1: 'FY', 2: 'SY', 3: 'TY', 4: 'Final Year' }[semObj.year_level] || '') : '',
                     seat_capacity: existing.seat_capacity || 60,
-                    class_teacher: existing.class_teacher || '',
+                    class_teacher: existing.class_teacher_faculty_id || '',
                   });
                   setDivFormError('');
                   setCreateDivModalOpen(true);
@@ -1741,7 +1741,7 @@ export default function HODDashboardPage() {
                                           type="button"
                                           className="edvana-btn edvana-btn-outline edvana-btn-sm"
                                           style={{ fontSize: '0.75rem', padding: '0.3rem 0.65rem' }}
-                                          onClick={() => { setSelectedDivision(d); setSelectedFacultyId(d.class_teacher || ''); setAssignModalOpen(true); }}
+                                          onClick={() => { setSelectedDivision(d); setSelectedFacultyId(d.class_teacher_faculty_id || ''); setAssignModalOpen(true); }}
                                         >
                                           <UserCheck size={12} style={{ marginRight: '0.3rem' }} />
                                           {d.class_teacher_name ? 'Change Teacher' : 'Assign Teacher'}
@@ -1925,7 +1925,7 @@ export default function HODDashboardPage() {
                     <button
                       type="button"
                       className="edvana-btn edvana-btn-outline edvana-btn-sm"
-                      onClick={() => { setSelectedDivision(d); setSelectedFacultyId(d.class_teacher || ''); setAssignModalOpen(true); }}
+                      onClick={() => { setSelectedDivision(d); setSelectedFacultyId(d.class_teacher_faculty_id || ''); setAssignModalOpen(true); }}
                     >
                       {d.class_teacher_name ? 'Change Teacher' : 'Assign Teacher'}
                     </button>

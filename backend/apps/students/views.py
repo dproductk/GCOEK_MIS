@@ -467,12 +467,28 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
                 valid_types = {c for c, _ in _Student.ScholarshipType.choices}
                 # Accept frontend labels/codes; normalize to code.
                 label_map = {
-                    'NONE': 'NONE', 'EBC': 'EBC',
-                    'OBC FREESHIP': 'OBC_FREESHIP', 'OBC_FREESHIP': 'OBC_FREESHIP',
-                    'SC SCHOLARSHIP': 'SC', 'SC': 'SC',
-                    'ST SCHOLARSHIP': 'ST', 'ST': 'ST',
-                    'NT-C': 'NT_C', 'NT_C': 'NT_C', 'NTC': 'NT_C',
-                    'MINORITY SCHOLARSHIP': 'MINORITY', 'MINORITY': 'MINORITY',
+                    'NONE': 'NONE',
+                    'DTE_MINORITY': 'DTE_MINORITY',
+                    'DTE_EBC_RCS': 'DTE_EBC_RCS',
+                    'OBC_VJNT_SBC_MAINT': 'OBC_VJNT_SBC_MAINT',
+                    'OBC_GIRLS_TF_EF': 'OBC_GIRLS_TF_EF',
+                    'OBC_PMS': 'OBC_PMS',
+                    'SBC_PMS': 'SBC_PMS',
+                    'OBC_GIRLS_PMS': 'OBC_GIRLS_PMS',
+                    'VJNT_PMS': 'VJNT_PMS',
+                    'OBC_TF_EF': 'OBC_TF_EF',
+                    'SBC_TF_EF': 'SBC_TF_EF',
+                    'VJNT_TF_EF': 'VJNT_TF_EF',
+                    'PWD_PMS': 'PWD_PMS',
+                    'SC_GOI_PMS': 'SC_GOI_PMS',
+                    'SC_MAINT': 'SC_MAINT',
+                    'SC_FREESHIP': 'SC_FREESHIP',
+                    'ST_GOI_PMS': 'ST_GOI_PMS',
+                    'ST_FREESHIP': 'ST_FREESHIP',
+                    'NSP_TOPCLASS_PWD': 'NSP_TOPCLASS_PWD',
+                    'NSP_PRAGATI': 'NSP_PRAGATI',
+                    'NSP_SAKSHAM': 'NSP_SAKSHAM',
+                    'NSP_SWANATH': 'NSP_SWANATH',
                 }
                 raw_applied = data.get('scholarship_applied', student.scholarship_applied)
                 if isinstance(raw_applied, str):
@@ -722,7 +738,8 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
         """
         Staff unlock for a locked student profile (recourse path).
 
-        Requires SYSADMIN or ADMIN_HEAD (or superuser). Reason (min 5 chars)
+        Requires SYSADMIN or ADMIN_HEAD (or superuser), or the HOD of the
+        student's current-enrollment department. Reason (min 5 chars)
         is mandatory and audited. Students can never call this for
         themselves — it is detail-route + role-gated.
         Note: earlier teacher reviews / HOD endorsements stay on record;
@@ -733,8 +750,23 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
 
         student = self.get_object()
         user = request.user
-        if not (user.is_superuser or user_has_role(user, 'SYSADMIN') or user_has_role(user, 'ADMIN_HEAD')):
-            raise PermissionDenied('Only Sysadmin or Admin Head can unlock a student profile.')
+        scopes = get_user_scopes(user)
+        current_enrollment = student.enrollments.filter(is_current=True).first()
+        # Authorization mirrors assign_division: sysadmin/admin head act
+        # college-wide; a HOD may act only on students whose current
+        # enrollment belongs to one of their scoped departments.
+        is_privileged_staff = (
+            user.is_superuser
+            or user_has_role(user, 'SYSADMIN')
+            or user_has_role(user, 'ADMIN_HEAD')
+        )
+        is_dept_hod = (
+            'HOD' in scopes['roles']
+            and current_enrollment is not None
+            and current_enrollment.department_id in scopes['department_ids']
+        )
+        if not (is_privileged_staff or is_dept_hod):
+            raise PermissionDenied('Only the department HOD or an Administrator can unlock a student profile.')
         reason = str(request.data.get('reason') or '').strip()
         if len(reason) < 5:
             raise ValidationError({'reason': 'A reason of at least 5 characters is required.'})
@@ -756,11 +788,123 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
                 target_id=str(student.id),
                 target_display=student.display_name,
                 reason=reason,
-                description=f'Staff unlocked student profile: {reason}',
+                description=(
+                    f"Student profile unlocked by "
+                    f"{'HOD (own department)' if is_dept_hod and not is_privileged_staff else 'admin staff'}: {reason}"
+                ),
             )
         serializer = StudentProfileSerializer(student)
         return Response(
             {'detail': 'Profile unlocked. Student may edit once more.', 'profile': serializer.data},
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=['post'], url_path='reset-password')
+    def reset_password(self, request, pk=None):
+        """
+        Staff/HOD reset of a student's login password.
+
+        For students who cannot even use change-password because they
+        forgot their password (no working forgot-password email/SMS).
+
+        Authorization mirrors `unlock`: SYSADMIN / ADMIN_HEAD unrestricted,
+        HOD restricted to students whose current enrollment department is
+        one of their scoped departments. Everyone else (including STUDENT
+        tokens) is denied before any password work happens.
+
+        The caller types the new password. It is validated against the
+        project password rules, must differ from the login username, and
+        the student is forced to change it at next login
+        (must_change_password=True). The previous hash is recorded in
+        PasswordHistory per project convention. The new password is never
+        logged, echoed back, or returned.
+        """
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.password_validation import validate_password
+        from django.db import transaction
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+
+        from apps.authentication.models import PasswordHistory
+
+        User = get_user_model()
+        student = self.get_object()
+        user = request.user
+        scopes = get_user_scopes(user)
+
+        current_enrollment = student.enrollments.filter(is_current=True).first()
+        is_privileged_staff = (
+            user.is_superuser
+            or 'SYSADMIN' in scopes['roles']
+            or 'ADMIN_HEAD' in scopes['roles']
+        )
+        is_dept_hod = (
+            'HOD' in scopes['roles']
+            and current_enrollment is not None
+            and current_enrollment.department_id in scopes['department_ids']
+        )
+        if not (is_privileged_staff or is_dept_hod):
+            raise PermissionDenied('Only the department HOD or an Administrator can reset a student password.')
+
+        target_user = student.user
+        if target_user is None or not target_user.is_active:
+            return Response(
+                {'detail': 'Student has no active login account to reset.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        new_password = str(request.data.get('new_password') or '')
+        reason = str(request.data.get('reason') or '').strip()
+        if len(reason) < 5:
+            raise ValidationError({'reason': 'A reason of at least 5 characters is required.'})
+        if new_password == target_user.username:
+            raise ValidationError(
+                {'new_password': 'New password cannot be the same as the login username.'}
+            )
+        try:
+            validate_password(new_password, user=target_user)
+        except Exception as exc:
+            raise ValidationError({'new_password': getattr(exc, 'messages', None) or [str(exc)]})
+
+        # Record the hash that was previously active so it cannot be silently
+        # reused later (PasswordHistory rows hold the hash set at a change,
+        # per ChangePasswordView convention).
+        previous_hash = target_user.password
+        with transaction.atomic():
+            target_user = User.objects.select_for_update().get(id=student.user_id)
+            target_user.set_password(new_password)
+            target_user.must_change_password = True
+            target_user.save(update_fields=['password', 'must_change_password', 'updated_at'])
+            PasswordHistory.objects.create(
+                user=target_user,
+                password_hash=previous_hash,
+            )
+            # Also record the temporary hash so the student cannot switch
+            # back to the HOD-typed password later (see ChangePasswordView).
+            PasswordHistory.objects.create(
+                user=target_user,
+                password_hash=target_user.password,
+            )
+            audit_log(
+                request=request,
+                actor=user,
+                action=AuditLog.Action.PASSWORD_CHANGE,
+                target_type='User',
+                target_id=str(target_user.id),
+                target_display=target_user.username,
+                reason=reason,
+                description=(
+                    "Student login password reset by "
+                    f"{'HOD (own department)' if is_dept_hod and not is_privileged_staff else 'admin staff'}: {reason}"
+                ),
+            )
+        return Response(
+            {
+                'detail': (
+                    'Password reset. Share it with the student directly; the '
+                    'student must change it at next login.'
+                ),
+                'must_change_password': True,
+            },
             status=status.HTTP_200_OK,
         )
 

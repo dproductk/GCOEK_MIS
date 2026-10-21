@@ -484,12 +484,25 @@ export default function CandidateFeeSetPage() {
                   {/* Row 6 */}
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Scholarship Applied</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>—</div>
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>
+                      {student?.scholarship_applied == null ? '—' : (student.scholarship_applied ? 'Yes' : 'No')}
+                    </div>
                   </div>
 
-                  <div>
+                  {/* Scholarship scheme names are long (e.g. "OBC, SEBC, VJNT & SBC
+                      Welfare Department — PAN Card..."), so this cell spans two
+                      grid columns and wraps fully instead of truncating. */}
+                  <div style={{ gridColumn: 'span 2', minWidth: 0 }}>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Scholarship Type</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>—</div>
+                    <div style={{
+                      fontSize: '0.8125rem',
+                      color: '#475569',
+                      lineHeight: 1.5,
+                      overflowWrap: 'anywhere',
+                      whiteSpace: 'normal',
+                    }}>
+                      {student?.scholarship_type_display || student?.scholarship_type || '—'}
+                    </div>
                   </div>
 
                   <div>

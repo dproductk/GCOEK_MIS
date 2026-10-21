@@ -63,7 +63,11 @@ class Faculty(BaseModel):
 
     #: Employment types that are non-teaching and must never hold
     #: subject-teacher / class-teacher slots. App-level only, no DB change.
-    NON_TEACHING_EMPLOYMENT_TYPES = frozenset({'DEPUTED', 'TEMPORARY_USANWARI'})
+    #: Genuinely non-teaching employment categories. DEPUTED teachers are
+    #: still teaching faculty and MUST be assignable as class/subject
+    #: teachers (removed from this guard), so only temporary/non-teaching
+    #: categories remain blocked.
+    NON_TEACHING_EMPLOYMENT_TYPES = frozenset({'TEMPORARY_USANWARI'})
 
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,

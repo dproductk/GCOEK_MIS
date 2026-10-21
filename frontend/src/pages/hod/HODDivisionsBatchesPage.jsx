@@ -260,7 +260,7 @@ export default function HODDivisionsBatchesPage() {
       setSemesters(semList);
       setDivisions(divList);
       setStudents(stuList);
-      setFaculties(facList.filter((f) => !['DEPUTED', 'TEMPORARY_USANWARI'].includes(f.employment_type)));
+      setFaculties(facList.filter((f) => !['TEMPORARY_USANWARI'].includes(f.employment_type)));
       setSchemes(schemeList);
       setIntakes(Array.isArray(intakeList) ? intakeList : null);
     } catch (err) {
@@ -1212,11 +1212,11 @@ export default function HODDivisionsBatchesPage() {
                           <TeacherCell
                             holderLabel={div.class_teacher_name || ''}
                             editing={ctEditing}
-                            value={slotEdit[ctKey] !== undefined ? slotEdit[ctKey] : (div.class_teacher_faculty_id || div.class_teacher || '')}
+                            value={slotEdit[ctKey] !== undefined ? slotEdit[ctKey] : (div.class_teacher_faculty_id || '')}
                             faculties={faculties}
                             saving={savingSlot === ctKey}
                             placeholder={div.class_teacher_name ? 'Change teacher…' : 'Assign teacher…'}
-                            onEdit={() => setSlotEdit((prev) => ({ ...prev, [ctKey]: div.class_teacher_faculty_id || div.class_teacher || '' }))}
+                            onEdit={() => setSlotEdit((prev) => ({ ...prev, [ctKey]: div.class_teacher_faculty_id || '' }))}
                             onCancelEdit={() => setSlotEdit((prev) => {
                               const next = { ...prev };
                               delete next[ctKey];
