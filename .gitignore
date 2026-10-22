@@ -42,6 +42,17 @@ design/
 docs/
 doc/
 
+# Demo setup, seed, and scratch scripts
+setup_demo_accounts.py
+seed_*.py
+backend/check_accounts.py
+backend/ensure_test_accounts.py
+backend/create_ee_test_accounts.py
+backend/create_entc_test_accounts.py
+backend/create_years_schemes.py
+backend/backfill_ee_promotion_merge.py
+PROMPT_*.md
+
 # Node / Frontend
 node_modules/
 frontend/dist/
