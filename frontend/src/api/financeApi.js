@@ -11,6 +11,7 @@ export const financeApi = {
   getPaymentLedgers: (params) => client.get('/finance/ledger/', { params }),
   recordPayment: (data) => client.post('/finance/ledger/', data),
   getPaymentDetail: (id) => client.get(`/finance/ledger/${id}/`),
+  getReceiptPdf: (id) => client.get(`/finance/ledger/${id}/receipt-pdf/`, { responseType: 'blob' }),
   getMyPayments: () => client.get('/finance/ledger/my-payments/'),
   getFinanceAnalytics: (params) => client.get('/finance/ledger/analytics/', { params }),
 

@@ -117,12 +117,16 @@ def test_payment_ledger_status_and_balance(finance_setup):
 
 @pytest.mark.django_db
 def test_student_my_payments_self_service(api_client, finance_setup):
+    """Students see THAT the fee is paid, never receipt-level fields."""
     api_client.force_authenticate(user=finance_setup['user_stu1'])
     response = api_client.get('/api/v1/finance/ledger/my-payments/')
     assert response.status_code == status.HTTP_200_OK
     assert len(response.data) == 1
-    assert response.data[0]['receipt_no'] == 'GCOEK/2026/TEST/001'
     assert Decimal(str(response.data[0]['amount_paid'])) == Decimal('65000.00')
+    # Official receipt fields are fee-desk-only (printed at the counter).
+    assert 'receipt_no' not in response.data[0]
+    assert 'fee_breakdown' not in response.data[0]
+    assert 'transaction_ref' not in response.data[0]
 
 
 @pytest.mark.django_db
@@ -325,7 +329,8 @@ def test_manual_marking_happy_path_receipt_backend_generated(api_client, finance
     assert half.status_code == status.HTTP_400_BAD_REQUEST
 
     # 4. Full payment succeeds even when client sends a fake receipt_no;
-    # backend must ignore it and generate GCOEK/<year>/FEE/<nnnn>.
+    # backend must ignore it and generate <ROMAN>-<year.code>-<nnnn> (no
+    # enrollment in this test -> 1st year prefix 'I').
     good = api_client.post('/api/v1/finance/ledger/', {
         'student': str(stu.id), 'academic_year': str(year.id),
         'receipt_no': 'MY-BILL-123',
@@ -335,7 +340,7 @@ def test_manual_marking_happy_path_receipt_backend_generated(api_client, finance
     }, format='json')
     assert good.status_code in (200, 201), good.data
     assert good.data['receipt_no'] != 'MY-BILL-123'
-    assert good.data['receipt_no'].startswith('GCOEK/')
+    assert good.data['receipt_no'].startswith('I-2026-27-')
     assert good.data['status'] == PaymentLedger.PaymentStatus.PAID
 
     # 5. Second marking blocked (duplicate).
@@ -350,8 +355,9 @@ def test_manual_marking_happy_path_receipt_backend_generated(api_client, finance
 
 
 @pytest.mark.django_db
-def test_receipt_carries_fee_breakdown(api_client, finance_setup):
-    """Detailed bill: my-payments receipt must include the pay-head breakup."""
+def test_receipt_breakup_visible_to_desk_not_student(api_client, finance_setup):
+    """Pay-head breakup: the accountant's ledger view carries it; the student's
+    my-payments view does not (receipts print at the counter only)."""
     from apps.finance.models import StudentFeeAssessment
     stu1 = finance_setup['stu1']
     year = finance_setup['year']
@@ -360,17 +366,22 @@ def test_receipt_carries_fee_breakdown(api_client, finance_setup):
         fee_breakdown={'Tuition Fee': '60000.00', 'Development Fee': '5000.00'},
         total_fee=Decimal('65000.00'),
     )
+    # Student slice: no receipt fields at all.
     api_client.force_authenticate(user=finance_setup['user_stu1'])
     response = api_client.get('/api/v1/finance/ledger/my-payments/')
     assert response.status_code == status.HTTP_200_OK
     row = response.data[0]
-    assert row['fee_breakdown'] == {'Tuition Fee': '60000.00', 'Development Fee': '5000.00'}
+    assert 'fee_breakdown' not in row
+    assert 'receipt_no' not in row
 
-
-@pytest.mark.django_db
-def test_receipt_without_assessment_yields_empty_breakdown(api_client, finance_setup):
-    """Old receipts with no assessment still serialize (empty breakup)."""
-    api_client.force_authenticate(user=finance_setup['user_stu1'])
-    response = api_client.get('/api/v1/finance/ledger/my-payments/')
-    assert response.status_code == status.HTTP_200_OK
-    assert response.data[0]['fee_breakdown'] == {}
+    # Accountant slice: full receipt data including the frozen breakup.
+    api_client.force_authenticate(user=finance_setup['user_acc'])
+    ledger_res = api_client.get('/api/v1/finance/ledger/')
+    assert ledger_res.status_code == status.HTTP_200_OK
+    results = ledger_res.data.get('results', ledger_res.data)
+    ledger_row = next(
+        r for r in results
+        if r['enrollment_no'] == stu1.enrollment_no
+    )
+    assert ledger_row['fee_breakdown'] == {'Tuition Fee': '60000.00', 'Development Fee': '5000.00'}
+    assert ledger_row['receipt_no']

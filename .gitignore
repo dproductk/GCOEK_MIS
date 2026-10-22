@@ -31,6 +31,11 @@ db.sqlite3-journal
 staticfiles/
 media/
 
+# Database dumps & production imports
+*.dump
+*.sql
+prod_data/
+
 # Node / Frontend
 node_modules/
 frontend/dist/

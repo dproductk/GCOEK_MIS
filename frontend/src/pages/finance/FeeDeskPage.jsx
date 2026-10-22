@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { 
-  Search, RefreshCw, FileText, History, 
+  Search, RefreshCw, FileText, Printer,
   CheckCircle2, AlertCircle, X, Users, ChevronLeft, ChevronRight, Lock,
-  Globe, CreditCard, Check, ArrowRight, ShieldCheck, ExternalLink, RotateCcw
+  Globe, RotateCcw
 } from 'lucide-react';
 import studentApi from '../../api/studentApi';
 import financeApi from '../../api/financeApi';
@@ -12,6 +12,7 @@ import PageHeader from '../../components/common/PageHeader';
 import Modal from '../../components/common/Modal';
 import FormField from '../../components/common/FormField';
 import { LoadingState, EmptyState } from '../../components/common/StateDisplays';
+import FeeReceiptPdfModal from '../../components/finance/FeeReceiptPdfModal';
 
 export default function FeeDeskPage() {
   const navigate = useNavigate();
@@ -71,11 +72,11 @@ export default function FeeDeskPage() {
   });
   const [submittingPayment, setSubmittingPayment] = useState(false);
 
-  // History Modal State
-  const [showHistoryModal, setShowHistoryModal] = useState(false);
-  const [historyStudent, setHistoryStudent] = useState(null);
-  const [paymentRecords, setPaymentRecords] = useState([]);
-  const [loadingHistory, setLoadingHistory] = useState(false);
+  // Official Receipt Modal State (fee-desk-only printing)
+  const [showReceiptModal, setShowReceiptModal] = useState(false);
+  const [receiptStudent, setReceiptStudent] = useState(null);
+  const [receiptRecord, setReceiptRecord] = useState(null);
+  const [loadingReceipt, setLoadingReceipt] = useState(false);
 
   // Student whose fee was just set (from Set Fee page) pins at the top of
   // the desk so Mark Fee is one click away. Cleared via Clear Filters.
@@ -360,7 +361,7 @@ export default function FeeDeskPage() {
     const amountVal = parseFloat(markForm.amountPaid) || 0;
 
     try {
-      // No client receipt: the server sequences GCOEK/<year>/FEE/<nnnn>.
+      // No client receipt: the server sequences <ROMAN>-<year.code>-<nnnn> (e.g. IV-2026-27-0001).
       const payload = {
         student: markingStudent.id,
         academic_year: activeYear?.id,
@@ -407,20 +408,23 @@ export default function FeeDeskPage() {
     }
   };
 
-  // Action: Open History Modal
-  const handleOpenHistory = async (student) => {
-    setHistoryStudent(student);
-    setShowHistoryModal(true);
-    setLoadingHistory(true);
+  // Official Receipt Printer (fee-desk-only)
+  const handleOpenReceipt = async (student) => {
+    setReceiptStudent(student);
+    setShowReceiptModal(true);
+    setLoadingReceipt(true);
+    setReceiptRecord(null);
     try {
       const res = await financeApi.getPaymentLedgers({ search: student.enrollment_no || student.display_name });
       const records = res.data?.results || res.data || [];
-      const studentRecords = records.filter(r => r.student === student.id || r.enrollment_no === student.enrollment_no);
-      setPaymentRecords(studentRecords);
+      const studentRecords = records
+        .filter(r => r.student === student.id || r.enrollment_no === student.enrollment_no)
+        .sort((a, b) => new Date(b.payment_date) - new Date(a.payment_date));
+      setReceiptRecord(studentRecords[0] || null);
     } catch (err) {
-      console.error('Error fetching history:', err);
+      console.error('Error fetching receipt:', err);
     } finally {
-      setLoadingHistory(false);
+      setLoadingReceipt(false);
     }
   };
 
@@ -1160,40 +1164,62 @@ export default function FeeDeskPage() {
                                     </button>
                                   )}
 
-                                  {/* 3. History Button */}
-                                  <button
-                                    type="button"
-                                    onClick={() => handleOpenHistory(stu)}
-                                    style={{
-                                      background: '#ffffff',
-                                      color: '#475569',
-                                      border: '1px solid #cbd5e1',
-                                      borderRadius: '20px',
-                                      padding: '0 0.85rem',
-                                      height: '30px',
-                                      fontSize: '0.75rem',
-                                      fontWeight: 600,
-                                      cursor: 'pointer',
-                                      whiteSpace: 'nowrap',
-                                      display: 'inline-flex',
-                                      alignItems: 'center',
-                                      justifyContent: 'center',
-                                      gap: '0.3rem',
-                                      transition: 'all 0.15s ease'
-                                    }}
-                                    onMouseEnter={(e) => {
-                                      e.currentTarget.style.background = '#f8fafc';
-                                      e.currentTarget.style.borderColor = '#94a3b8';
-                                    }}
-                                    onMouseLeave={(e) => {
-                                      e.currentTarget.style.background = '#ffffff';
-                                      e.currentTarget.style.borderColor = '#cbd5e1';
-                                    }}
-                                    title="View payment receipt history"
-                                  >
-                                    <History size={12} style={{ color: '#64748b' }} />
-                                    <span>History</span>
-                                  </button>
+                                  {/* 3. Print Receipt Button (fee marked = receipt printable) */}
+                                  {isPaid ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenReceipt(stu)}
+                                      style={{
+                                        background: '#15803d',
+                                        color: '#ffffff',
+                                        border: 'none',
+                                        borderRadius: '20px',
+                                        padding: '0 0.95rem',
+                                        height: '30px',
+                                        fontSize: '0.75rem',
+                                        fontWeight: 600,
+                                        cursor: 'pointer',
+                                        whiteSpace: 'nowrap',
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        gap: '0.3rem',
+                                        transition: 'background 0.15s ease'
+                                      }}
+                                      onMouseEnter={(e) => e.currentTarget.style.background = '#166534'}
+                                      onMouseLeave={(e) => e.currentTarget.style.background = '#15803d'}
+                                      title="Print / download the official fee receipt"
+                                    >
+                                      <Printer size={12} />
+                                      <span>Print Receipt</span>
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      disabled
+                                      style={{
+                                        background: '#f8fafc',
+                                        color: '#94a3b8',
+                                        border: '1px solid #e2e8f0',
+                                        borderRadius: '20px',
+                                        padding: '0 0.85rem',
+                                        height: '30px',
+                                        fontSize: '0.75rem',
+                                        fontWeight: 600,
+                                        cursor: 'not-allowed',
+                                        whiteSpace: 'nowrap',
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        gap: '0.3rem',
+                                        opacity: 0.85
+                                      }}
+                                      title="Receipt unlocks once the fee is marked paid."
+                                    >
+                                      <Lock size={11} style={{ color: '#94a3b8' }} />
+                                      <span>Receipt</span>
+                                    </button>
+                                  )}
                                 </div>
                               </td>
                             </tr>
@@ -1870,84 +1896,15 @@ export default function FeeDeskPage() {
         </Modal>
       )}
 
-      {/* History Modal */}
-      {showHistoryModal && historyStudent && (
-        <Modal
-          isOpen={showHistoryModal}
-          onClose={() => setShowHistoryModal(false)}
-          title={`Payment History: ${historyStudent.display_name}`}
-          maxWidth="640px"
-        >
-          <div style={{ padding: '0.5rem 0' }}>
-            {loadingHistory ? (
-              <div style={{ padding: '2rem 0' }}>
-                <LoadingState message="Loading payment ledger records..." />
-              </div>
-            ) : paymentRecords.length === 0 ? (
-              <div style={{ padding: '2.5rem 1rem', textAlign: 'center', color: '#64748b' }}>
-                <History size={36} style={{ margin: '0 auto 0.75rem auto', color: '#94a3b8' }} />
-                <div style={{ fontSize: '1rem', fontWeight: 600, color: '#334155' }}>No Payment Records Found</div>
-                <div style={{ fontSize: '0.85rem', marginTop: '0.25rem' }}>
-                  No fee receipts have been recorded for this student yet.
-                </div>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                {paymentRecords.map((rec) => (
-                  <div
-                    key={rec.id}
-                    style={{
-                      background: '#f8fafc',
-                      border: '1px solid #e2e8f0',
-                      borderRadius: '10px',
-                      padding: '1rem 1.25rem',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center'
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontWeight: 700, fontSize: '0.9rem', color: '#0f172a' }}>
-                        Receipt: <span style={{ fontFamily: 'monospace' }}>{rec.receipt_no}</span>
-                      </div>
-                      <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.2rem' }}>
-                        Date: {rec.payment_date} • Mode: {rec.payment_mode_display || rec.payment_mode}
-                      </div>
-                    </div>
+      {/* Official Fee Receipt PDF (fee-desk-only printing) */}
+      <FeeReceiptPdfModal
+        isOpen={showReceiptModal}
+        onClose={() => setShowReceiptModal(false)}
+        record={receiptRecord}
+        loadingRecord={loadingReceipt}
+        studentName={receiptStudent?.display_name || ''}
+      />
 
-                    <div style={{ textAlign: 'right' }}>
-                      <div style={{ fontSize: '1.05rem', fontWeight: 800, color: '#15803d' }}>
-                        ₹{parseFloat(rec.amount_paid).toLocaleString('en-IN')}
-                      </div>
-                      <span style={{
-                        fontSize: '0.7rem',
-                        fontWeight: 800,
-                        padding: '0.15rem 0.5rem',
-                        borderRadius: '9999px',
-                        background: '#dcfce7',
-                        color: '#15803d',
-                        border: '1px solid #86efac'
-                      }}>
-                        {rec.status_display || rec.status}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '1.5rem', borderTop: '1px solid #f1f5f9', paddingTop: '1rem' }}>
-              <button
-                type="button"
-                onClick={() => setShowHistoryModal(false)}
-                className="edvana-btn edvana-btn-secondary"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </Modal>
-      )}
     </>
   );
 }

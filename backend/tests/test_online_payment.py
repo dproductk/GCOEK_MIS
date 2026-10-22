@@ -158,9 +158,22 @@ def test_concurrency_safe_receipt_number_generation(online_payment_setup):
     r2 = generate_next_receipt_no(year)
     r3 = generate_next_receipt_no(year)
 
-    assert r1 == 'GCOEK/2026-27/FEE/0001'
-    assert r2 == 'GCOEK/2026-27/FEE/0002'
-    assert r3 == 'GCOEK/2026-27/FEE/0003'
+    assert r1 == 'I-2026-27-0001'
+    assert r2 == 'I-2026-27-0002'
+    assert r3 == 'I-2026-27-0003'
+
+    # Year level semantics: sem 1 -> I; sem 2/3 -> II; sem 4/5 -> III;
+    # sem 6 (entering sem 7) / sem 7 / sem 8 -> IV.
+    assert generate_next_receipt_no(year, 1) == 'I-2026-27-0004'
+    assert generate_next_receipt_no(year, 2) == 'II-2026-27-0001'
+    assert generate_next_receipt_no(year, 3) == 'II-2026-27-0002'
+    assert generate_next_receipt_no(year, 4) == 'III-2026-27-0001'
+    assert generate_next_receipt_no(year, 5) == 'III-2026-27-0002'
+    assert generate_next_receipt_no(year, 6) == 'IV-2026-27-0001'
+    assert generate_next_receipt_no(year, 7) == 'IV-2026-27-0002'
+    assert generate_next_receipt_no(year, 8) == 'IV-2026-27-0003'
+    # Missing enrollment falls back to 1st year.
+    assert generate_next_receipt_no(year, None) == 'I-2026-27-0005'
 
 
 @pytest.mark.django_db
@@ -235,7 +248,7 @@ def test_apply_gateway_result_creates_permanent_ledger(online_payment_setup):
     assert ledger is not None
     assert ledger.status == PaymentLedger.PaymentStatus.PAID
     assert ledger.amount_paid == Decimal('45000.00')
-    assert ledger.receipt_no.startswith('GCOEK/2026-27/FEE/')
+    assert ledger.receipt_no.startswith('I-2026-27-')
     assert ledger.payment_mode == PaymentLedger.PaymentMode.ONLINE
 
 

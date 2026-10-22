@@ -1,16 +1,19 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Menu, Sun, Moon } from 'lucide-react';
 import iconImg from '../../assets/icon.jpg';
+import academicApi from '../../api/academicApi';
 
 /**
  * TopHeader — persistent institutional top header bar.
  * Matches reference screenshots:
  * - Brand: GOVERNMENT COLLEGE OF ENGINEERING KOLHAPUR (AUTONOMOUS)
  * - Center: Hamburger menu icon + Government College of Engineering, Kolhapur
- * - Right: Term: SUMMER 2026 badge, Theme toggle (Sun), and Circular Avatar
+ * - Right: Term badge (from active academic context), Theme toggle (Sun), and Circular Avatar
  */
 export default function TopHeader({ onToggleSidebar, user, activeRole }) {
   const [isDark, setIsDark] = useState(false);
+  // Term badge comes from the backend's active academic context — never hardcoded.
+  const [currentContext, setCurrentContext] = useState(null);
 
   // Compute initials (e.g., RK for Rohit Kumar or AH for Administrative Head)
   let initials = 'U';
@@ -38,6 +41,23 @@ export default function TopHeader({ onToggleSidebar, user, activeRole }) {
       document.documentElement.removeAttribute('data-theme');
     }
   };
+
+  // Load the college-wide active academic context (term + year) for the badge.
+  useEffect(() => {
+    let cancelled = false;
+    academicApi.getCurrentContext()
+      .then((res) => {
+        if (!cancelled) setCurrentContext(res?.data || null);
+      })
+      .catch(() => {
+        // No active context configured (or endpoint unavailable) — badge shows a dash.
+        if (!cancelled) setCurrentContext(null);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const badgeTerm = currentContext?.term ? String(currentContext.term).toUpperCase() : null;
+  const badgeYear = currentContext?.academic_year_code || null;
 
   return (
     <header className="app-topbar" role="banner">
@@ -70,10 +90,15 @@ export default function TopHeader({ onToggleSidebar, user, activeRole }) {
 
       {/* Right: Term Badge, Sun Icon, Avatar Initials */}
       <div className="app-topbar-right">
-        {/* Term Badge matching screenshot */}
-        <div className="app-topbar-term-badge">
+        {/* Term Badge — active academic term + year from the backend context */}
+        <div
+          className="app-topbar-term-badge"
+          title={currentContext?.term_display
+            ? `${currentContext.term_display} — Academic Year ${currentContext.academic_year_code}`
+            : 'No active academic term configured'}
+        >
           <span>Term:</span>
-          <strong>SUMMER 2026</strong>
+          <strong>{badgeTerm || badgeYear ? `${badgeTerm || '—'}${badgeYear ? ` ${badgeYear}` : ''}` : '—'}</strong>
         </div>
 
         {/* Theme Toggle Sun Icon */}

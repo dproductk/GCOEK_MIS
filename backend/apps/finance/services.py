@@ -1,7 +1,7 @@
 """
 Authoritative Finance Services for GCOEK MIS.
 Implements:
-- Concurrency-safe institutional receipt generation (GCOEK/<year>/FEE/<nnnn>)
+- Concurrency-safe institutional receipt generation (<ROMAN>-<year.code>-<nnnn>, e.g. IV-2026-27-0001)
 - Centralized payment result service (apply_gateway_result)
 - Single source of truth for converting verified gateway results into permanent college records
 - Fail-safe decoupling: Payment success remains permanent even if downstream promotion or email fails
@@ -25,27 +25,63 @@ from apps.students.services import check_and_promote_student
 
 logger = logging.getLogger(__name__)
 
+# Roman numerals for year levels: 1st year -> I, 2nd -> II, 3rd -> III, 4th -> IV.
+ROMAN_YEAR_LEVELS = {1: 'I', 2: 'II', 3: 'III', 4: 'IV'}
 
-def generate_next_receipt_no(academic_year):
+
+def _current_semester_number(student):
+    """Semester number of the candidate's current enrollment (None if absent)."""
+    from apps.students.models import StudentEnrollment
+
+    if student is None or getattr(student, 'pk', None) is None:
+        return None
+    return StudentEnrollment.objects.filter(
+        student=student, is_current=True,
+    ).values_list('semester__number', flat=True).first()
+
+
+def _roman_year_level(current_semester):
+    """
+    Map the candidate's semester at payment time to the roman year level the
+    fee is being paid FOR. Candidates usually pay at the tail of a year, just
+    before promotion:
+      - new admission (sem 1)            -> I
+      - sem 2 (entering 2nd year, sem 3) -> II
+      - sem 4 / sem 5                    -> III
+      - sem 6 (entering sem 7) / sem 7   -> IV
+      - sem 8                            -> IV (clamped)
+    Missing enrollment data falls back to 'I' (new admission).
+    """
+    try:
+        n = int(current_semester)
+    except (TypeError, ValueError):
+        return 'I'
+    return ROMAN_YEAR_LEVELS[min(4, max(1, n // 2 + 1))]
+
+
+def generate_next_receipt_no(academic_year, current_semester=None):
     """
     Concurrency-safe sequence generator for official institutional receipts.
-    Format: GCOEK/<academic_year.code>/FEE/<sequence:04d>
+    Format: <roman year level>-<academic_year.code>-<sequence:04d>
+            e.g. IV-2026-27-0001 for a candidate entering the 4th year.
     Serializes allocation via SELECT FOR UPDATE on FeeReceiptCounter row.
     Auto-initializes to maximum existing sequence from PaymentLedger if counter is new.
     """
-    base = f'GCOEK/{academic_year.code}/FEE/'
+    roman = _roman_year_level(current_semester)
+    base = f'{roman}-{academic_year.code}-'
     counter, created = FeeReceiptCounter.objects.select_for_update().get_or_create(
         academic_year=academic_year,
+        prefix=roman,
         defaults={'last_sequence': 0},
     )
 
     if created or counter.last_sequence == 0:
-        # Determine existing max in database for this year so sequence never collides
+        # Determine existing max in database for this year+prefix so sequence never collides
         existing = PaymentLedger.objects.filter(
             receipt_no__startswith=base
         ).values_list('receipt_no', flat=True)
         max_n = 0
-        pattern = re.compile(r'/(\d{4,})$')
+        pattern = re.compile(r'-(\d{4,})$')
         for r in existing:
             m = pattern.search(str(r))
             if m:
@@ -201,7 +237,10 @@ def apply_gateway_result(
         ledger = None
         try:
             with transaction.atomic():
-                receipt_no = generate_next_receipt_no(attempt.academic_year)
+                receipt_no = generate_next_receipt_no(
+                    attempt.academic_year,
+                    _current_semester_number(attempt.student),
+                )
                 try:
                     _ass = attempt.assessment
                     _snap = _ass.fee_breakdown if isinstance(getattr(_ass, 'fee_breakdown', None), dict) else {}
@@ -221,6 +260,8 @@ def apply_gateway_result(
                     collected_by=actor if (actor and actor.is_authenticated) else None,
                     remarks=f"Easebuzz Online Payment (Txn: {attempt.transaction_id}, EasepayID: {easebuzz_txn_id})",
                     fee_snapshot=dict(_snap or {}),
+                    fee_types_snapshot=PaymentLedger.build_head_types_map(
+                        attempt.academic_year, _snap),
                 )
         except IntegrityError as exc:
             logger.warning(

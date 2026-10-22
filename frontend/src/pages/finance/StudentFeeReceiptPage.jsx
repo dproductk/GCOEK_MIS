@@ -1,14 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import {
   IndianRupee, Printer, FileText,
-  AlertCircle, ShieldCheck, X, ArrowRight, ReceiptText,
-  Download, FileCheck,
+  AlertCircle, ShieldCheck, X, ArrowRight, Download, FileCheck,
 } from 'lucide-react';
 import financeApi from '../../api/financeApi';
 import resultsApi from '../../api/resultsApi';
-import clgLogo from '../../assets/icon.jpg';
 import PageHeader from '../../components/common/PageHeader';
-import Badge from '../../components/common/Badge';
 import Modal from '../../components/common/Modal';
 import { LoadingState, EmptyState } from '../../components/common/StateDisplays';
 import AdmissionVerificationFormModal from '../../components/finance/AdmissionVerificationFormModal';
@@ -86,7 +83,6 @@ export default function StudentFeeReceiptPage() {
   // True only when the ledger fetch itself failed (server down / 500).
   // Distinct from "no records": never show the empty state on failure.
   const [paymentsFailed, setPaymentsFailed] = useState(false);
-  const [selectedReceipt, setSelectedReceipt] = useState(null);
   const [showBill, setShowBill] = useState(false);
   const [initiating, setInitiating] = useState(false);
   const [initError, setInitError] = useState(null);
@@ -197,17 +193,6 @@ export default function StudentFeeReceiptPage() {
 
   const feeBreakdown = onlineStatus?.assessment?.fee_breakdown || {};
   const breakdownEntries = Object.entries(feeBreakdown);
-
-  const getStatusBadgeVariant = (status) => {
-    switch (status) {
-      case 'PAID':
-        return 'success';
-      case 'PARTIAL':
-        return 'warning';
-      default:
-        return 'danger';
-    }
-  };
 
   const inr = (n) => `₹${parseFloat(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
 
@@ -434,26 +419,13 @@ export default function StudentFeeReceiptPage() {
                 </div>
 
                 <div className="fee-status-block">
-                  <StatusPill tone="green">Paid</StatusPill>
+                  <StatusPill tone="green">Fees Paid</StatusPill>
                   <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.4rem' }}>
                     Paid on {p.payment_date || '—'}
                   </div>
-                </div>
-
-                <div className="fee-action-block">
-                  <button
-                    type="button"
-                    onClick={() => setSelectedReceipt(p)}
-                    className="edvana-btn"
-                    style={{
-                      padding: '0.65rem 1.4rem', fontSize: '0.85rem', fontWeight: 700,
-                      display: 'inline-flex', alignItems: 'center', gap: '0.5rem',
-                      borderRadius: 12, background: '#ffffff', color: '#1E60DC',
-                      border: '1px solid #bfd0ee',
-                    }}
-                  >
-                    <ReceiptText size={16} /> View Receipt
-                  </button>
+                  <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '0.25rem', maxWidth: 200 }}>
+                    Collect the printed receipt from the accounts counter.
+                  </div>
                 </div>
               </FeeRowCard>
             ))}
@@ -484,7 +456,7 @@ export default function StudentFeeReceiptPage() {
               <div className="edvana-card" style={{ borderRadius: 20, padding: '2.5rem' }}>
                 <EmptyState
                   title="No Fee Records Found"
-                  message="If you recently completed payment, please allow the accounts desk up to 24 hours to reconcile and issue the receipt."
+                  message="If you recently completed payment, please allow the accounts desk up to 24 hours to reconcile and mark your fee as paid."
                 />
               </div>
             )}
@@ -499,7 +471,6 @@ export default function StudentFeeReceiptPage() {
           </div>
         )}
       </div>
-
       {/* ── Detailed bill popup (Pay Now flow) ─────────────────────── */}
       <Modal
         isOpen={showBill}
@@ -595,134 +566,6 @@ export default function StudentFeeReceiptPage() {
             </button>
           </div>
         </div>
-      </Modal>
-
-      {/* Printable Receipt Modal */}
-      <Modal
-        isOpen={Boolean(selectedReceipt)}
-        onClose={() => setSelectedReceipt(null)}
-        title="Official Institutional Fee Receipt"
-        maxWidth="540px"
-      >
-        {selectedReceipt && (
-          <div id="fee-receipt-print">
-            <div style={{ padding: '1rem 1.1rem', background: '#f8fafc', borderRadius: 12, border: '1px solid #e2e8f0', marginBottom: '1.25rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
-                <img
-                  src={clgLogo}
-                  alt="GCE Kolhapur emblem"
-                  style={{ width: 52, height: 52, borderRadius: '50%', objectFit: 'cover', border: '1px solid #e2e8f0', background: '#ffffff', flexShrink: 0 }}
-                />
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: '0.88rem', fontWeight: 800, color: '#0f172a', lineHeight: 1.3 }}>
-                    Government College of Engineering, Kolhapur
-                  </div>
-                  <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '0.15rem' }}>
-                    DBATU Institute · Official Fee Receipt
-                  </div>
-                </div>
-              </div>
-              <div style={{ borderTop: '1px dashed #e2e8f0', marginTop: '0.85rem', paddingTop: '0.7rem', textAlign: 'center' }}>
-                <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '1px' }}>
-                  Receipt No.
-                </div>
-                <div style={{ fontSize: '1.15rem', fontFamily: 'monospace', fontWeight: 700, color: 'var(--edvana-primary)', marginTop: '0.2rem' }}>
-                  {selectedReceipt.receipt_no}
-                </div>
-              </div>
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', rowGap: '0.75rem', fontSize: '0.875rem', paddingBottom: '1.25rem', borderBottom: '1px solid #e2e8f0' }}>
-              <div style={{ color: '#64748b' }}>Candidate Name:</div>
-              <div style={{ fontWeight: 600, color: '#0f172a' }}>{selectedReceipt.student_name}</div>
-
-              <div style={{ color: '#64748b' }}>PRN / Enrollment:</div>
-              <div style={{ fontFamily: 'monospace', fontWeight: 600 }}>{selectedReceipt.enrollment_no || 'Pending'}</div>
-
-              <div style={{ color: '#64748b' }}>Academic Session:</div>
-              <div>{selectedReceipt.academic_year_code}</div>
-
-              <div style={{ color: '#64748b' }}>Payment Date:</div>
-              <div>{selectedReceipt.payment_date}</div>
-
-              <div style={{ color: '#64748b' }}>Payment Channel:</div>
-              <div>{selectedReceipt.payment_mode_display} ({selectedReceipt.transaction_ref || 'Counter'})</div>
-
-              <div style={{ color: '#64748b' }}>Status:</div>
-              <div>
-                <Badge variant={getStatusBadgeVariant(selectedReceipt.status)}>
-                  {selectedReceipt.status_display}
-                </Badge>
-              </div>
-            </div>
-
-            {(() => {
-              const live = selectedReceipt.fee_breakdown && Object.keys(selectedReceipt.fee_breakdown).length > 0
-                ? selectedReceipt.fee_breakdown
-                : null;
-              const assessed = onlineStatus?.assessment?.fee_breakdown || {};
-              const sameYear = String(onlineStatus?.assessment?.academic_year || onlineStatus?.assessment?.academic_year_code || '')
-                && (String(onlineStatus?.assessment?.academic_year) === String(selectedReceipt.academic_year)
-                  || onlineStatus?.assessment?.academic_year_code === selectedReceipt.academic_year_code);
-              const heads = live || (sameYear ? assessed : null);
-              const entries = heads ? Object.entries(heads) : [];
-              if (entries.length === 0) return null;
-              return (
-                <div style={{ border: '1px solid #eef2f7', borderRadius: 12, overflow: 'hidden', marginBottom: '1rem' }}>
-                  <div style={{ padding: '0.6rem 1rem', background: '#f8fafc', fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#64748b' }}>
-                    Fee Heads (Pay-Head Breakup)
-                  </div>
-                  {entries.map(([head, amt], i) => (
-                    <div
-                      key={head}
-                      style={{
-                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                        padding: '0.7rem 1rem', fontSize: '0.875rem',
-                        background: i % 2 === 0 ? '#ffffff' : '#f8fafc',
-                        borderTop: '1px solid #f1f5f9',
-                      }}
-                    >
-                      <span style={{ color: '#334155' }}>{head}</span>
-                      <span style={{ fontWeight: 700, color: '#0f172a' }}>₹{parseFloat(amt).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
-                    </div>
-                  ))}
-                </div>
-              );
-            })()}
-
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem 0', borderBottom: '1px solid #e2e8f0' }}>
-              <span style={{ fontWeight: 600, color: '#334155' }}>Amount Paid:</span>
-              <span style={{ fontSize: '1.25rem', fontWeight: 800, color: '#166534' }}>
-                ₹{parseFloat(selectedReceipt.amount_paid).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-              </span>
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.75rem 0', fontSize: '0.875rem', color: '#64748b' }}>
-              <span>Remaining Balance Due:</span>
-              <span style={{ fontWeight: 600, color: '#0f172a' }}>
-                ₹{parseFloat(selectedReceipt.balance_due).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-              </span>
-            </div>
-
-            <div className="no-print" style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', paddingTop: '1.25rem', marginTop: '0.5rem' }}>
-              <button
-                type="button"
-                onClick={() => setSelectedReceipt(null)}
-                className="edvana-btn edvana-btn-secondary"
-              >
-                Close
-              </button>
-              <button
-                type="button"
-                onClick={() => window.print()}
-                className="edvana-btn edvana-btn-primary"
-                style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}
-              >
-                <Printer size={15} /> Print Receipt
-              </button>
-            </div>
-          </div>
-        )}
       </Modal>
 
       {/* ── Admission Verification Form Modal ── */}

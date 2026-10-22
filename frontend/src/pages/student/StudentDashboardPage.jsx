@@ -197,7 +197,7 @@ export default function StudentDashboardPage() {
                 </li>
                 <li>
                   <span className="checklist-bullet">•</span>
-                  <span>Print your fee receipts</span>
+                  <span>Check your fee payment status</span>
                 </li>
                 <li>
                   <span className="checklist-bullet">•</span>

@@ -237,7 +237,7 @@
 
 **Context:** Owner: AH configures fee heads with presets; accountant picks (never types) amounts per head; marking collects exactly the set fee; once marked, the record is permanent. Category→quota fit check deferred (needs owner's per-category mapping).
 
-**Decision:** Set Fee moved from browser localStorage to `POST /finance/assessments/` (preset + total==sum validation, audited, frozen once paid). Marking requires an existing assessment and amounts equal to it; receipts are server-sequenced `GCOEK/<year>/FEE/<nnnn>`. Analytics accepts an optional year filter. No category-quota enforcement until the mapping is supplied.
+**Decision:** Set Fee moved from browser localStorage to `POST /finance/assessments/` (preset + total==sum validation, audited, frozen once paid). Marking requires an existing assessment and amounts equal to it; receipts are server-sequenced `<ROMAN year level>-<year.code>-<nnnn>` (e.g. `IV-2026-27-0001`; the roman prefix reflects the year level the candidate is entering: sem 1 → I, sem 2/3 → II, sem 4/5 → III, sem 6/7/8 → IV). Analytics accepts an optional year filter. No category-quota enforcement until the mapping is supplied.
 
 ---
 
@@ -250,4 +250,17 @@
 **Decision:** Promotion seating counts as HOD placement — `check_and_promote_student` and `seat_traced_students_to_division` set `placement_confirmed=True` exactly when a division is assigned (unassigned stays open for HOD pickup). Import landing divisions are created under the current academic year (fallback: batch year when none configured); enrollment/admission years keep admission truth. Pending table gains "Add to existing class" (merge without creating) next to Create Division.
 
 **Consequences:** No migration (flag + year columns already exist). Promoted students skip the pending queue; backfill files land in the running class; one-time audited backfill confirmed 4 promotion-seated rows and merged 2 DSY students, deleting the emptied past-year division.
+
+---
+
+## ADR-019: Official Fee Receipt Is a Server-Rendered PDF Replica
+
+**Date:** 2026-10-22
+**Status:** Approved (owner-directed)
+
+**Context:** The fee-desk receipt was an HTML template printed with `window.print()`, so the college challan's layout depended on browser print settings. The owner supplied an exact PDF design (`design/GCOEK_ADMISSION_CHALLAN_Borders_Fixed.pdf`, A4 landscape, three copies with per-copy quirks) that must be replicated character-for-character, filled only from the frozen payment snapshot.
+
+**Decision:** The official receipt is generated server-side with ReportLab (`apps/finance/receipt_pdf.py` rendering transcribed coordinates from `apps/finance/receipt_template.py`, bundled Liberation Sans/Carlito fonts in `apps/finance/receipt_assets/`). Data comes only from `PaymentLedger` (`fee_snapshot` / `fee_types_snapshot`, legacy assessment fallback) split into Government / Non-Government columns; the receipt exists only for fully `PAID` ledgers. It is exposed via `GET /finance/ledger/<id>/receipt-pdf/` (accounts desk + college-wide scopes only, audited) and previewed in the accountant's `FeeReceiptPdfModal` (Download/Print act on the PDF bytes, not an HTML template). Students have no download path; the old HTML template and its print CSS were removed.
+
+**Consequences:** No migration ( ReportLab was already available). Browser zoom/print dialogs can no longer alter the official challan; layout changes now require a code change to the template constants. Fonts are self-hosted so PDF output is identical across hosts. Follow-up (2026-10-22): fee-row spacing is content-aware — names are measured and rows breathe at an even pitch (capped 20pt) between the form's first/last-row anchors, wrapped names claim exactly the room their lines need, and zero-value heads print as `0` rows.
 

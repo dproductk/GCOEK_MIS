@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { 
   ArrowLeft, CheckCircle2, AlertCircle, FileText, 
-  History, RotateCcw, Clock, Receipt, User
+  History, Clock, Receipt, User
 } from 'lucide-react';
 import studentApi from '../../api/studentApi';
 import financeApi from '../../api/financeApi';
@@ -36,9 +36,6 @@ export default function CandidateFeeSetPage() {
 
   const [paymentHistory, setPaymentHistory] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
-
-  // Allotment letter reset message
-  const [resetMsg, setResetMsg] = useState('');
 
   useEffect(() => {
     loadData();
@@ -211,40 +208,46 @@ export default function CandidateFeeSetPage() {
   const allotmentDocs = (student?.documents || []).filter((d) => d.document_type === 'ALLOTMENT_LETTER').sort((a, b) => (b.version || 0) - (a.version || 0));
   const latestAllotment = allotmentDocs[0] || null;
 
-  const handleDownloadAllotment = async () => {
+  // In-app allotment letter preview: { url, mime, filename } | null
+  const [allotmentPreview, setAllotmentPreview] = useState(null);
+
+  // Release the blob URL whenever the preview closes or is replaced
+  useEffect(() => {
+    return () => {
+      if (allotmentPreview?.url) window.URL.revokeObjectURL(allotmentPreview.url);
+    };
+  }, [allotmentPreview?.url]);
+
+  const closeAllotmentPreview = () => {
+    if (allotmentPreview?.url) window.URL.revokeObjectURL(allotmentPreview.url);
+    setAllotmentPreview(null);
+  };
+
+  const handleViewAllotment = async () => {
     if (!latestAllotment) return;
     try {
       const res = await studentApi.downloadStudentDocument(studentId, latestAllotment.id);
-      const blob = new Blob([res.data], { type: latestAllotment.mime_type || 'application/octet-stream' });
+      const mime = latestAllotment.mime_type || 'application/octet-stream';
+      const blob = new Blob([res.data], { type: mime });
       const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `ALLOTMENT_LETTER_v${latestAllotment.version}`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
+      setAllotmentPreview({
+        url,
+        mime,
+        filename: `ALLOTMENT_LETTER_v${latestAllotment.version}`,
+      });
     } catch {
-      setError('Failed to download allotment letter. File may be missing on server.');
+      setError('Failed to load allotment letter. File may be missing on server.');
     }
   };
 
-  const handleResetAllotmentLetter = async () => {
-    if (!latestAllotment) {
-      setResetMsg('No allotment letter on file to reset.');
-      setTimeout(() => setResetMsg(''), 4000);
-      return;
-    }
-    if (!window.confirm('Delete the current allotment letter? Candidate must re-upload the valid CAP letter (max 200 KB).')) return;
-    try {
-      await studentApi.deleteStudentDocument(studentId, latestAllotment.id);
-      setResetMsg('Allotment letter deleted. Candidate must re-upload the valid CAP allotment letter (max 200 KB).');
-      const refreshed = await studentApi.getStudentProfile(studentId);
-      if (refreshed?.data) setStudent(refreshed.data);
-    } catch (err) {
-      setResetMsg(err.response?.data?.detail || 'Failed to reset allotment letter.');
-    }
-    setTimeout(() => setResetMsg(''), 5000);
+  const handleDownloadAllotment = () => {
+    if (!allotmentPreview) return;
+    const a = document.createElement('a');
+    a.href = allotmentPreview.url;
+    a.download = allotmentPreview.filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   };
 
   // Helper values extracted safely from student object matching Image 2
@@ -325,24 +328,6 @@ export default function CandidateFeeSetPage() {
           </div>
         )}
 
-        {resetMsg && (
-          <div style={{
-            marginBottom: '1.25rem',
-            padding: '1rem 1.25rem',
-            background: '#fffbeb',
-            border: '1px solid #fde68a',
-            borderRadius: '10px',
-            color: '#92400e',
-            fontSize: '0.875rem',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.75rem',
-          }}>
-            <RotateCcw size={18} style={{ flexShrink: 0, color: '#d97706' }} />
-            <div style={{ fontWeight: 600 }}>{resetMsg}</div>
-          </div>
-        )}
-
         {loading ? (
           <div style={{ background: '#ffffff', borderRadius: '16px', padding: '4rem 2rem', border: '1px solid #e2e8f0' }}>
             <LoadingState message="Loading candidate profile and fee configuration..." />
@@ -384,7 +369,8 @@ export default function CandidateFeeSetPage() {
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>DEN</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{student?.application_id ? `DEN${student.application_id.replace(/\D/g, '')}` : '—'}</div>
+                    {/* No DEN is stored in the DB — never invent one from application_id. */}
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>—</div>
                   </div>
 
                   <div>
@@ -394,7 +380,8 @@ export default function CandidateFeeSetPage() {
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Father's Name</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{gFather.name || student?.middle_name || '—'}</div>
+                    {/* Only show a real FATHER guardian from the DB — never the student's middle name. */}
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{gFather.name || '—'}</div>
                   </div>
 
                   {/* Row 2 */}
@@ -447,7 +434,9 @@ export default function CandidateFeeSetPage() {
 
                   <div>
                     <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.25rem' }}>Caste</div>
-                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{p.caste || admission.seat_type || admission.category || '—'}</div>
+                    {/* Show only the caste stored on the profile. Blank stays blank ('—') —
+                        seat type / category codes (GOBCH etc.) are quota codes, not castes. */}
+                    <div style={{ fontSize: '0.875rem', color: '#475569' }}>{p.caste || '—'}</div>
                   </div>
 
                   <div>
@@ -515,7 +504,7 @@ export default function CandidateFeeSetPage() {
                     {latestAllotment ? (
                       <button
                         type="button"
-                        onClick={handleDownloadAllotment}
+                        onClick={handleViewAllotment}
                         style={{
                           background: '#ffffff',
                           border: '1px solid #cbd5e1',
@@ -530,38 +519,12 @@ export default function CandidateFeeSetPage() {
                         onMouseEnter={(e) => e.currentTarget.style.borderColor = '#2563eb'}
                         onMouseLeave={(e) => e.currentTarget.style.borderColor = '#cbd5e1'}
                       >
-                        View/Download v{latestAllotment.version} ({(latestAllotment.file_size / 1024).toFixed(1)} KB)
+                        Preview v{latestAllotment.version} ({(latestAllotment.file_size / 1024).toFixed(1)} KB)
                       </button>
                     ) : (
                       <div style={{ fontSize: '0.78rem', color: '#64748b' }}>No allotment letter uploaded (max 200 KB).</div>
                     )}
                   </div>
-                </div>
-
-                {/* Bottom reset action matching Image 2 */}
-                <div style={{ marginTop: '2rem', paddingTop: '1.25rem', borderTop: '1px solid #f1f5f9' }}>
-                  <div style={{ fontSize: '0.8125rem', fontWeight: 600, color: '#0f172a', marginBottom: '0.5rem' }}>
-                    Student Uploaded Wrong Institute Allotment Letter?
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleResetAllotmentLetter}
-                    style={{
-                      background: '#dc2626',
-                      color: '#ffffff',
-                      border: 'none',
-                      borderRadius: '8px',
-                      padding: '0.45rem 1rem',
-                      fontSize: '0.8125rem',
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      transition: 'background 0.15s ease'
-                    }}
-                    onMouseEnter={(e) => e.currentTarget.style.background = '#b91c1c'}
-                    onMouseLeave={(e) => e.currentTarget.style.background = '#dc2626'}
-                  >
-                    Reset Allotment Letter
-                  </button>
                 </div>
               </div>
             </div>
@@ -646,7 +609,7 @@ export default function CandidateFeeSetPage() {
                             <tr key={head.id || idx} style={{ borderBottom: '1px solid #f1f5f9' }}>
                               {/* S.N. (Normal font weight: 400) */}
                               <td style={{ padding: '0.85rem 1.25rem', fontSize: '0.85rem', color: '#475569', fontWeight: 400 }}>
-                                {head.display_order || idx + 1}
+                                {idx + 1}
                               </td>
 
                               {/* Fee Head Name (Clean regular font weight: 400/500, not bold) */}
@@ -900,6 +863,72 @@ export default function CandidateFeeSetPage() {
                 type="button"
                 onClick={() => setShowHistoryModal(false)}
                 className="edvana-btn edvana-btn-secondary"
+                style={{ borderRadius: '8px', padding: '0.45rem 1rem' }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Allotment Letter Preview Modal */}
+      {allotmentPreview && (
+        <Modal
+          isOpen={Boolean(allotmentPreview)}
+          onClose={closeAllotmentPreview}
+          title="Institute Allotment Letter — Preview"
+          maxWidth="900px"
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            <div style={{
+              border: '1px solid #e2e8f0',
+              borderRadius: '10px',
+              overflow: 'hidden',
+              background: '#f8fafc',
+              maxHeight: '70vh',
+              minHeight: '50vh',
+              display: 'flex',
+              justifyContent: 'center',
+            }}>
+              {allotmentPreview.mime.startsWith('image/') ? (
+                <img
+                  src={allotmentPreview.url}
+                  alt="Allotment letter preview"
+                  style={{ maxWidth: '100%', maxHeight: '70vh', objectFit: 'contain' }}
+                />
+              ) : allotmentPreview.mime === 'application/pdf' ? (
+                <iframe
+                  src={allotmentPreview.url}
+                  title="Allotment letter preview"
+                  style={{ width: '100%', height: '70vh', border: 'none' }}
+                />
+              ) : (
+                <div style={{ padding: '3rem 1.5rem', textAlign: 'center', color: '#64748b', alignSelf: 'center' }}>
+                  <FileText size={36} style={{ margin: '0 auto 0.75rem auto', color: '#94a3b8' }} />
+                  <div style={{ fontSize: '0.95rem', fontWeight: 600, color: '#334155' }}>
+                    This file type can't be previewed in the browser
+                  </div>
+                  <div style={{ fontSize: '0.8125rem', marginTop: '0.35rem' }}>
+                    Use the Download button below to save it and open it locally.
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', borderTop: '1px solid #f1f5f9', paddingTop: '1rem' }}>
+              <button
+                type="button"
+                onClick={handleDownloadAllotment}
+                className="edvana-btn edvana-btn-secondary"
+                style={{ borderRadius: '8px', padding: '0.45rem 1rem' }}
+              >
+                Download
+              </button>
+              <button
+                type="button"
+                onClick={closeAllotmentPreview}
+                className="edvana-btn edvana-btn-primary"
                 style={{ borderRadius: '8px', padding: '0.45rem 1rem' }}
               >
                 Close

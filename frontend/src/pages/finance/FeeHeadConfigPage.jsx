@@ -49,6 +49,7 @@ export default function FeeHeadConfigPage() {
     academic_year: '',
     display_order: 1,
     allowed_amounts_str: '',
+    fee_type: 'INSTITUTE',
     is_active: true,
   });
 
@@ -121,6 +122,7 @@ export default function FeeHeadConfigPage() {
       academic_year: defaultYear,
       display_order: nextOrder,
       allowed_amounts_str: '',
+      fee_type: 'INSTITUTE',
       is_active: true,
     });
     setShowModal(true);
@@ -142,6 +144,7 @@ export default function FeeHeadConfigPage() {
       academic_year: head.academic_year || '',
       display_order: head.display_order || 1,
       allowed_amounts_str: amountsList.join(', '),
+      fee_type: head.fee_type || 'INSTITUTE',
       is_active: head.is_active !== undefined ? head.is_active : true,
     });
     setShowModal(true);
@@ -193,6 +196,7 @@ export default function FeeHeadConfigPage() {
       allowed_amounts: uniqueAmounts,
       amount: maxAmount,
       academic_year: formData.academic_year,
+      fee_type: formData.fee_type || 'INSTITUTE',
       is_active: formData.is_active,
     };
 
@@ -591,47 +595,66 @@ export default function FeeHeadConfigPage() {
                     {/* Top Row: Tag badge + Title on left, Status badge on right */}
                     <div style={{
                       display: 'flex',
-                      alignItems: 'center',
+                      alignItems: 'flex-start',
                       justifyContent: 'space-between',
-                      gap: '0.75rem',
+                      gap: '0.65rem',
                       marginBottom: '0.65rem'
                     }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem', flex: 1, minWidth: 0 }}>
                         <span style={{
                           background: '#eff6ff',
                           color: '#2563eb',
                           border: '1px solid #dbeafe',
-                          fontSize: '0.75rem',
+                          fontSize: '0.625rem',
                           fontWeight: 800,
                           letterSpacing: '0.04em',
                           textTransform: 'uppercase',
-                          padding: '0.225rem 0.65rem',
-                          borderRadius: '8px'
+                          padding: '0.18rem 0.5rem',
+                          borderRadius: '8px',
+                          flexShrink: 0,
+                          marginTop: '0.15rem',
+                          whiteSpace: 'nowrap'
                         }}>
                           {tagLabel}
                         </span>
                         <h2 style={{
-                          fontSize: '1.15rem',
+                          fontSize: '1rem',
                           fontWeight: 700,
                           color: '#0f172a',
                           margin: 0,
-                          lineHeight: 1.25
+                          lineHeight: 1.3
                         }}>
                           {head.name}
                         </h2>
                       </div>
 
-                      {head.is_active ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexShrink: 0 }}>
+                        <span style={{
+                          background: head.fee_type === 'GOVERNMENT' ? '#fefce8' : '#f1f5f9',
+                          color: head.fee_type === 'GOVERNMENT' ? '#a16207' : '#64748b',
+                          border: `1px solid ${head.fee_type === 'GOVERNMENT' ? '#fde68a' : '#e2e8f0'}`,
+                          fontSize: '0.625rem',
+                          fontWeight: 800,
+                          letterSpacing: '0.04em',
+                          textTransform: 'uppercase',
+                          padding: '0.15rem 0.5rem',
+                          borderRadius: '9999px',
+                          whiteSpace: 'nowrap'
+                        }}>
+                          {head.fee_type === 'GOVERNMENT' ? 'GOVT' : 'INST.'}
+                        </span>
+                        {head.is_active ? (
                         <span style={{
                           background: '#ecfdf5',
                           color: '#15803d',
                           border: '1px solid #bbf7d0',
-                          fontSize: '0.7rem',
+                          fontSize: '0.625rem',
                           fontWeight: 800,
-                          letterSpacing: '0.05em',
+                          letterSpacing: '0.04em',
                           textTransform: 'uppercase',
-                          padding: '0.2rem 0.65rem',
+                          padding: '0.15rem 0.5rem',
                           borderRadius: '9999px',
+                          whiteSpace: 'nowrap'
                         }}>
                           ACTIVE
                         </span>
@@ -640,16 +663,18 @@ export default function FeeHeadConfigPage() {
                           background: '#f1f5f9',
                           color: '#64748b',
                           border: '1px solid #e2e8f0',
-                          fontSize: '0.7rem',
+                          fontSize: '0.625rem',
                           fontWeight: 800,
-                          letterSpacing: '0.05em',
+                          letterSpacing: '0.04em',
                           textTransform: 'uppercase',
-                          padding: '0.2rem 0.65rem',
+                          padding: '0.15rem 0.5rem',
                           borderRadius: '9999px',
+                          whiteSpace: 'nowrap'
                         }}>
                           INACTIVE
                         </span>
                       )}
+                      </div>
                     </div>
 
                     {/* Subtitle / Description */}
@@ -718,7 +743,7 @@ export default function FeeHeadConfigPage() {
                     </div>
                   </div>
 
-                  {/* Card Footer: Order # and Action Buttons */}
+                  {/* Card Footer: S.No and Action Buttons */}
                   <div style={{
                     display: 'flex',
                     justifyContent: 'space-between',
@@ -732,7 +757,7 @@ export default function FeeHeadConfigPage() {
                       color: '#64748b',
                       fontWeight: 600
                     }}>
-                      Order #{head.display_order || idx + 1}
+                      S.No {idx + 1}
                     </span>
 
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
@@ -924,6 +949,25 @@ export default function FeeHeadConfigPage() {
                     {ay.code} {ay.is_current ? '(Current)' : ''}
                   </option>
                 ))}
+              </select>
+            </FormField>
+          </div>
+
+          <div style={{ marginBottom: '1.25rem' }}>
+            <FormField
+              label="Fee Type"
+              required
+              hint="Shown on official student receipts next to this fee head."
+            >
+              <select
+                required
+                value={formData.fee_type}
+                onChange={(e) => setFormData({ ...formData, fee_type: e.target.value })}
+                className="edvana-input"
+                style={{ width: '100%', height: '42px', fontSize: '0.9rem', cursor: 'pointer' }}
+              >
+                <option value="GOVERNMENT">Government Fee</option>
+                <option value="INSTITUTE">Institute (Non-Government) Fee</option>
               </select>
             </FormField>
           </div>

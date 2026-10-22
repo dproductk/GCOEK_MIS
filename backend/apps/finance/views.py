@@ -3,11 +3,12 @@ Views for Fee Heads, Candidate Fee Desk, and Payment Ledger.
 """
 import datetime
 import logging
+import re
 import uuid
 from decimal import Decimal
 from django.conf import settings
 from django.db.models import Sum
-from django.http import HttpResponseRedirect
+from django.http import HttpResponse, HttpResponseRedirect
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
@@ -30,6 +31,7 @@ from apps.finance.models import (
 )
 from apps.finance.serializers import (
     FeeHeadSerializer,
+    MyPaymentSerializer,
     OnlinePaymentAttemptSerializer,
     OnlinePaymentTrackerSerializer,
     PaymentLedgerSerializer,
@@ -257,10 +259,16 @@ class PaymentLedgerViewSet(viewsets.ModelViewSet):
             )
         # University rule: full payment only — partial payments are rejected
         # above (amount_paid must equal assessed total). No half-payment path.
-        # Receipt numbers are ALWAYS backend-generated (GCOEK/<year>/FEE/<nnnn>).
+        # Receipt numbers are ALWAYS backend-generated (<ROMAN>-<year.code>-<nnnn>,
+        # e.g. IV-2026-27-0001 for a candidate entering the 4th year).
         # Any client-supplied receipt_no is discarded so staff cannot inject
         # out-of-sequence or duplicate receipt numbers.
         serializer.validated_data.pop('receipt_no', None)
+        # Candidate's current semester drives the roman year-level prefix.
+        # Fetched once (outside retry) — deterministic for this payment.
+        receipt_semester = StudentEnrollment.objects.filter(
+            student=student, is_current=True,
+        ).values_list('semester__number', flat=True).first()
         # Retry loop for concurrent receipt-no collisions. Student-year
         # duplicates fail immediately; receipt collisions regenerate.
         # Receipt numbers are allocated INSIDE each retry transaction so the
@@ -275,13 +283,19 @@ class PaymentLedgerViewSet(viewsets.ModelViewSet):
                         raise ValidationError(
                             {'detail': 'Fee already recorded for this student and academic year. Duplicate payment blocked.'}
                         )
-                    serializer.validated_data['receipt_no'] = generate_next_receipt_no(academic_year)
+                    serializer.validated_data['receipt_no'] = generate_next_receipt_no(
+                        academic_year, receipt_semester)
                     # Freeze head-wise breakup at payment time (immutable receipt).
                     try:
                         _snap = assessment.fee_breakdown if isinstance(assessment.fee_breakdown, dict) else {}
                     except Exception:
                         _snap = {}
                     serializer.validated_data['fee_snapshot'] = dict(_snap or {})
+                    # Freeze GOVERNMENT/INSTITUTE classification per head at
+                    # payment time so the receipt stays accurate forever.
+                    serializer.validated_data['fee_types_snapshot'] = (
+                        PaymentLedger.build_head_types_map(academic_year, _snap)
+                    )
                     ledger = serializer.save(collected_by=self.request.user)
                 break
             except ValidationError:
@@ -353,13 +367,66 @@ class PaymentLedgerViewSet(viewsets.ModelViewSet):
             resp.data['promotion'] = outcome
         return resp
 
+    @action(detail=True, methods=['get'], url_path='receipt-pdf')
+    def receipt_pdf(self, request, pk=None):
+        """Print-ready official receipt (fee-desk only).
+
+        The student-facing API deliberately exposes only payment status.  The
+        official three-copy challan is produced here, from the immutable
+        payment snapshot, and is restricted to the accounts desk.
+        """
+        scopes = get_user_scopes(request.user)
+        allowed = (
+            request.user.is_superuser
+            or scopes['is_system_wide']
+            or scopes['is_college_wide']
+            or 'ACCOUNTANT' in scopes['roles']
+        )
+        if not allowed:
+            return Response(
+                {'detail': 'Official fee receipts are printed at the accounts counter.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        ledger = self.get_object()
+        if ledger.status != PaymentLedger.PaymentStatus.PAID:
+            return Response(
+                {'detail': 'The official receipt is available only after full payment.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Imported lazily so reportlab/font assets are loaded only when a
+        # receipt is actually requested.
+        from .receipt_pdf import build_receipt_data, generate_fee_receipt_pdf
+
+        pdf_bytes = generate_fee_receipt_pdf(build_receipt_data(ledger))
+        audit_log(
+            request=request,
+            action=AuditLog.Action.READ,
+            target_type='PaymentLedger',
+            target_id=str(ledger.id),
+            target_display=f'Fee receipt {ledger.receipt_no}',
+            description='Official fee receipt PDF generated at the accounts desk.',
+        )
+        safe_receipt_no = re.sub(r'[^A-Za-z0-9._-]+', '-', ledger.receipt_no or 'receipt')
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = (
+            f'inline; filename="Fee_Receipt_{safe_receipt_no}.pdf"'
+        )
+        response['Cache-Control'] = 'private, no-store'
+        return response
+
     @action(detail=False, methods=['get'], url_path='my-payments')
     def my_payments(self, request):
-        """Student view of their own fee payment records."""
+        """Student view of their own fee payment records.
+
+        Served through MyPaymentSerializer: the student sees that the fee is
+        PAID but never receives receipt-level fields (receipt no, breakup).
+        Printing the official receipt happens at the fee desk only."""
         payments = PaymentLedger.objects.filter(
             student__user_id=request.user.id
         ).order_by('-payment_date')
-        return Response(PaymentLedgerSerializer(payments, many=True).data, status=status.HTTP_200_OK)
+        return Response(MyPaymentSerializer(payments, many=True).data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'], url_path='analytics')
     def analytics(self, request):

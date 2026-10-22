@@ -24,8 +24,8 @@ class Command(BaseCommand):
         admin_user = User.objects.filter(user_type=User.UserType.SYSADMIN).first()
 
         fee_heads = [
-            {'name': 'Tuition Fee (OPEN)', 'code': 'TUIT_OPEN', 'amount': Decimal('15000.00'), 'cat': 'OPEN'},
-            {'name': 'Tuition Fee (OBC/EBC)', 'code': 'TUIT_OBC', 'amount': Decimal('7500.00'), 'cat': 'OBC_EBC'},
+            {'name': 'Tuition Fee (OPEN)', 'code': 'TUIT_OPEN', 'amount': Decimal('15000.00'), 'cat': 'OPEN', 'type': FeeHead.FeeType.GOVERNMENT},
+            {'name': 'Tuition Fee (OBC/EBC)', 'code': 'TUIT_OBC', 'amount': Decimal('7500.00'), 'cat': 'OBC_EBC', 'type': FeeHead.FeeType.GOVERNMENT},
             {'name': 'Development Fee', 'code': 'DEV_FEE', 'amount': Decimal('5000.00'), 'cat': 'ALL'},
             {'name': 'Gymkhana & Sports Fee', 'code': 'GYM_FEE', 'amount': Decimal('1500.00'), 'cat': 'ALL'},
             {'name': 'Training & Placement Activity', 'code': 'TPO_FEE', 'amount': Decimal('2000.00'), 'cat': 'ALL'},
@@ -41,21 +41,31 @@ class Command(BaseCommand):
                     'academic_year': curr_year,
                     'program': prog,
                     'category_quota': fh.get('cat', 'ALL'),
+                    'fee_type': fh.get('type', FeeHead.FeeType.INSTITUTE),
                     'amount': fh['amount'],
                     'is_refundable': fh.get('ref', False),
                     'is_active': True,
                 },
             )
+            # Keep the standard classification in sync on already-seeded heads
+            # (Tuition = government, everything else = institute).
+            FeeHead.objects.filter(code=fh['code']).update(
+                fee_type=fh.get('type', FeeHead.FeeType.INSTITUTE))
+
+        # Name-based sync: any configured Tuition Fee head is a government
+        # fee regardless of code (covers heads created outside the seeds).
+        FeeHead.objects.filter(name__icontains='tuition fee').update(
+            fee_type=FeeHead.FeeType.GOVERNMENT)
 
         # Seed sample payment receipts for existing students
         students = Student.objects.all()[:3]
         for idx, s in enumerate(students, start=1):
-            receipt_no = f"GCOEK/2026/FEE/{idx:03d}"
+            receipt_no = f"{curr_year.code}-I-{idx:03d}"
             PaymentLedger.objects.get_or_create(
-                receipt_no=receipt_no,
+                student=s,
+                academic_year=curr_year,
                 defaults={
-                    'student': s,
-                    'academic_year': curr_year,
+                    'receipt_no': receipt_no,
                     'total_fee_due': Decimal('28500.00'),
                     'amount_paid': Decimal('28500.00'),
                     'balance_due': Decimal('0.00'),

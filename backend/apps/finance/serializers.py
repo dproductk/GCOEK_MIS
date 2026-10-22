@@ -7,6 +7,7 @@ from apps.finance.models import FeeHead, PaymentLedger, StudentFeeAssessment
 
 class FeeHeadSerializer(serializers.ModelSerializer):
     category_quota_display = serializers.CharField(source='get_category_quota_display', read_only=True)
+    fee_type_display = serializers.CharField(source='get_fee_type_display', read_only=True)
     academic_year_code = serializers.CharField(source='academic_year.code', read_only=True)
     program_name = serializers.CharField(source='program.name', read_only=True, default='')
     amount = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, default=0.0)
@@ -27,6 +28,8 @@ class FeeHeadSerializer(serializers.ModelSerializer):
             'program_name',
             'category_quota',
             'category_quota_display',
+            'fee_type',
+            'fee_type_display',
             'amount',
             'is_refundable',
             'is_active',
@@ -54,6 +57,7 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
     academic_year_code = serializers.CharField(source='academic_year.code', read_only=True)
     collected_by_name = serializers.CharField(source='collected_by.username', read_only=True, default='')
     fee_breakdown = serializers.SerializerMethodField()
+    fee_types = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentLedger
@@ -69,6 +73,7 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
             'amount_paid',
             'balance_due',
             'fee_breakdown',
+            'fee_types',
             'fee_snapshot',
             'payment_mode',
             'payment_mode_display',
@@ -81,7 +86,8 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
             'created_at',
         ]
         # Receipt numbers are server-sequenced and read-only; any client
-        # value is ignored (backend always generates GCOEK/<year>/FEE/<nnnn>).
+        # value is ignored (backend always generates <ROMAN>-<year.code>-<nnnn>,
+        # e.g. IV-2026-27-0001).
         # status is derived in PaymentLedger.save(); full payment only.
         # fee_snapshot is server-frozen from assessment; never client-writable.
         extra_kwargs = {
@@ -108,6 +114,32 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
             pass
         return {}
 
+    def get_fee_types(self, obj):
+        """Head-name -> fee_type (GOVERNMENT/INSTITUTE) shown on the receipt.
+
+        Frozen `fee_types_snapshot` first (immutable receipt). Fallback for
+        pre-classification legacy receipts: look the heads up live by name
+        against the current fee-head configuration for the receipt's year.
+       """
+        try:
+            snap = getattr(obj, 'fee_types_snapshot', None)
+            if isinstance(snap, dict) and snap:
+                return snap
+            heads = self.get_fee_breakdown(obj) or {}
+            if not heads:
+                return {}
+            # Case-insensitive match (legacy breakdowns may differ in casing
+            # from the configured head names).
+            lookup = {n.lower(): fee_type or FeeHead.FeeType.INSTITUTE for n, fee_type in FeeHead.objects.filter(
+                academic_year_id=obj.academic_year_id,
+            ).values_list('name', 'fee_type')}
+            return {
+                name: lookup.get(name.lower(), FeeHead.FeeType.INSTITUTE)
+                for name in heads.keys()
+            }
+        except Exception:
+            return {}
+
     def validate(self, attrs):
         # University rule: full payment only. Reject half payments early
         # with a clear message (backend perform_create double-checks
@@ -120,6 +152,42 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
                 {'amount_paid': 'Full payment only: amount paid must equal total fee due.'}
             )
         return attrs
+
+
+class MyPaymentSerializer(serializers.ModelSerializer):
+    """Student-facing slice of the payment ledger.
+
+    Students may see THAT their fee is paid (amount, date, status) — never
+    the official receipt fields. Receipt number, fee-head breakup, snapshot
+    and collector details are fee-desk-only: the official receipt is printed
+    at the accounts counter, not downloaded by the student.
+    """
+
+    payment_mode_display = serializers.CharField(source='get_payment_mode_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    student_name = serializers.CharField(source='student.display_name', read_only=True)
+    enrollment_no = serializers.CharField(source='student.enrollment_no', read_only=True)
+    academic_year_code = serializers.CharField(source='academic_year.code', read_only=True)
+
+    class Meta:
+        model = PaymentLedger
+        fields = [
+            'id',
+            'student',
+            'student_name',
+            'enrollment_no',
+            'academic_year',
+            'academic_year_code',
+            'total_fee_due',
+            'amount_paid',
+            'balance_due',
+            'payment_mode',
+            'payment_mode_display',
+            'status',
+            'status_display',
+            'payment_date',
+            'created_at',
+        ]
 
 
 class StudentFeeAssessmentSerializer(serializers.ModelSerializer):

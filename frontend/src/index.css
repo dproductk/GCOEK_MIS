@@ -1103,11 +1103,13 @@ img {
 }
 
 /* ============================================================
-   Print: receipt only (fee receipt modal)
-   window.print() from the receipt modal must yield a single-page
-   receipt — never the dashboard behind it. The modal renders via
-   portal as a direct <body> child, so hide #root and flatten the
-   overlay; header/buttons are suppressed with .no-print.
+   Print: modal-only print (admission verification form).
+   window.print() from the modal must yield the form itself — never
+   the page behind it. The modal renders via portal as a direct
+   <body> child, so hide #root and flatten the overlay;
+   header/buttons are suppressed with .no-print.
+   (The official fee receipt is a server-rendered PDF and does not
+   rely on this rule at all.)
    ============================================================ */
 @media print {
   @page {
@@ -1145,10 +1147,6 @@ img {
   .edvana-modal-footer,
   .no-print {
     display: none !important;
-  }
-
-  #fee-receipt-print {
-    color: #000 !important;
   }
 }
 

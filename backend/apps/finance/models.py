@@ -28,6 +28,11 @@ class FeeHead(BaseModel):
         TFWS = 'TFWS', 'Tuition Fee Waiver Scheme (TFWS)'
         EWS = 'EWS', 'Economically Weaker Section (EWS)'
 
+    class FeeType(models.TextChoices):
+        # Who owns/collects the fee — shown on official receipts.
+        GOVERNMENT = 'GOVERNMENT', 'Government Fee'
+        INSTITUTE = 'INSTITUTE', 'Institute (Non-Government) Fee'
+
     name = models.CharField(max_length=150)
     code = models.CharField(max_length=50, unique=True)
     tag = models.CharField(max_length=20, blank=True, default='')
@@ -50,6 +55,12 @@ class FeeHead(BaseModel):
         max_length=20,
         choices=CategoryQuota.choices,
         default=CategoryQuota.ALL,
+    )
+    fee_type = models.CharField(
+        max_length=20,
+        choices=FeeType.choices,
+        default=FeeType.INSTITUTE,
+        help_text='Government vs institute (non-government) fee head — shown on official receipts.',
     )
     amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
     is_refundable = models.BooleanField(default=False)
@@ -112,6 +123,11 @@ class PaymentLedger(BaseModel):
         blank=True,
         help_text='Frozen head-wise breakup copied from assessment at payment time. Never mutated.',
     )
+    fee_types_snapshot = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Frozen head-name -> fee_type (GOVERNMENT/INSTITUTE) mapping captured at payment time. Never mutated.',
+    )
 
     class Meta:
         db_table = 'finance_payment_ledgers'
@@ -133,6 +149,23 @@ class PaymentLedger(BaseModel):
         elif self.amount_paid > Decimal('0.0'):
             self.status = self.PaymentStatus.PARTIAL
         super().save(*args, **kwargs)
+
+    @staticmethod
+    def build_head_types_map(academic_year, breakdown):
+        """Name -> fee_type (GOVERNMENT/INSTITUTE) map for a head-name breakdown.
+
+        Used to freeze fee_types_snapshot on a receipt at payment time.
+        Matching is case-insensitive because legacy assessments may store
+        'Tuition fee' while the configured head is 'Tuition Fee'.
+        Unknown head names (legacy data) default to INSTITUTE.
+        """
+        names = [k for k in (breakdown or {}).keys()]
+        if not names:
+            return {}
+        lookup = {n.lower(): fee_type or FeeHead.FeeType.INSTITUTE for n, fee_type in FeeHead.objects.filter(
+            academic_year=academic_year,
+        ).values_list('name', 'fee_type')}
+        return {name: lookup.get(name.lower(), FeeHead.FeeType.INSTITUTE) for name in names}
 
 
 class StudentFeeAssessment(BaseModel):
@@ -185,23 +218,34 @@ class StudentFeeAssessment(BaseModel):
 class FeeReceiptCounter(BaseModel):
     """
     Concurrency-safe sequence tracker for official institutional receipts.
-    Format: GCOEK/<academic_year.code>/FEE/<sequence:04d>
+    One row per (academic year, roman year-level prefix) — e.g. prefix 'IV'
+    counts receipts issued to candidates entering the 4th year.
+    Generated format: <prefix>-<academic_year.code>-<sequence:04d>
+    (e.g. IV-2026-27-0001).
     Rows are locked with SELECT FOR UPDATE to prevent colliding receipt numbers
     under concurrent online payments.
     """
 
-    academic_year = models.OneToOneField(
+    academic_year = models.ForeignKey(
         AcademicYear,
         on_delete=models.PROTECT,
-        related_name='receipt_counter',
+        related_name='receipt_counters',
+        db_index=True,
     )
+    prefix = models.CharField(max_length=8, default='')
     last_sequence = models.PositiveIntegerField(default=0)
 
     class Meta:
         db_table = 'finance_fee_receipt_counters'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['academic_year', 'prefix'],
+                name='uniq_receipt_counter_year_prefix',
+            ),
+        ]
 
     def __str__(self):
-        return f'{self.academic_year.code}: {self.last_sequence}'
+        return f'{self.academic_year.code}-{self.prefix}: {self.last_sequence}'
 
 
 class OnlinePaymentAttempt(BaseModel):
