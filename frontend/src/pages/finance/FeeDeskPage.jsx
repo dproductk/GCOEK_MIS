@@ -842,25 +842,25 @@ export default function FeeDeskPage() {
                     <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
                       <thead>
                         <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
-                          <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '55px' }}>
+                          <th style={{ padding: '0.7rem 0.65rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '50px' }}>
                             S.N.
                           </th>
-                          <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '170px' }}>
+                          <th style={{ padding: '0.7rem 0.65rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '160px' }}>
                             PRN
                           </th>
-                          <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', minWidth: '220px' }}>
+                          <th style={{ padding: '0.7rem 0.65rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', minWidth: '180px' }}>
                             NAME
                           </th>
-                          <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', minWidth: '180px' }}>
+                          <th style={{ padding: '0.7rem 0.65rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', minWidth: '150px' }}>
                             FATHER'S NAME
                           </th>
-                          <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '130px' }}>
+                          <th style={{ padding: '0.7rem 0.65rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '120px' }}>
                             MOBILE
                           </th>
-                          <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', textAlign: 'center', width: '160px' }}>
+                          <th style={{ padding: '0.7rem 0.65rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', textAlign: 'center', width: '145px' }}>
                             FEE MARKED / STATUS
                           </th>
-                          <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', textAlign: 'center', minWidth: '290px' }}>
+                          <th style={{ padding: '0.7rem 0.65rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', textAlign: 'center', minWidth: '230px' }}>
                             ACTIONS
                           </th>
                         </tr>
@@ -898,12 +898,12 @@ export default function FeeDeskPage() {
                               onMouseLeave={(e) => e.currentTarget.style.background = isPinned ? '#f0fdf4' : '#ffffff'}
                             >
                               {/* S.N. (Paginated) */}
-                              <td style={{ padding: '0.85rem 1.15rem', fontSize: '0.85rem', color: '#64748b', fontWeight: 500 }}>
+                              <td style={{ padding: '0.7rem 0.65rem', fontSize: '0.85rem', color: '#64748b', fontWeight: 500 }}>
                                 {startIndex + index + 1}
                               </td>
 
                               {/* PRN */}
-                              <td style={{ padding: '0.85rem 1.15rem' }}>
+                              <td style={{ padding: '0.7rem 0.65rem' }}>
                                 <div style={{ color: '#1E60DC', fontWeight: 700, fontSize: '0.78rem', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>
                                   {prn}
                                 </div>
@@ -913,7 +913,7 @@ export default function FeeDeskPage() {
                               </td>
 
                               {/* NAME */}
-                              <td style={{ padding: '0.85rem 1.15rem' }}>
+                              <td style={{ padding: '0.7rem 0.65rem' }}>
                                 <div style={{ fontWeight: 700, color: '#0f172a', fontSize: '0.8rem', whiteSpace: 'nowrap' }}>
                                   {stu.display_name}
                                 </div>
@@ -937,17 +937,17 @@ export default function FeeDeskPage() {
                               </td>
 
                               {/* FATHER'S NAME */}
-                              <td style={{ padding: '0.85rem 1.15rem', fontSize: '0.85rem', color: '#334155', fontWeight: 500, textTransform: 'uppercase' }}>
+                              <td style={{ padding: '0.7rem 0.65rem', fontSize: '0.85rem', color: '#334155', fontWeight: 500, textTransform: 'uppercase' }}>
                                 {stu.father_name || '—'}
                               </td>
 
                               {/* MOBILE */}
-                              <td style={{ padding: '0.85rem 1.15rem', fontSize: '0.85rem', color: '#334155', fontFamily: 'monospace' }}>
+                              <td style={{ padding: '0.7rem 0.65rem', fontSize: '0.85rem', color: '#334155', fontFamily: 'monospace' }}>
                                 {stu.mobile || '—'}
                               </td>
 
                               {/* FEE MARKED / STATUS */}
-                              <td style={{ padding: '0.85rem 1.15rem', textAlign: 'center' }}>
+                              <td style={{ padding: '0.7rem 0.65rem', textAlign: 'center' }}>
                                 {isFeeSet ? (
                                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.3rem' }}>
                                     <span style={{
@@ -980,7 +980,7 @@ export default function FeeDeskPage() {
                               </td>
 
                               {/* ACTIONS (Single line, sleek elongated pill buttons with round 20px corners) */}
-                              <td style={{ padding: '0.85rem 1.15rem', textAlign: 'center', whiteSpace: 'nowrap' }}>
+                              <td style={{ padding: '0.7rem 0.65rem', textAlign: 'center', whiteSpace: 'nowrap' }}>
                                 <div style={{
                                   display: 'inline-flex',
                                   alignItems: 'center',
@@ -998,7 +998,7 @@ export default function FeeDeskPage() {
                                         color: '#15803d',
                                         border: '1px solid #bbf7d0',
                                         borderRadius: '20px',
-                                        padding: '0 0.95rem',
+                                        padding: '0 0.7rem',
                                         height: '30px',
                                         fontSize: '0.75rem',
                                         fontWeight: 600,
@@ -1023,7 +1023,7 @@ export default function FeeDeskPage() {
                                         color: '#475569',
                                         border: '1px solid #cbd5e1',
                                         borderRadius: '20px',
-                                        padding: '0 0.95rem',
+                                        padding: '0 0.7rem',
                                         height: '30px',
                                         fontSize: '0.75rem',
                                         fontWeight: 600,
@@ -1058,7 +1058,7 @@ export default function FeeDeskPage() {
                                         color: '#ffffff',
                                         border: 'none',
                                         borderRadius: '20px',
-                                        padding: '0 1rem',
+                                        padding: '0 0.75rem',
                                         height: '30px',
                                         fontSize: '0.75rem',
                                         fontWeight: 600,
@@ -1088,7 +1088,7 @@ export default function FeeDeskPage() {
                                         color: '#15803d',
                                         border: '1px solid #bbf7d0',
                                         borderRadius: '20px',
-                                        padding: '0 0.95rem',
+                                        padding: '0 0.7rem',
                                         height: '30px',
                                         fontSize: '0.75rem',
                                         fontWeight: 600,
@@ -1115,7 +1115,7 @@ export default function FeeDeskPage() {
                                         color: '#ffffff',
                                         border: 'none',
                                         borderRadius: '20px',
-                                        padding: '0 0.95rem',
+                                        padding: '0 0.7rem',
                                         height: '30px',
                                         fontSize: '0.75rem',
                                         fontWeight: 600,
@@ -1145,7 +1145,7 @@ export default function FeeDeskPage() {
                                         color: '#94a3b8',
                                         border: '1px solid #e2e8f0',
                                         borderRadius: '20px',
-                                        padding: '0 0.95rem',
+                                        padding: '0 0.7rem',
                                         height: '30px',
                                         fontSize: '0.75rem',
                                         fontWeight: 600,
@@ -1174,7 +1174,7 @@ export default function FeeDeskPage() {
                                         color: '#ffffff',
                                         border: 'none',
                                         borderRadius: '20px',
-                                        padding: '0 0.95rem',
+                                        padding: '0 0.55rem',
                                         height: '30px',
                                         fontSize: '0.75rem',
                                         fontWeight: 600,
@@ -1190,8 +1190,7 @@ export default function FeeDeskPage() {
                                       onMouseLeave={(e) => e.currentTarget.style.background = '#15803d'}
                                       title="Print / download the official fee receipt"
                                     >
-                                      <Printer size={12} />
-                                      <span>Print Receipt</span>
+                                      <Printer size={14} />
                                     </button>
                                   ) : (
                                     <button
@@ -1202,7 +1201,7 @@ export default function FeeDeskPage() {
                                         color: '#94a3b8',
                                         border: '1px solid #e2e8f0',
                                         borderRadius: '20px',
-                                        padding: '0 0.85rem',
+                                        padding: '0 0.55rem',
                                         height: '30px',
                                         fontSize: '0.75rem',
                                         fontWeight: 600,
@@ -1216,8 +1215,7 @@ export default function FeeDeskPage() {
                                       }}
                                       title="Receipt unlocks once the fee is marked paid."
                                     >
-                                      <Lock size={11} style={{ color: '#94a3b8' }} />
-                                      <span>Receipt</span>
+                                      <Lock size={12} style={{ color: '#94a3b8' }} />
                                     </button>
                                   )}
                                 </div>
@@ -1468,25 +1466,25 @@ export default function FeeDeskPage() {
                   <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
                     <thead>
                       <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
-                        <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '50px' }}>
+                        <th style={{ padding: '0.7rem 0.65rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '50px' }}>
                           S.N.
                         </th>
-                        <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', minWidth: '220px' }}>
+                        <th style={{ padding: '0.7rem 0.65rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', minWidth: '220px' }}>
                           CANDIDATE / ENROLLMENT
                         </th>
-                        <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '140px', textAlign: 'center' }}>
+                        <th style={{ padding: '0.7rem 0.65rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '140px', textAlign: 'center' }}>
                           ASSESSED FEE
                         </th>
-                        <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '170px', textAlign: 'center' }}>
+                        <th style={{ padding: '0.7rem 0.65rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', width: '170px', textAlign: 'center' }}>
                           GATEWAY PERMISSION
                         </th>
-                        <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', minWidth: '180px' }}>
+                        <th style={{ padding: '0.7rem 0.65rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', minWidth: '180px' }}>
                           GATEWAY STATUS
                         </th>
-                        <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', minWidth: '180px' }}>
+                        <th style={{ padding: '0.7rem 0.65rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', minWidth: '180px' }}>
                           TRANSACTION DETAILS
                         </th>
-                        <th style={{ padding: '0.85rem 1.15rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', textAlign: 'center', width: '150px' }}>
+                        <th style={{ padding: '0.7rem 0.65rem', fontSize: '0.72rem', fontWeight: 700, color: '#475569', letterSpacing: '0.05em', textAlign: 'center', width: '150px' }}>
                           ACTIONS
                         </th>
                       </tr>
@@ -1509,11 +1507,11 @@ export default function FeeDeskPage() {
                             onMouseEnter={(e) => e.currentTarget.style.background = '#f8fafc'}
                             onMouseLeave={(e) => e.currentTarget.style.background = '#ffffff'}
                           >
-                            <td style={{ padding: '0.85rem 1.15rem', fontSize: '0.85rem', color: '#64748b', fontWeight: 500 }}>
+                            <td style={{ padding: '0.7rem 0.65rem', fontSize: '0.85rem', color: '#64748b', fontWeight: 500 }}>
                               {idx + 1}
                             </td>
 
-                            <td style={{ padding: '0.85rem 1.15rem' }}>
+                            <td style={{ padding: '0.7rem 0.65rem' }}>
                               <div style={{ fontWeight: 700, color: '#0f172a', fontSize: '0.875rem' }}>
                                 {row.student_name}
                               </div>
@@ -1522,7 +1520,7 @@ export default function FeeDeskPage() {
                               </div>
                             </td>
 
-                            <td style={{ padding: '0.85rem 1.15rem', textAlign: 'center' }}>
+                            <td style={{ padding: '0.7rem 0.65rem', textAlign: 'center' }}>
                               <span style={{
                                 display: 'inline-block',
                                 background: '#eff6ff',
@@ -1538,7 +1536,7 @@ export default function FeeDeskPage() {
                             </td>
 
                             {/* GATEWAY PERMISSION TOGGLE (Accountant can edit tick directly here!) */}
-                            <td style={{ padding: '0.85rem 1.15rem', textAlign: 'center' }}>
+                            <td style={{ padding: '0.7rem 0.65rem', textAlign: 'center' }}>
                               {isPaid ? (
                                 <span style={{
                                   display: 'inline-flex',
@@ -1607,7 +1605,7 @@ export default function FeeDeskPage() {
                             </td>
 
                             {/* GATEWAY STATUS */}
-                            <td style={{ padding: '0.85rem 1.15rem' }}>
+                            <td style={{ padding: '0.7rem 0.65rem' }}>
                               {isPaid ? (
                                 <div>
                                   <span style={{
@@ -1703,7 +1701,7 @@ export default function FeeDeskPage() {
                             </td>
 
                             {/* TRANSACTION DETAILS */}
-                            <td style={{ padding: '0.85rem 1.15rem' }}>
+                            <td style={{ padding: '0.7rem 0.65rem' }}>
                               {attempt ? (
                                 <div>
                                   {attempt.easebuzz_txn_id && (
@@ -1728,7 +1726,7 @@ export default function FeeDeskPage() {
                             </td>
 
                             {/* ACTIONS */}
-                            <td style={{ padding: '0.85rem 1.15rem', textAlign: 'center', whiteSpace: 'nowrap' }}>
+                            <td style={{ padding: '0.7rem 0.65rem', textAlign: 'center', whiteSpace: 'nowrap' }}>
                               <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
                                 {attempt && ['PENDING', 'REDIRECTED', 'INITIATED'].includes(attempt.status) && (
                                   <button
