@@ -35,6 +35,12 @@ media/
 *.dump
 *.sql
 prod_data/
+pg_data/
+
+# Design and Documentation
+design/
+docs/
+doc/
 
 # Node / Frontend
 node_modules/
