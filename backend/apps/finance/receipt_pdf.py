@@ -869,14 +869,22 @@ _UNRANKED_HEAD = 10_000
 
 
 def _display_order_map(ledger) -> dict[str, int]:
-    """FeeHead ``display_order`` keyed by lowercased head name for that year."""
+    """FeeHead ``display_order`` keyed by lowercased head name for that year.
+
+    Heads may be configured per program, so the same name can appear more than
+    once; the lowest configured order wins (deterministic regardless of query
+    order).  Filtering by year also keeps heads with identical names across
+    years from interfering.
+    """
     try:
         from .models import FeeHead
 
-        return {
-            head.name.lower(): head.display_order
-            for head in FeeHead.objects.filter(academic_year=ledger.academic_year)
-        }
+        orders: dict[str, int] = {}
+        for head in FeeHead.objects.filter(
+            academic_year=ledger.academic_year,
+        ).order_by('display_order', 'name'):
+            orders.setdefault(head.name.lower(), head.display_order)
+        return orders
     except Exception:
         return {}
 
