@@ -71,6 +71,10 @@ _FONTS_REGISTERED = False
 BASE_SIZE = 7.71
 SMALL_SIZE = 7.2
 TOTAL_SIZE = 8.51
+# Challan number: bold and one step larger than the other small fields so the
+# printed receipt number stands out, while still fitting its underscore blank
+# (the fitted draw shrinks back if a longer number ever needs the room).
+CHALLAN_NUMBER_SIZE = 8.51
 MIN_FIELD_SIZE = 5.0
 MIN_FEE_SIZE = 5.4
 
@@ -385,11 +389,13 @@ def _draw_fields(pdf: canvas.Canvas, data: FeeReceiptData) -> None:
             copy['right'] - date_x - 6, FONT_REGULAR, BASE_SIZE,
         )
 
-        # Challan number.
-        start, end = _field_geometry(CHALLAN_LABEL, copy['challan_x'], FONT_REGULAR, SMALL_SIZE)
+        # Challan number.  Both label and value are bold; the blank geometry
+        # is measured with the label's own font so the value lands on the
+        # same underscore run the static label draws.
+        start, end = _field_geometry(CHALLAN_LABEL, copy['challan_x'], FONT_BOLD, SMALL_SIZE)
         _draw_fitted(
             pdf, data.receipt_no, start + 0.5, 489.07,
-            max(0, end - start - 1.0), FONT_REGULAR, SMALL_SIZE, min_size=5.0,
+            max(0, end - start - 1.0), FONT_BOLD, CHALLAN_NUMBER_SIZE, min_size=5.0,
         )
 
         # Branch.

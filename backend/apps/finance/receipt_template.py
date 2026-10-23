@@ -44,9 +44,9 @@ STATIC_TEXT = [
     (119.75, 500.27, 7.71, FONT_REGULAR, "(Cashier's Copy)"),
     (376.57, 500.27, 7.71, FONT_REGULAR, '(Student Section Copy)'),
     (664.7, 500.27, 7.71, FONT_REGULAR, "(Student's Copy)"),
-    (118.14, 489.07, 7.2, FONT_REGULAR, 'Challan No. _____________'),
-    (378.81, 489.07, 7.2, FONT_REGULAR, 'Challan No. _____________'),
-    (650.96, 489.07, 7.2, FONT_REGULAR, 'Challan No. _____________'),
+    (118.14, 489.07, 7.2, FONT_BOLD, 'Challan No. ________________'),
+    (378.81, 489.07, 7.2, FONT_BOLD, 'Challan No. ________________'),
+    (650.96, 489.07, 7.2, FONT_BOLD, 'Challan No. ________________'),
     (118.14, 476.32, 7.2, FONT_REGULAR, 'Branch: ______________'),
     (378.81, 476.32, 7.2, FONT_REGULAR, 'Branch: ______________'),
     (650.96, 476.32, 7.2, FONT_REGULAR, 'Branch: ______________'),
@@ -204,7 +204,9 @@ COPIES = [
     },
 ]
 
-CHALLAN_LABEL = 'Challan No. _____________'
+# Three extra underscores (13 -> 16) so a receipt number set at the larger
+# bold challan size fits its blank without auto-shrink.
+CHALLAN_LABEL = 'Challan No. ________________'
 BRANCH_LABEL = 'Branch: ______________'
 NAME_LABEL = 'Name : _________________________________________'
 ADDRESS_LABEL = 'Address : ______________________________________'
