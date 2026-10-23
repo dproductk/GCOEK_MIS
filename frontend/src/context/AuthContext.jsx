@@ -64,9 +64,16 @@ export function AuthProvider({ children }) {
 
       return { success: true, must_change_password: response.data.must_change_password };
     } catch (err) {
+      const data = err.response?.data;
+      // DRF wraps serializer-level errors (e.g. account lockout) under
+      // non_field_errors; view-level errors arrive as detail/error.
+      const nonFieldMessage = Array.isArray(data?.non_field_errors)
+        ? data.non_field_errors[0]
+        : data?.non_field_errors;
       const message =
-        err.response?.data?.detail ||
-        err.response?.data?.error ||
+        data?.detail ||
+        data?.error ||
+        nonFieldMessage ||
         'Login failed. Please check your credentials.';
       setError(message);
       return { success: false, error: message };
