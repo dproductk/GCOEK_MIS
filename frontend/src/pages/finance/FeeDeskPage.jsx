@@ -361,7 +361,7 @@ export default function FeeDeskPage() {
     const amountVal = parseFloat(markForm.amountPaid) || 0;
 
     try {
-      // No client receipt: the server sequences <ROMAN>-<year.code>-<nnnn> (e.g. IV-2026-27-0001).
+      // No client receipt: the server sequences <ROMAN><YY><YY>-<nnnn> (e.g. IV2627-0001).
       const payload = {
         student: markingStudent.id,
         academic_year: activeYear?.id,

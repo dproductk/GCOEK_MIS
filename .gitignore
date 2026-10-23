@@ -42,6 +42,9 @@ design/
 docs/
 doc/
 
+# Unused user-manual screenshots (~4 MB, referenced nowhere)
+frontend/public/manual_assets/
+
 # Demo setup, seed, and scratch scripts
 setup_demo_accounts.py
 seed_*.py

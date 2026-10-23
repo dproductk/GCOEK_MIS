@@ -21,6 +21,7 @@ from apps.authentication.models import Role, RoleAssignment, User
 from apps.finance.gateway.easebuzz import EasebuzzGateway
 from apps.finance.models import (
     FeeHead,
+    FeeReceiptCounter,
     OnlinePaymentAttempt,
     PaymentLedger,
     StudentFeeAssessment,
@@ -158,22 +159,56 @@ def test_concurrency_safe_receipt_number_generation(online_payment_setup):
     r2 = generate_next_receipt_no(year)
     r3 = generate_next_receipt_no(year)
 
-    assert r1 == 'I-2026-27-0001'
-    assert r2 == 'I-2026-27-0002'
-    assert r3 == 'I-2026-27-0003'
+    assert r1 == 'I2627-0001'
+    assert r2 == 'I2627-0002'
+    assert r3 == 'I2627-0003'
 
     # Year level semantics: sem 1 -> I; sem 2/3 -> II; sem 4/5 -> III;
     # sem 6 (entering sem 7) / sem 7 / sem 8 -> IV.
-    assert generate_next_receipt_no(year, 1) == 'I-2026-27-0004'
-    assert generate_next_receipt_no(year, 2) == 'II-2026-27-0001'
-    assert generate_next_receipt_no(year, 3) == 'II-2026-27-0002'
-    assert generate_next_receipt_no(year, 4) == 'III-2026-27-0001'
-    assert generate_next_receipt_no(year, 5) == 'III-2026-27-0002'
-    assert generate_next_receipt_no(year, 6) == 'IV-2026-27-0001'
-    assert generate_next_receipt_no(year, 7) == 'IV-2026-27-0002'
-    assert generate_next_receipt_no(year, 8) == 'IV-2026-27-0003'
+    assert generate_next_receipt_no(year, 1) == 'I2627-0004'
+    assert generate_next_receipt_no(year, 2) == 'II2627-0001'
+    assert generate_next_receipt_no(year, 3) == 'II2627-0002'
+    assert generate_next_receipt_no(year, 4) == 'III2627-0001'
+    assert generate_next_receipt_no(year, 5) == 'III2627-0002'
+    assert generate_next_receipt_no(year, 6) == 'IV2627-0001'
+    assert generate_next_receipt_no(year, 7) == 'IV2627-0002'
+    assert generate_next_receipt_no(year, 8) == 'IV2627-0003'
     # Missing enrollment falls back to 1st year.
-    assert generate_next_receipt_no(year, None) == 'I-2026-27-0005'
+    assert generate_next_receipt_no(year, None) == 'I2627-0005'
+
+
+@pytest.mark.django_db
+def test_receipt_sequence_continues_from_legacy_numbers(online_payment_setup):
+    """After the format change, numbering resumes after old-format receipts."""
+    year = online_payment_setup['year']
+    student = online_payment_setup['student']
+
+    PaymentLedger.objects.create(
+        student=student,
+        academic_year=year,
+        receipt_no='I-2026-27-0007',
+        total_fee_due=Decimal('100.00'),
+        amount_paid=Decimal('100.00'),
+        payment_mode=PaymentLedger.PaymentMode.CASH,
+        status=PaymentLedger.PaymentStatus.PAID,
+        payment_date=datetime.date(2026, 8, 1),
+    )
+
+    # No counter row yet: generation scans the legacy receipt and continues.
+    assert generate_next_receipt_no(year, 1) == 'I2627-0008'
+
+
+@pytest.mark.django_db
+def test_receipt_sequence_continues_from_existing_counter(online_payment_setup):
+    """An existing production counter keeps counting in the new format."""
+    year = online_payment_setup['year']
+    FeeReceiptCounter.objects.create(
+        academic_year=year,
+        prefix='I',
+        last_sequence=7,
+    )
+
+    assert generate_next_receipt_no(year, 1) == 'I2627-0008'
 
 
 @pytest.mark.django_db
@@ -248,7 +283,7 @@ def test_apply_gateway_result_creates_permanent_ledger(online_payment_setup):
     assert ledger is not None
     assert ledger.status == PaymentLedger.PaymentStatus.PAID
     assert ledger.amount_paid == Decimal('45000.00')
-    assert ledger.receipt_no.startswith('I-2026-27-')
+    assert ledger.receipt_no.startswith('I2627-')
     assert ledger.payment_mode == PaymentLedger.PaymentMode.ONLINE
 
 

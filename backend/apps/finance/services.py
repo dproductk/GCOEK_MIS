@@ -1,7 +1,7 @@
 """
 Authoritative Finance Services for GCOEK MIS.
 Implements:
-- Concurrency-safe institutional receipt generation (<ROMAN>-<year.code>-<nnnn>, e.g. IV-2026-27-0001)
+- Concurrency-safe institutional receipt generation (<ROMAN><YY><YY>-<nnnn>, e.g. IV2627-0001)
 - Centralized payment result service (apply_gateway_result)
 - Single source of truth for converting verified gateway results into permanent college records
 - Fail-safe decoupling: Payment success remains permanent even if downstream promotion or email fails
@@ -10,6 +10,7 @@ import logging
 import re
 from decimal import Decimal
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.audit.models import AuditLog
@@ -59,16 +60,33 @@ def _roman_year_level(current_semester):
     return ROMAN_YEAR_LEVELS[min(4, max(1, n // 2 + 1))]
 
 
+def _compact_year_code(code):
+    """
+    Compact an academic year code for the receipt number.
+
+    Both ``2026-27`` and ``2026-2027`` become ``2627`` (last two digits of
+    each year). Unexpected formats fall back to the digits present.
+    """
+    parts = re.findall(r'\d+', str(code or ''))
+    if len(parts) >= 2:
+        return f'{parts[0][-2:]}{parts[1][-2:]}'
+    return parts[0][-2:] if parts else str(code or '').strip()
+
+
 def generate_next_receipt_no(academic_year, current_semester=None):
     """
     Concurrency-safe sequence generator for official institutional receipts.
-    Format: <roman year level>-<academic_year.code>-<sequence:04d>
-            e.g. IV-2026-27-0001 for a candidate entering the 4th year.
+    Format: <roman year level><YY><YY>-<sequence:04d>
+            e.g. IV2627-0001 for a candidate entering the 4th year in 2026-27.
     Serializes allocation via SELECT FOR UPDATE on FeeReceiptCounter row.
-    Auto-initializes to maximum existing sequence from PaymentLedger if counter is new.
+    Auto-initializes to the maximum existing sequence from PaymentLedger if the
+    counter is new, including receipts issued in the legacy
+    <roman>-<academic_year.code>-<nnnn> format so numbering continues without
+    restarting or colliding after the format change.
     """
     roman = _roman_year_level(current_semester)
-    base = f'{roman}-{academic_year.code}-'
+    base = f'{roman}{_compact_year_code(academic_year.code)}-'
+    legacy_base = f'{roman}-{academic_year.code}-'
     counter, created = FeeReceiptCounter.objects.select_for_update().get_or_create(
         academic_year=academic_year,
         prefix=roman,
@@ -76,9 +94,10 @@ def generate_next_receipt_no(academic_year, current_semester=None):
     )
 
     if created or counter.last_sequence == 0:
-        # Determine existing max in database for this year+prefix so sequence never collides
+        # Determine existing max in database for this year+prefix so sequence never collides.
+        # Scan both the current compact format and the legacy hyphenated format.
         existing = PaymentLedger.objects.filter(
-            receipt_no__startswith=base
+            Q(receipt_no__startswith=base) | Q(receipt_no__startswith=legacy_base)
         ).values_list('receipt_no', flat=True)
         max_n = 0
         pattern = re.compile(r'-(\d{4,})$')

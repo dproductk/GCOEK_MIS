@@ -437,7 +437,7 @@ class TestEligibilityWorkflow:
         }
         res_pay = api_client.post('/api/v1/finance/ledger/', payment_payload, format='json')
         assert res_pay.status_code == status.HTTP_201_CREATED
-        assert res_pay.data['receipt_no'].startswith('I-2026-27-')
+        assert res_pay.data['receipt_no'].startswith('I2627-')
 
         # 4. Verify automatic promotion:
         # Old enrollment (Sem 1) archived with PROMOTED and is_current=False

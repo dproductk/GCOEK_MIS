@@ -219,12 +219,26 @@ export default function HODDivisionsBatchesPage() {
     try {
       if (showLoading) setLoading(true);
       setError(null);
+      // Students must be fetched across ALL pages: the directory API caps a
+      // single page at 500 records (max_page_size), so with >500 students the
+      // per-class roster silently truncated (list showed fewer than the
+      // class's enrolled_count). Loop until the 'next' link disappears.
+      const fetchAllStudents = async () => {
+        let items = [];
+        for (let page = 1; ; page += 1) {
+          const res = await studentApi.getStudents({ page_size: 500, page });
+          const batch = res.data?.results || res.data || [];
+          items = items.concat(batch);
+          if (!res.data?.next || batch.length === 0) break;
+        }
+        return items;
+      };
       const [deptRes, yearRes, semRes, divRes, stuRes, facRes, schemeRes, intakeRes] = await Promise.allSettled([
         academicApi.getDepartments(),
         academicApi.getAcademicYears(),
         academicApi.getSemesters(),
         academicApi.getDivisions(),
-        studentApi.getStudents({ page_size: 500 }),
+        fetchAllStudents(),
         facultyApi.getFacultyList({ page_size: 500 }),
         curriculumApi.getSchemes({ page_size: 100 }),
         admissionsApi.getPendingIntakes(),
@@ -233,7 +247,7 @@ export default function HODDivisionsBatchesPage() {
       const yearList = yearRes.status === 'fulfilled' ? yearRes.value.data?.results || yearRes.value.data || [] : [];
       const semList = semRes.status === 'fulfilled' ? semRes.value.data?.results || semRes.value.data || [] : [];
       const divList = divRes.status === 'fulfilled' ? divRes.value.data?.results || divRes.value.data || [] : [];
-      const stuList = stuRes.status === 'fulfilled' ? stuRes.value.data?.results || stuRes.value.data || [] : [];
+      const stuList = stuRes.status === 'fulfilled' ? stuRes.value || [] : [];
       const facList = facRes.status === 'fulfilled' ? facRes.value.data?.results || facRes.value.data || [] : [];
       const schemeList = schemeRes.status === 'fulfilled' ? schemeRes.value.data?.results || schemeRes.value.data || [] : [];
       const intakeList = intakeRes.status === 'fulfilled' ? (intakeRes.value.data?.results || intakeRes.value.data || []) : null;

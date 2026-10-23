@@ -329,7 +329,7 @@ def test_manual_marking_happy_path_receipt_backend_generated(api_client, finance
     assert half.status_code == status.HTTP_400_BAD_REQUEST
 
     # 4. Full payment succeeds even when client sends a fake receipt_no;
-    # backend must ignore it and generate <ROMAN>-<year.code>-<nnnn> (no
+    # backend must ignore it and generate <ROMAN><YY><YY>-<nnnn> (no
     # enrollment in this test -> 1st year prefix 'I').
     good = api_client.post('/api/v1/finance/ledger/', {
         'student': str(stu.id), 'academic_year': str(year.id),
@@ -340,7 +340,7 @@ def test_manual_marking_happy_path_receipt_backend_generated(api_client, finance
     }, format='json')
     assert good.status_code in (200, 201), good.data
     assert good.data['receipt_no'] != 'MY-BILL-123'
-    assert good.data['receipt_no'].startswith('I-2026-27-')
+    assert good.data['receipt_no'].startswith('I2627-')
     assert good.data['status'] == PaymentLedger.PaymentStatus.PAID
 
     # 5. Second marking blocked (duplicate).

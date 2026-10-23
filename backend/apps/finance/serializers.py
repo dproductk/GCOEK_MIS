@@ -242,8 +242,8 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
             'created_at',
         ]
         # Receipt numbers are server-sequenced and read-only; any client
-        # value is ignored (backend always generates <ROMAN>-<year.code>-<nnnn>,
-        # e.g. IV-2026-27-0001).
+        # value is ignored (backend always generates <ROMAN><YY><YY>-<nnnn>,
+        # e.g. IV2627-0001).
         # status is derived in PaymentLedger.save(); full payment only.
         # fee_snapshot is server-frozen from assessment; never client-writable.
         extra_kwargs = {

@@ -64,6 +64,17 @@ def check_and_promote_student(student_id, actor=None, request=None):
             or latest_eligibility.academic_year
             or current_enrollment.academic_year
         )
+        # Division-less students (class not confirmed/placed yet): the
+        # eligibility/import year above can be STALE, which would create the
+        # promoted enrollment — and check its fees — in the wrong academic
+        # year (this exact corruption was observed in unconfirmed cohorts).
+        # The promoted-into class always belongs to the current running
+        # cycle, and fees for such students are collected in the running
+        # year, so anchor the completing year to the running academic year.
+        if current_enrollment.division is None:
+            running_ay = AcademicYear.objects.filter(is_current=True).first()
+            if running_ay:
+                completing_ay = running_ay
         fee_year = completing_ay
         paid_ledger = PaymentLedger.objects.filter(
             student=student,

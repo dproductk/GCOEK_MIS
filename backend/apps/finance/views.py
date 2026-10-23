@@ -355,8 +355,8 @@ class PaymentLedgerViewSet(viewsets.ModelViewSet):
             )
         # University rule: full payment only — partial payments are rejected
         # above (amount_paid must equal assessed total). No half-payment path.
-        # Receipt numbers are ALWAYS backend-generated (<ROMAN>-<year.code>-<nnnn>,
-        # e.g. IV-2026-27-0001 for a candidate entering the 4th year).
+        # Receipt numbers are ALWAYS backend-generated (<ROMAN><YY><YY>-<nnnn>,
+        # e.g. IV2627-0001 for a candidate entering the 4th year).
         # Any client-supplied receipt_no is discarded so staff cannot inject
         # out-of-sequence or duplicate receipt numbers.
         serializer.validated_data.pop('receipt_no', None)

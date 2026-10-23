@@ -264,8 +264,8 @@ class FeeReceiptCounter(BaseModel):
     Concurrency-safe sequence tracker for official institutional receipts.
     One row per (academic year, roman year-level prefix) — e.g. prefix 'IV'
     counts receipts issued to candidates entering the 4th year.
-    Generated format: <prefix>-<academic_year.code>-<sequence:04d>
-    (e.g. IV-2026-27-0001).
+    Generated format: <prefix><YY><YY>-<sequence:04d>
+    (e.g. IV2627-0001 for academic year 2026-27).
     Rows are locked with SELECT FOR UPDATE to prevent colliding receipt numbers
     under concurrent online payments.
     """

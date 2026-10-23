@@ -311,7 +311,7 @@ class TestChallanNumberStyling:
         assert challan_fonts == [FONT_BOLD, FONT_BOLD, FONT_BOLD]
 
     def test_realistic_receipt_number_fits_at_full_size_in_every_copy(self):
-        number = 'I-2026-27-0002'
+        number = 'I2627-0002'
         for copy in COPIES:
             width = self._blank_width(copy)
             assert width > 0
@@ -335,7 +335,7 @@ class TestChallanNumberStyling:
             student_mobile='',
             guardian_mobile='',
             branch='EE',
-            receipt_no='I-2026-27-000299',
+            receipt_no='I2627-000299',
             payment_date=None,
             government_heads=[ReceiptHead('Tuition Fee', Decimal('1000'))],
             non_government_heads=[],
