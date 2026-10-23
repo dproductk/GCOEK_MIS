@@ -5,23 +5,19 @@ import { useAuth } from '../context/AuthContext';
 import { LayoutDashboard } from 'lucide-react';
 import StudentDashboardPage from './student/StudentDashboardPage';
 import FacultyDashboardPage from './faculty/FacultyDashboardPage';
-import HODDashboardPage from './hod/HODDashboardPage';
 import AdminHeadDashboardPage from './admin_head/AdminHeadDashboardPage';
 import PageHeader from '../components/common/PageHeader';
 
 export default function DashboardPage() {
-  const { user, activeRole, hasRole } = useAuth();
+  const { user, activeRole } = useAuth();
 
   if (activeRole?.codename === 'STUDENT' || user?.user_type === 'STUDENT') {
     return <StudentDashboardPage />;
   }
 
-  // HOD users also hold a base FACULTY assignment — check HOD first via
-  // hasRole (order-independent) so they always get the HOD dashboard.
-  if (activeRole?.codename === 'HOD' || hasRole?.('HOD')) {
-    return <HODDashboardPage />;
-  }
-
+  // HOD users also hold a base FACULTY assignment — they share the same
+  // faculty portal dashboard (the HOD-specific dashboard is intentionally
+  // not rendered; department governance lives on dedicated sidebar pages).
   if (
     activeRole?.codename === 'FACULTY' ||
     activeRole?.codename === 'EMPLOYEE' ||

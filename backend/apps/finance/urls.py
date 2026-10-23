@@ -4,6 +4,7 @@ from apps.finance.views import (
     EasebuzzCallbackView,
     EasebuzzWebhookView,
     FeeHeadViewSet,
+    FeePackageViewSet,
     OnlinePaymentAttemptDetailView,
     OnlinePaymentAttemptVerifyView,
     OnlinePaymentInitiateView,
@@ -15,6 +16,7 @@ from apps.finance.views import (
 
 router = DefaultRouter()
 router.register('fee-heads', FeeHeadViewSet, basename='fee-heads')
+router.register('fee-packages', FeePackageViewSet, basename='fee-packages')
 router.register('ledger', PaymentLedgerViewSet, basename='payment-ledger')
 router.register('assessments', StudentFeeAssessmentViewSet, basename='fee-assessment')
 

@@ -24,6 +24,7 @@ from apps.authentication.permissions import get_user_scopes
 from apps.finance.gateway.easebuzz import EasebuzzGateway
 from apps.finance.models import (
     FeeHead,
+    FeePackage,
     GatewayRawEvent,
     OnlinePaymentAttempt,
     PaymentLedger,
@@ -31,6 +32,7 @@ from apps.finance.models import (
 )
 from apps.finance.serializers import (
     FeeHeadSerializer,
+    FeePackageSerializer,
     MyPaymentSerializer,
     OnlinePaymentAttemptSerializer,
     OnlinePaymentTrackerSerializer,
@@ -152,6 +154,100 @@ class FeeHeadViewSet(viewsets.ModelViewSet):
             target_display=label,
             reason='Fee structure configuration',
             description=f"Removed fee head {label}.",
+        )
+
+
+class FeePackageViewSet(viewsets.ModelViewSet):
+    """
+    Fee Packages (pre-approved total-amount combinations for the fee desk).
+
+    Read: sysadmin / Admin Head / Accountant. Write: Admin Head or Sysadmin
+    only, exactly like FeeHead configuration. Every write is audit-logged.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = FeePackageSerializer
+    queryset = FeePackage.objects.select_related('academic_year').all()
+    pagination_class = FinancePagination
+
+    _WRITE_ACTIONS = ('create', 'update', 'partial_update', 'destroy')
+
+    def check_permissions(self, request):
+        super().check_permissions(request)
+        if self.action in self._WRITE_ACTIONS:
+            scopes = get_user_scopes(request.user)
+            if not (scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']):
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied('Only the Administrative Head can manage fee packages.')
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        scopes = get_user_scopes(self.request.user)
+        # Non-configuration roles only ever see active packages.
+        if not (scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']):
+            qs = qs.filter(is_active=True)
+        ay = self.request.query_params.get('academic_year_id') or self.request.query_params.get('academic_year')
+        if ay:
+            qs = qs.filter(academic_year_id=ay)
+        return qs
+
+    def _breakdown_log(self, package):
+        return {
+            'name': package.name,
+            'total': str(package.total),
+            'academic_year': package.academic_year.code if package.academic_year else '',
+            'items': [
+                {'name': i.get('name'), 'amount': str(i.get('amount'))}
+                for i in (package.items or []) if isinstance(i, dict)
+            ],
+        }
+
+    def perform_create(self, serializer):
+        package = serializer.save()
+        audit_log(
+            request=self.request,
+            actor=self.request.user,
+            action=AuditLog.Action.CREATE,
+            target_type='FeePackage',
+            target_id=str(package.id),
+            target_display=f'{package.name} (₹{package.total})',
+            new_value=self._breakdown_log(package),
+            reason='Fee structure configuration',
+            description=f"Created fee package '{package.name}' "
+                        f"(₹{package.total}) for {package.academic_year.code}.",
+        )
+
+    def perform_update(self, serializer):
+        old = self._breakdown_log(serializer.instance) if serializer.instance else None
+        package = serializer.save()
+        audit_log(
+            request=self.request,
+            actor=self.request.user,
+            action=AuditLog.Action.UPDATE,
+            target_type='FeePackage',
+            target_id=str(package.id),
+            target_display=f'{package.name} (₹{package.total})',
+            old_value=old,
+            new_value=self._breakdown_log(package),
+            reason='Fee structure configuration',
+            description=f"Updated fee package '{package.name}' (₹{package.total}) "
+                        f"for {package.academic_year.code}.",
+        )
+
+    def perform_destroy(self, instance):
+        label = f'{instance.name} (₹{instance.total})'
+        package_id = str(instance.id)
+        year_code = instance.academic_year.code if instance.academic_year else ''
+        instance.delete()
+        audit_log(
+            request=self.request,
+            actor=self.request.user,
+            action=AuditLog.Action.DELETE,
+            target_type='FeePackage',
+            target_id=package_id,
+            target_display=label,
+            reason='Fee structure configuration',
+            description=f'Removed fee package {label} ({year_code}).',
         )
 
 

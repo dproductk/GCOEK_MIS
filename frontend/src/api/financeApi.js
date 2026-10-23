@@ -7,6 +7,12 @@ export const financeApi = {
   updateFeeHead: (id, data) => client.patch(`/finance/fee-heads/${id}/`, data),
   deleteFeeHead: (id) => client.delete(`/finance/fee-heads/${id}/`),
 
+  // Fee Packages (pre-approved total-amount combinations set by the Admin Head)
+  getFeePackages: (params) => client.get('/finance/fee-packages/', { params }),
+  createFeePackage: (data) => client.post('/finance/fee-packages/', data),
+  updateFeePackage: (id, data) => client.patch(`/finance/fee-packages/${id}/`, data),
+  deleteFeePackage: (id) => client.delete(`/finance/fee-packages/${id}/`),
+
   // Payment Ledger & Desk
   getPaymentLedgers: (params) => client.get('/finance/ledger/', { params }),
   recordPayment: (data) => client.post('/finance/ledger/', data),

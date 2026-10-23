@@ -1,8 +1,10 @@
 """
 Serializers for Fee Configuration and Payment Ledger.
 """
+from decimal import Decimal
+
 from rest_framework import serializers
-from apps.finance.models import FeeHead, PaymentLedger, StudentFeeAssessment
+from apps.finance.models import FeeHead, FeePackage, PaymentLedger, StudentFeeAssessment
 
 
 class FeeHeadSerializer(serializers.ModelSerializer):
@@ -47,6 +49,160 @@ class FeeHeadSerializer(serializers.ModelSerializer):
             except Exception:
                 pass
         return super().create(validated_data)
+
+
+class FeePackageSerializer(serializers.ModelSerializer):
+    """
+    Administrative-Head-configured fee package (one dropdown option at the
+    accountant desk). Items are validated server-side against the year's fee
+    heads — every amount must be one of that head's allowed presets, so a
+    saved package can never make the accountant's fee breakdown invalid.
+    """
+
+    academic_year_code = serializers.CharField(source='academic_year.code', read_only=True)
+    total = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    items_resolved = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FeePackage
+        fields = [
+            'id',
+            'name',
+            'academic_year',
+            'academic_year_code',
+            'items',
+            'items_resolved',
+            'total',
+            'display_order',
+            'is_active',
+            'created_at',
+            'updated_at',
+        ]
+        # total is always recomputed server-side from items.
+        read_only_fields = ['total']
+
+    # ------------------------------------------------------------------
+    # Read-side: resolve live head names/amounts
+    # ------------------------------------------------------------------
+    def get_items_resolved(self, obj):
+        """items with live head names for the accountant dropdown flow.
+
+        Dangling ids (head deleted since the package was written) degrade
+        gracefully with a '(removed fee head)' name so the desk can see — and
+        skip — broken packages instead of failing with a cryptic error.
+        """
+        items = obj.items if isinstance(obj.items, list) else []
+        if not items:
+            return []
+        heads = {str(h.id): h for h in FeeHead.objects.filter(academic_year_id=obj.academic_year_id)}
+        resolved = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            head = heads.get(str(item.get('head', '')))
+            try:
+                amount = Decimal(str(item.get('amount', 0)))
+            except Exception:
+                amount = Decimal('0')
+            resolved.append({
+                'head': str(item.get('head', '')),
+                'head_code': head.code if head else '',
+                'head_name': head.name if head else str(item.get('name') or '(removed fee head)'),
+                'amount': float(amount),
+                'is_valid': head is not None,
+            })
+        return resolved
+
+    # ------------------------------------------------------------------
+    # Write-side: validation is the guarantee of the whole feature
+    # ------------------------------------------------------------------
+    def _resolve_year(self, attrs):
+        year = attrs.get('academic_year')
+        if year is None and self.instance is not None:
+            year = self.instance.academic_year
+        if year is None:
+            raise serializers.ValidationError({'academic_year': 'Academic year is required.'})
+        return year
+
+    @staticmethod
+    def _to_decimal(value):
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return None
+
+    def validate_items(self, items):
+        if not isinstance(items, list) or not items:
+            raise serializers.ValidationError('At least one fee head with an amount is required.')
+        cleaned = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise serializers.ValidationError('Each package item must map a fee head to an amount.')
+            cleaned.append(item)
+        return cleaned
+
+    def validate(self, attrs):
+        items = attrs.get('items', self.instance.items if self.instance else None)
+        if not isinstance(items, list) or not items:
+            raise serializers.ValidationError({'items': 'At least one fee head with an amount is required.'})
+
+        year = self._resolve_year(attrs)
+
+        # Clean 400 (not a DB 500) for duplicate names within a year; the
+        # unique DB constraint remains the race-condition backstop.
+        name = attrs.get('name') or (self.instance.name if self.instance else '')
+        dupe = FeePackage.objects.filter(academic_year=year, name=name)
+        if self.instance:
+            dupe = dupe.exclude(pk=self.instance.pk)
+        if name and dupe.exists():
+            raise serializers.ValidationError(
+                {'name': f'A fee package named "{name}" already exists for this academic year.'})
+
+        heads = {str(h.id): h for h in FeeHead.objects.filter(academic_year=year, is_active=True)}
+
+        name_owner = {}
+        seen_ids = set()
+        total = Decimal('0')
+        cleaned_items = []
+        for idx, item in enumerate(items):
+            head_id = str(item.get('head') or '')
+            head = heads.get(head_id)
+            if head is None:
+                raise serializers.ValidationError(
+                    {'items': f'Item {idx + 1}: fee head is inactive or not configured for this year.'})
+            if head_id in seen_ids:
+                raise serializers.ValidationError(
+                    {'items': f"'{head.name}' may appear only once in a package."})
+            seen_ids.add(head_id)
+
+            amount = self._to_decimal(item.get('amount'))
+            if amount is None or amount < 0:
+                raise serializers.ValidationError(
+                    {'items': f"'{head.name}': invalid amount."})
+            allowed = head.allowed_amounts or []
+            if allowed and not any(self._to_decimal(a) == amount for a in allowed):
+                raise serializers.ValidationError(
+                    {'items': f'{amount.quantize(Decimal("0.01"))} is not an allowed preset for '
+                              f"'{head.name}'. Configure it on the fee head first."})
+
+            # Two different heads with the same name would corrupt the saved
+            # breakdown (it is keyed by name) — block the package instead.
+            if head.name in name_owner and name_owner[head.name] != head_id:
+                raise serializers.ValidationError(
+                    {'items': f"Two fee heads share the name '{head.name}'. "
+                              'Fee head names within a year must be unique before packages can use them.'})
+            name_owner[head.name] = head_id
+
+            cleaned_items.append({
+                'head': head_id,
+                'name': head.name,  # snapshot refreshed to the live head name
+                'amount': float(amount),
+            })
+            total += amount
+
+        attrs['items'] = cleaned_items
+        attrs['total'] = total.quantize(Decimal('0.01'))
+        return attrs
 
 
 class PaymentLedgerSerializer(serializers.ModelSerializer):

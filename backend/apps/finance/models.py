@@ -74,6 +74,50 @@ class FeeHead(BaseModel):
         return f'{self.name} ({self.get_category_quota_display()}) - ₹{self.amount}'
 
 
+class FeePackage(BaseModel):
+    """
+    A pre-approved fee combination ("package") configured by the Administrative
+    Head. The accountant fee desk offers one dropdown of package totals; picking
+    one fills every fee head's amount at once.
+
+    items is stored as a list of {"head": <FeeHead id>, "amount": <rupees>}
+    plus a denormalized "name" snapshot for resilience. Names are resolved LIVE
+    by the serializer (head renames propagate to packages automatically).
+    """
+
+    name = models.CharField(max_length=150)
+    academic_year = models.ForeignKey(
+        AcademicYear,
+        on_delete=models.PROTECT,
+        related_name='fee_packages',
+    )
+    items = models.JSONField(
+        default=list,
+        help_text='List of {head, amount} pairs keyed by FeeHead id (name is a fallback snapshot).',
+    )
+    total = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text='Server-computed sum of item amounts. Never client-writable.',
+    )
+    display_order = models.PositiveIntegerField(default=1)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'finance_fee_packages'
+        ordering = ['display_order', 'total', 'name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['academic_year', 'name'],
+                name='uniq_fee_package_year_name',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.name or "Package"} ({self.academic_year.code}): ₹{self.total}'
+
+
 class PaymentLedger(BaseModel):
     """
     Official institutional receipt and payment ledger per candidate.

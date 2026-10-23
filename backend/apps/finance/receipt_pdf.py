@@ -855,6 +855,26 @@ def _fee_types(ledger, breakdown: dict) -> dict:
         return {}
 
 
+#: Snapshot keys arrive in Postgres jsonb order (length, then byte-wise), not
+#: in the fee desk's configured sequence, so each column is re-sorted using the
+#: FeeHead ``display_order`` for the ledger's academic year.  Heads unknown to
+#: that configuration share the sentinel rank and keep their snapshot order.
+_UNRANKED_HEAD = 10_000
+
+
+def _display_order_map(ledger) -> dict[str, int]:
+    """FeeHead ``display_order`` keyed by lowercased head name for that year."""
+    try:
+        from .models import FeeHead
+
+        return {
+            head.name.lower(): head.display_order
+            for head in FeeHead.objects.filter(academic_year=ledger.academic_year)
+        }
+    except Exception:
+        return {}
+
+
 def build_receipt_data(ledger) -> FeeReceiptData:
     """Assemble the immutable receipt payload from a PaymentLedger."""
     student = ledger.student
@@ -882,6 +902,16 @@ def build_receipt_data(ledger) -> FeeReceiptData:
             government.append(head)
         else:
             non_government.append(head)
+
+    # Both columns must read in the fee desk's configured sequence:
+    # Government side and Non-Government side each ranked on their own.
+    display_order = _display_order_map(ledger)
+    government.sort(
+        key=lambda head: display_order.get(head.name.lower(), _UNRANKED_HEAD),
+    )
+    non_government.sort(
+        key=lambda head: display_order.get(head.name.lower(), _UNRANKED_HEAD),
+    )
 
     return FeeReceiptData(
         student_name=name,

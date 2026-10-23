@@ -23,6 +23,13 @@ export default function CandidateFeeSetPage() {
   const [headsFailed, setHeadsFailed] = useState(false);
   const [yearsFailed, setYearsFailed] = useState(false);
 
+  // Fee Packages: the ONLY source of fee amounts now. The Admin Head defines
+  // each package (set of head amounts per year) on the Fee Head Configuration
+  // page; the accountant picks one total and every head fills automatically.
+  const [feePackages, setFeePackages] = useState([]);
+  const [packagesFailed, setPackagesFailed] = useState(false);
+  const [selectedPackageId, setSelectedPackageId] = useState('');
+
   // Selected fee amounts map: { [feeHeadName]: selectedAmount }
   const [feeAmounts, setFeeAmounts] = useState({});
   const [loading, setLoading] = useState(true);
@@ -72,7 +79,6 @@ export default function CandidateFeeSetPage() {
       setError('Could not load fee heads. Fee cannot be set until they load — please retry.');
     }
     heads.sort((a, b) => (a.display_order || 99) - (b.display_order || 99));
-    setFeeHeads(heads);
 
     // 3. Academic years come only from the backend.
     let resolvedYear = null;
@@ -93,7 +99,35 @@ export default function CandidateFeeSetPage() {
       setError('Could not load academic years. Fee cannot be set until they load — please retry.');
     }
 
-    // 4. Load existing fee assessment from the backend ledger.
+    // Only the heads of THIS assessment year belong on the form (each FeeHead
+    // row is scoped to one academic year, the same way packages are).
+    if (resolvedYear?.id) {
+      heads = heads.filter(h => !h.academic_year
+        || String(h.academic_year) === String(resolvedYear.id));
+    }
+    setFeeHeads(heads);
+
+    // 4. Fee packages (Admin Head configuration). Packages are the ONLY way
+    // to fill amounts now: one dropdown total -> all heads filled at once.
+    let packages = [];
+    try {
+      const pkgRes = await financeApi.getFeePackages({
+        academic_year_id: resolvedYear?.id,
+      });
+      const rawPkgs = pkgRes?.data?.results || pkgRes?.data || [];
+      packages = (Array.isArray(rawPkgs) ? rawPkgs : [])
+        .filter(p => p.is_active)
+        .sort((a, b) => (a.display_order || 99) - (b.display_order || 99)
+          || (parseFloat(a.total) || 0) - (parseFloat(b.total) || 0));
+      setPackagesFailed(false);
+    } catch (err) {
+      console.warn('Could not load fee packages:', err);
+      setPackagesFailed(true);
+      setError('Could not load fee packages. Fee cannot be set until they load — please retry.');
+    }
+    setFeePackages(packages);
+
+    // 5. Load existing fee assessment from the backend ledger.
     // Backend is the source of truth; browser storage is never consulted.
     try {
       const initialAmounts = {};
@@ -107,19 +141,25 @@ export default function CandidateFeeSetPage() {
         setAllowOnlinePayment(Boolean(existing.allow_online_payment));
         Object.assign(initialAmounts, existing.fee_breakdown || {});
       }
-
-      heads.forEach(h => {
-        if (initialAmounts[h.name] === undefined) {
-          // Default to the first configured preset so an untouched form is
-          // always backend-valid. A blind 0 breaks heads whose presets
-          // exclude 0 (e.g. ID card fee [50, 100]) and fails the whole save.
-          const presets = Array.isArray(h.allowed_amounts) && h.allowed_amounts.length > 0
-            ? h.allowed_amounts
-            : null;
-          initialAmounts[h.name] = presets ? presets[0] : 0;
-        }
-      });
       setFeeAmounts(initialAmounts);
+
+      // If the saved breakdown exactly equals a package, preselect that
+      // package option (case-insensitive names, amount-tolerant compare).
+      // Unmatched legacy fees stay unselected on purpose: saving requires an
+      // explicit package choice in the package-only flow.
+      if (existing?.id) {
+        const breakdownSaved = existing.fee_breakdown || {};
+        const names = Object.keys(breakdownSaved);
+        const matches = (pkg) => {
+          const resolved = Array.isArray(pkg.items_resolved) ? pkg.items_resolved : [];
+          if (resolved.length === 0 || resolved.length !== names.length) return false;
+          return resolved.every(it => names.some(k =>
+            k.toLowerCase() === String(it.head_name).toLowerCase()
+            && Math.abs((parseFloat(breakdownSaved[k]) || 0) - (parseFloat(it.amount) || 0)) < 0.01));
+        };
+        const matched = packages.find(matches);
+        if (matched) setSelectedPackageId(String(matched.id));
+      }
     } catch (err) {
       console.warn('Error initializing fee amounts:', err);
     } finally {
@@ -127,39 +167,47 @@ export default function CandidateFeeSetPage() {
     }
   };
 
-  const handleAmountChange = (headName, value) => {
-    setFeeAmounts(prev => ({
-      ...prev,
-      [headName]: parseFloat(value) || 0
-    }));
-  };
-
-  // Calculate total admission fees sum
-  const totalAdmissionFees = Object.values(feeAmounts).reduce((acc, curr) => acc + (parseFloat(curr) || 0), 0);
-
   // Save fee assessment to the backend ledger and return to student list.
   const handleSaveFee = async (e) => {
     e.preventDefault();
+    if (headsFailed || packagesFailed) {
+      setError('Fee configuration could not load. Please retry — amounts are never assumed.');
+      return;
+    }
     if (feeHeads.length === 0) {
-      setError('No fee heads are configured. Ask the sysadmin to configure fee heads first.');
+      setError('No fee heads are configured. Ask the Administrative Head to configure fee heads first.');
       return;
     }
     if (!currentYear?.id) {
       setError('No academic year is configured. Ask the sysadmin to create one first.');
       return;
     }
+    if (feePackages.length === 0) {
+      setError('No fee packages are configured for this year. Ask the Administrative Head to create fee packages (Fee Head Configuration → Fee Packages).');
+      return;
+    }
+    if (!selectedPkg) {
+      setError('Select a fee package total before saving.');
+      return;
+    }
+    if (selectedPkgBroken) {
+      setError('This fee package references a fee head that is no longer configured. Ask the Administrative Head to fix the package.');
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
+      // The package IS the breakdown — amounts come straight from its
+      // server-validated items, so the save always passes head validation.
       const breakdown = {};
-      Object.entries(feeAmounts).forEach(([k, v]) => {
-        breakdown[k] = parseFloat(v) || 0;
+      (Array.isArray(selectedPkg.items_resolved) ? selectedPkg.items_resolved : []).forEach((it) => {
+        breakdown[it.head_name] = parseFloat(it.amount) || 0;
       });
       const payload = {
         student: studentId,
         academic_year: currentYear?.id,
         fee_breakdown: breakdown,
-        total_fee: totalAdmissionFees,
+        total_fee: selectedPkg.total,
         allow_online_payment: allowOnlinePayment,
         remarks: 'Admission fee configured at candidate desk',
       };
@@ -188,6 +236,32 @@ export default function CandidateFeeSetPage() {
       setSaving(false);
     }
   };
+
+  // ---- Fee Package selection (the only way amounts are filled) ----
+  const selectedPkg = feePackages.find(p => String(p.id) === String(selectedPackageId)) || null;
+  // A package whose fee head was deleted/deactivated since it was created
+  // cannot be trusted — block saving with a clear message instead.
+  const selectedPkgBroken = (selectedPkg?.items_resolved || []).some(it => !it.is_valid);
+
+  const handlePackageSelect = (pkgId) => {
+    setSelectedPackageId(pkgId);
+    const pkg = feePackages.find(p => String(p.id) === String(pkgId));
+    if (!pkg) {
+      setFeeAmounts({});
+      return;
+    }
+    const amounts = {};
+    (Array.isArray(pkg.items_resolved) ? pkg.items_resolved : []).forEach((it) => {
+      amounts[it.head_name] = parseFloat(it.amount) || 0;
+    });
+    setFeeAmounts(amounts);
+  };
+
+  // Total comes from the selected package's server-computed total (never the
+  // client's arithmetic, so dropdown rows always match the saved record).
+  const totalAdmissionFees = selectedPkg
+    ? (parseFloat(selectedPkg.total) || 0)
+    : Object.values(feeAmounts).reduce((acc, curr) => acc + (parseFloat(curr) || 0), 0);
 
   // Load payment history
   const handleOpenHistory = async () => {
@@ -599,11 +673,10 @@ export default function CandidateFeeSetPage() {
                           </tr>
                         ) : null}
                         {feeHeads.map((head, idx) => {
-                          const allowed = Array.isArray(head.allowed_amounts) && head.allowed_amounts.length > 0
-                            ? head.allowed_amounts
-                            : null;
-
-                          const currentVal = feeAmounts[head.name] !== undefined ? feeAmounts[head.name] : 0;
+                          // Amounts come ONLY from the selected fee package
+                          // (see handlePackageSelect) — no manual entry exists.
+                          const covered = feeAmounts[head.name] !== undefined;
+                          const currentVal = covered ? feeAmounts[head.name] : 0;
 
                           return (
                             <tr key={head.id || idx} style={{ borderBottom: '1px solid #f1f5f9' }}>
@@ -617,89 +690,109 @@ export default function CandidateFeeSetPage() {
                                 {head.name} <span style={{ color: '#ef4444' }}>*</span>
                               </td>
 
-                              {/* Allowed amounts from backend; free numeric entry when none configured */}
+                              {/* Read-only: the selected fee package fills this value */}
                               <td style={{ padding: '0.85rem 1.25rem', textAlign: 'center' }}>
-                                {allowed ? (
-                                  <select
-                                    value={currentVal}
-                                    onChange={(e) => handleAmountChange(head.name, e.target.value)}
-                                    className="edvana-input"
-                                    style={{
-                                      width: '100%',
-                                      maxWidth: '240px',
-                                      height: '38px',
-                                      margin: '0 auto',
-                                      padding: '0 0.85rem',
-                                      fontSize: '0.85rem',
-                                      fontWeight: 400,
-                                      color: '#0f172a',
-                                      borderRadius: '8px',
-                                      borderColor: '#cbd5e1',
-                                      textAlign: 'center'
-                                    }}
-                                  >
-                                    {allowed.map((amt) => (
-                                      <option key={amt} value={amt}>
-                                        {amt === 0 ? '0' : Number(amt).toLocaleString('en-IN')}
-                                      </option>
-                                    ))}
-                                  </select>
-                                ) : (
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    step="0.01"
-                                    value={currentVal}
-                                    onChange={(e) => handleAmountChange(head.name, e.target.value)}
-                                    className="edvana-input"
-                                    style={{
-                                      width: '100%',
-                                      maxWidth: '240px',
-                                      height: '38px',
-                                      margin: '0 auto',
-                                      padding: '0 0.85rem',
-                                      fontSize: '0.85rem',
-                                      color: '#0f172a',
-                                      borderRadius: '8px',
-                                      borderColor: '#cbd5e1',
-                                      textAlign: 'center'
-                                    }}
-                                  />
-                                )}
+                                <div style={{
+                                  display: 'inline-block',
+                                  width: '100%',
+                                  maxWidth: '240px',
+                                  height: '38px',
+                                  lineHeight: '37px',
+                                  margin: '0 auto',
+                                  padding: '0 0.85rem',
+                                  fontSize: '0.85rem',
+                                  fontWeight: 500,
+                                  color: covered ? '#0f172a' : '#94a3b8',
+                                  background: covered ? '#f8fafc' : '#ffffff',
+                                  border: '1px solid',
+                                  borderColor: covered ? '#cbd5e1' : '#e2e8f0',
+                                  borderRadius: '8px',
+                                  textAlign: 'right'
+                                }}>
+                                  {Number(currentVal || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                                </div>
                               </td>
                             </tr>
                           );
                         })}
 
-                        {/* Total Admission Fees Row */}
+                        {/* Total Admission Fees Row — the ONLY input now:
+                            a dropdown of Admin-Head-configured packages. */}
                         <tr style={{ background: '#ffffff', borderTop: '1px solid #e2e8f0' }}>
                           <td colSpan={2} style={{ padding: '0.95rem 1.25rem', fontSize: '0.875rem', color: '#0f172a', fontWeight: 600, textAlign: 'center' }}>
                             Total Admission Fees <span style={{ color: '#ef4444' }}>*</span>
                           </td>
                           <td style={{ padding: '0.95rem 1.25rem', textAlign: 'center' }}>
-                            <div style={{
-                              width: '100%',
-                              maxWidth: '240px',
-                              height: '38px',
-                              margin: '0 auto',
-                              padding: '0 0.85rem',
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              background: '#ffffff',
-                              border: '1px solid #cbd5e1',
-                              borderRadius: '8px',
-                              fontSize: '0.875rem',
-                              fontWeight: 500,
-                              color: '#0f172a'
-                            }}>
-                              {totalAdmissionFees.toFixed(2)}
-                            </div>
+                            <select
+                              value={selectedPackageId}
+                              onChange={(e) => handlePackageSelect(e.target.value)}
+                              disabled={packagesFailed || feePackages.length === 0}
+                              className="edvana-input"
+                              style={{
+                                width: '100%',
+                                maxWidth: '240px',
+                                height: '38px',
+                                margin: '0 auto',
+                                padding: '0 0.85rem',
+                                fontSize: '0.9rem',
+                                fontWeight: 600,
+                                color: selectedPackageId ? '#0f172a' : '#334155',
+                                borderRadius: '8px',
+                                borderColor: selectedPackageId ? '#93c5fd' : '#cbd5e1',
+                                background: selectedPackageId ? '#eff6ff' : '#ffffff',
+                                textAlign: 'center',
+                                cursor: packagesFailed || feePackages.length === 0 ? 'not-allowed' : 'pointer'
+                              }}
+                            >
+                              <option value="">— Select Fee Package Total —</option>
+                              {feePackages.map((pkg) => {
+                                const broken = (Array.isArray(pkg.items_resolved) ? pkg.items_resolved : [])
+                                  .some(it => !it.is_valid);
+                                const totalLabel = `₹${Number(pkg.total).toLocaleString('en-IN')}`;
+                                return (
+                                  <option
+                                    key={pkg.id}
+                                    value={pkg.id}
+                                    disabled={broken}
+                                  >
+                                    {totalLabel}{broken ? ' (misconfigured)' : ''}
+                                  </option>
+                                );
+                              })}
+                            </select>
                           </td>
                         </tr>
+
+                        {/* Zero / failed packages: an explicit, local hint */}
+                        {!packagesFailed && feePackages.length === 0 && (
+                          <tr>
+                            <td colSpan={3} style={{ padding: '1rem 1.25rem', textAlign: 'center', fontSize: '0.85rem', color: '#854d0e', background: '#fefce8' }}>
+                              No fee packages are configured for this year yet. The Administrative Head must create
+                              them under Fee Head Configuration → Fee Packages before fees can be set.
+                            </td>
+                          </tr>
+                        )}
                       </tbody>
                     </table>
                   </div>
+
+                  {/* Editing a legacy fee that no package matches */}
+                  {existingAssessment && !selectedPkg && !packagesFailed && feePackages.length > 0 && (
+                    <div style={{
+                      marginBottom: '1.25rem',
+                      padding: '0.85rem 1.1rem',
+                      background: '#fefce8',
+                      border: '1px solid #fde68a',
+                      borderRadius: '10px',
+                      color: '#854d0e',
+                      fontSize: '0.82rem',
+                      lineHeight: 1.55,
+                      fontWeight: 600
+                    }}>
+                      The fee currently saved for this student does not match any package. Select a
+                      package total above to update the fee before saving.
+                    </div>
+                  )}
 
                   {/* Online Payment Gateway Selection Card */}
                   <div style={{
