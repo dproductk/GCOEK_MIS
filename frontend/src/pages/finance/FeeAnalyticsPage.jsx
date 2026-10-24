@@ -10,11 +10,16 @@ import PageHeader from '../../components/common/PageHeader';
 import DataTable from '../../components/common/DataTable';
 import Badge from '../../components/common/Badge';
 import { LoadingState, ErrorState, EmptyState } from '../../components/common/StateDisplays';
+import { fetchAllListPages } from '../../utils/listPages';
 
 export default function FeeAnalyticsPage() {
   const [analytics, setAnalytics] = useState(null);
   const [ledger, setLedger] = useState([]);
   const [ledgerTotalCount, setLedgerTotalCount] = useState(0);
+  // True when a ledger page request failed mid-walk: the loaded rows are
+  // then a subset of ledgerTotalCount, so paid/settlement counts below are
+  // lower bounds and the UI must say so.
+  const [dataIncomplete, setDataIncomplete] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeCards, setActiveCards] = useState({});
@@ -37,25 +42,30 @@ export default function FeeAnalyticsPage() {
     setError(null);
     try {
       const effectiveYear = yearOverride !== undefined ? yearOverride : yearFilter;
-      const [anaRes, ledRes, yearsRes] = await Promise.all([
+      const [anaRes, ledPages, yearsRes] = await Promise.all([
         financeApi.getFinanceAnalytics(effectiveYear ? { academic_year: effectiveYear } : undefined),
-        financeApi.getPaymentLedgers({
+        // List completeness: FinancePagination caps any single request at
+        // 1000 rows. Walking only page 1 made the audit table counts and
+        // settlement math wrong once history crossed that cap — fetch every
+        // server page instead (the walker never rejects; failures surface
+        // as `incomplete`).
+        fetchAllListPages(financeApi.getPaymentLedgers, {
           search: searchTerm || undefined,
           status: statusFilter || undefined,
           academic_year: effectiveYear || undefined,
-          // FinancePagination allows up to 1000 rows so a full college
-          // roster fits in one request (see backend FinancePagination).
           page_size: 1000,
         }),
         academicApi.getAcademicYears().catch(() => ({ data: [] })),
       ]);
       setAnalytics(anaRes.data);
-      const rows = ledRes.data?.results || ledRes.data || [];
+      const rows = ledPages.results;
       setLedger(Array.isArray(rows) ? rows : []);
-      // Authoritative total from pagination (rows may be capped at page_size).
+      // Authoritative total from pagination (matches loaded rows unless a
+      // page request failed mid-walk).
       setLedgerTotalCount(
-        typeof ledRes.data?.count === 'number' ? ledRes.data.count : (Array.isArray(rows) ? rows.length : 0)
+        typeof ledPages.count === 'number' ? ledPages.count : (Array.isArray(rows) ? rows.length : 0)
       );
+      setDataIncomplete(Boolean(ledPages.incomplete));
       const rawYears = yearsRes.data?.results || yearsRes.data || [];
       if (rawYears.length > 0) setYears(rawYears);
     } catch (err) {
@@ -118,10 +128,10 @@ export default function FeeAnalyticsPage() {
   const paidCount = ledger.filter(r => r.status === 'PAID').length;
   const partialCount = ledger.filter(r => r.status === 'PARTIAL').length;
   const pendingCount = ledger.filter(r => r.status === 'PENDING').length;
-  // Share of receipts fully settled. Only exact when the full filtered
-  // set fits in one page (page_size=1000); otherwise it is a lower-bound
-  // estimate from the loaded slice.
-  const ledgerCoversAll = ledgerTotalCount > 0 ? ledger.length >= ledgerTotalCount : true;
+  // Share of receipts fully settled. Exact whenever the filter request
+  // loaded completely (the walker fetches every page); a page failure
+  // degrades it to a lower-bound estimate of the loaded slice.
+  const ledgerCoversAll = !dataIncomplete;
   const auditSettlement = totalReceipts > 0
     ? ((paidCount / totalReceipts) * 100).toFixed(1) + '%'
     : '0.0%';
@@ -320,7 +330,7 @@ export default function FeeAnalyticsPage() {
         subtitle="Comprehensive real-time tracking of tuition revenue collections, balance recovery, and treasury receipts."
         actions={
           <button
-            onClick={fetchData}
+            onClick={() => fetchData()}
             className="edvana-btn"
             style={{
               display: 'inline-flex',
@@ -538,7 +548,7 @@ export default function FeeAnalyticsPage() {
           <div className="edvana-card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
             <div>
               <h2 className="edvana-card-title">Master Payment Ledger ({ledgerTotalCount || ledger.length})</h2>
-              <p className="edvana-card-description">Auditable record of all fee transactions and reconciliation entries{!ledgerCoversAll ? ' — showing first 1000 of ' + ledgerTotalCount : ''}</p>
+              <p className="edvana-card-description">Auditable record of all fee transactions and reconciliation entries{!ledgerCoversAll ? ' — showing ' + ledger.length + ' of ' + (ledgerTotalCount || ledger.length) + ' (a page request failed; press Search to retry)' : ''}</p>
             </div>
 
             <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.75rem' }}>
@@ -599,7 +609,7 @@ export default function FeeAnalyticsPage() {
               </div>
             ) : error ? (
               <div style={{ padding: '2.5rem' }}>
-                <ErrorState title="Error Loading Ledger" message={error} onRetry={fetchData} />
+                <ErrorState title="Error Loading Ledger" message={error} onRetry={() => fetchData()} />
               </div>
             ) : (
               <DataTable

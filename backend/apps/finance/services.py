@@ -275,7 +275,10 @@ def apply_gateway_result(
                     payment_mode=PaymentLedger.PaymentMode.ONLINE,
                     transaction_ref=easebuzz_txn_id or attempt.transaction_id,
                     status=PaymentLedger.PaymentStatus.PAID,
-                    payment_date=timezone.now().date(),
+                    # IST local date for the official receipt. Bare .date() on
+                    # timezone.now() is UTC and stamps verified payments made
+                    # 00:00–05:30 IST with the previous day's date.
+                    payment_date=timezone.localtime(timezone.now()).date(),
                     collected_by=actor if (actor and actor.is_authenticated) else None,
                     remarks=f"Easebuzz Online Payment (Txn: {attempt.transaction_id}, EasepayID: {easebuzz_txn_id})",
                     fee_snapshot=dict(_snap or {}),

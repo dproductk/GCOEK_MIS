@@ -303,6 +303,93 @@ class PaymentLedgerViewSet(viewsets.ModelViewSet):
 
         return PaymentLedger.objects.none()
 
+    @action(detail=False, methods=['get'], url_path='fee-status-map')
+    def fee_status_map(self, request):
+        """One compact fee verdict per student for the Candidate Fee Desk.
+
+        The desk decides paid/unpaid by folding every assessment and ledger
+        row client-side. When the ledger grows past FinancePagination's
+        1000-row cap, page 1 silently omitted paid rows and those students
+        displayed as UNPAID even though they had paid. This action performs
+        the same fold server-side over the COMPLETE scoped history, so the
+        desk needs one finance request (plus its roster) no matter how long
+        the history grows.
+
+        Fold semantics are deliberately identical to the desk's client-side
+        fold so the verdict cannot drift between deployments:
+        - Assessments are applied first, then ledger rows with
+          total_fee_due > 0 overwrite.
+        - Rows are visited in each model's list order (FeeDesk list request
+          order == Meta ordering), so the last row seen wins — replicating
+          the previous forEach-overwrite behaviour exactly.
+        - Scoping matches this viewset's and the assessment viewset's
+          get_queryset: Sysadmin/Admin Head/Accountant see everything,
+          STUDENTS see only their own rows, others get an empty map.
+
+        Shape: {"count": N, "data": {"<student_id>": {
+            totalFee, breakdown, isSet, isPaid, amountPaid, assessmentId,
+            allowOnlinePayment, academicYearId, academicYearCode}
+        }}. Keys are strings (JSON objects), which the desk reads with
+        feesMap[s.id] — the same lookup it used before.
+        """
+        user = request.user
+        scopes = get_user_scopes(user)
+        is_desk = (scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']
+                   or 'ACCOUNTANT' in scopes['roles'])
+        is_student = 'STUDENT' in scopes['roles']
+        if is_desk:
+            assess_qs = StudentFeeAssessment.objects.all()
+        elif is_student:
+            assess_qs = StudentFeeAssessment.objects.filter(student__user_id=user.id)
+        else:
+            return Response({'count': 0, 'data': {}})
+
+        ledger_qs = self.get_queryset()
+
+        year_codes = dict(AcademicYear.objects.values_list('id', 'code'))
+
+        # Assessments list order == '-created_at' (Meta), identical to the
+        # desk's assessment page order.
+        data = {}
+        for (student_id, assess_id, year_id, total_fee, breakdown,
+             allow_online) in assess_qs.order_by('-created_at').values_list(
+                'student_id', 'id', 'academic_year_id', 'total_fee',
+                'fee_breakdown', 'allow_online_payment'):
+            data[student_id] = {
+                'totalFee': float(total_fee),
+                'breakdown': breakdown or {},
+                'isSet': True,
+                'assessmentId': assess_id,
+                'allowOnlinePayment': bool(allow_online),
+                'academicYearId': year_id,
+                'academicYearCode': year_codes.get(year_id, ''),
+            }
+
+        # Ledger list order == Meta ordering (-payment_date, -created_at),
+        # identical to the desk's ledger page order. Later rows overwrite.
+        for (student_id, year_id, total_due, amount_paid,
+             status) in ledger_qs.values_list(
+                'student_id', 'academic_year_id', 'total_fee_due',
+                'amount_paid', 'status'):
+            if not total_due or Decimal(str(total_due)) <= Decimal('0'):
+                continue  # desk ignores ₹0/placeholder rows
+            prev = data.get(student_id) or {}
+            data[student_id] = {
+                **prev,
+                'totalFee': float(total_due),
+                'isSet': True,
+                'isPaid': status == PaymentLedger.PaymentStatus.PAID,
+                'amountPaid': float(amount_paid),
+                'academicYearId': year_id or prev.get('academicYearId') or None,
+                'academicYearCode': (year_codes.get(year_id, '')
+                                     or prev.get('academicYearCode') or ''),
+            }
+
+        return Response({
+            'count': len(data),
+            'data': {str(student_id): entry for student_id, entry in data.items()},
+        })
+
     def _check_write(self):
         scopes = get_user_scopes(self.request.user)
         if not (scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']
@@ -645,6 +732,9 @@ class StudentFeeAssessmentViewSet(viewsets.ModelViewSet):
                 amt = _Decimal(str(amount))
             except Exception:
                 raise ValidationError({'fee_breakdown': f"Invalid amount for '{name}'."})
+            if amt < _Decimal('0'):
+                raise ValidationError(
+                    {'fee_breakdown': f"Amount for '{name}' cannot be negative."})
             allowed = head.allowed_amounts or []
             if allowed and not any(_Decimal(str(a)) == amt for a in allowed):
                 raise ValidationError(
@@ -652,6 +742,12 @@ class StudentFeeAssessmentViewSet(viewsets.ModelViewSet):
         if total is None or abs(_Decimal(str(total)) - sum(
                 (_Decimal(str(v)) for v in breakdown.values()), _Decimal('0'))) > _Decimal('0.01'):
             raise ValidationError({'total_fee': 'Total must equal the breakdown sum.'})
+        # A ₹0 assessment would be treated as "no fee set" everywhere else in
+        # the system (fee desk eligibility, mark-fee gating), so a fully free
+        # assessment must never be saved — it would make the candidate look
+        # eligible with no money ever collected.
+        if _Decimal(str(total)) <= _Decimal('0'):
+            raise ValidationError({'total_fee': 'Total fee must be greater than ₹0.'})
 
     def _frozen(self, student, academic_year):
         ledger = PaymentLedger.objects.filter(

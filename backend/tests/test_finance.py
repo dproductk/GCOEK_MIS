@@ -285,6 +285,66 @@ def test_untouched_zero_head_breaks_whole_save(api_client, finance_setup):
 
 
 @pytest.mark.django_db
+def test_zero_total_assessment_rejected(api_client, finance_setup):
+    """Money-integrity guard: a fully-free (₹0 total) assessment must never
+    save — Mark-Fee would force amount_paid == the assessed fee (₹0) and
+    auto-settle the student with no money collected. ₹0 individual items stay
+    legal (waiver heads), but the total must contribute money."""
+    from apps.finance.models import FeeHead
+
+    year = finance_setup['year']
+    FeeHead.objects.create(
+        name='Gov fee (waiver-able)', code='GOV-WAV-2026', academic_year=year,
+        program=finance_setup['prog'],
+        category_quota=FeeHead.CategoryQuota.OPEN,
+        amount=Decimal('5000.00'), allowed_amounts=[0, 5000],
+    )
+    role_student, _ = Role.objects.get_or_create(
+        codename='STUDENT', defaults={'name': 'Student'})
+    u = User.objects.create_user(
+        username='zero_fee_stu', password='Password123!',
+        user_type=User.UserType.STUDENT)
+    RoleAssignment.objects.create(user=u, role=role_student,
+                                  status=RoleAssignment.Status.ACTIVE)
+    stu = Student.objects.create(
+        user=u, enrollment_no='PRN-FIN-ZERO', first_name='Zero', last_name='Free')
+
+    api_client.force_authenticate(user=finance_setup['user_acc'])
+    res = api_client.post('/api/v1/finance/assessments/', {
+        'student': str(stu.id), 'academic_year': str(year.id),
+        'fee_breakdown': {'Gov fee (waiver-able)': 0}, 'total_fee': '0'},
+        format='json')
+    assert res.status_code == status.HTTP_400_BAD_REQUEST
+    assert 'greater than ₹0' in str(res.data)
+    assert not PaymentLedger.objects.filter(student=stu).exists()
+
+
+@pytest.mark.django_db
+def test_negative_breakdown_amount_rejected(api_client, finance_setup):
+    """A fat-fingered negative breakdown amount must be refused outright —
+    it would flip the record's money math downstream."""
+    year = finance_setup['year']
+    role_student, _ = Role.objects.get_or_create(
+        codename='STUDENT', defaults={'name': 'Student'})
+    u = User.objects.create_user(
+        username='neg_fee_stu', password='Password123!',
+        user_type=User.UserType.STUDENT)
+    RoleAssignment.objects.create(user=u, role=role_student,
+                                  status=RoleAssignment.Status.ACTIVE)
+    stu = Student.objects.create(
+        user=u, enrollment_no='PRN-FIN-NEG', first_name='Neg', last_name='Ative')
+
+    api_client.force_authenticate(user=finance_setup['user_acc'])
+    res = api_client.post('/api/v1/finance/assessments/', {
+        'student': str(stu.id), 'academic_year': str(year.id),
+        'fee_breakdown': {'Tuition Fee': -100}, 'total_fee': '-100'},
+        format='json')
+    assert res.status_code == status.HTTP_400_BAD_REQUEST
+    assert 'negative' in str(res.data)
+    assert not PaymentLedger.objects.filter(student=stu).exists()
+
+
+@pytest.mark.django_db
 def test_manual_marking_happy_path_receipt_backend_generated(api_client, finance_setup):
     """Manual desk happy path: Set Fee -> Mark Fee succeeds once, receipt is backend-generated."""
     import datetime
@@ -385,3 +445,69 @@ def test_receipt_breakup_visible_to_desk_not_student(api_client, finance_setup):
     )
     assert ledger_row['fee_breakdown'] == {'Tuition Fee': '60000.00', 'Development Fee': '5000.00'}
     assert ledger_row['receipt_no']
+
+@pytest.mark.django_db
+def test_fee_status_map_desk_fold(api_client, finance_setup):
+    """The fee desk's summary endpoint folds the COMPLETE history server-side:
+
+    - old-year PAID ledgers still surface (the 1000-row client truncation
+      bug used to hide them and mark paid students as unpaid),
+    - the fold replicates the desk's client semantics: assessments first,
+      then ledger rows overwrite in their list order (newest-first), and
+    - rows with total_fee_due <= 0 are ignored."""
+    from apps.finance.models import StudentFeeAssessment
+    s = finance_setup
+    api_client.force_authenticate(s['user_acc'])
+
+    old_year = AcademicYear.objects.create(
+        code='2025-26', name='2025-2026',
+        start_date=datetime.date(2025, 7, 1), end_date=datetime.date(2026, 6, 30),
+        is_current=False)
+    StudentFeeAssessment.objects.create(
+        student=s['stu1'], academic_year=old_year,
+        fee_breakdown={'Tuition Fee': '60000.00'},
+        total_fee=Decimal('60000.00'))
+    # stu1 already has a current-year PAID ledger (ledger1, 65000/65000).
+    # Add an OLDER-year PAID ledger: list order is newest-first, and the
+    # desk's fold lets the LAST row seen win -> the old-year verdict.
+    PaymentLedger.objects.create(
+        student=s['stu1'], academic_year=old_year,
+        receipt_no='GCOEK/2025/TEST/091',
+        total_fee_due=Decimal('60000.00'), amount_paid=Decimal('60000.00'),
+        payment_mode=PaymentLedger.PaymentMode.CASH,
+        payment_date=datetime.date(2025, 8, 10), collected_by=s['user_acc'])
+
+    response = api_client.get('/api/v1/finance/ledger/fee-status-map/')
+    assert response.status_code == status.HTTP_200_OK
+    assert response.data['count'] == 2
+    data = response.data['data']
+
+    m1 = data[str(s['stu1'].id)]
+    assert m1['isSet'] is True
+    assert m1['isPaid'] is True
+    assert m1['academicYearCode'] == '2025-26'   # last (oldest) ledger row wins
+    assert m1['totalFee'] == 60000.0
+    assert m1['amountPaid'] == 60000.0
+    # Assessment fields carried through even when a ledger overrode the row.
+    assert m1['breakdown'] == {'Tuition Fee': '60000.00'}
+
+    # stu2: PARTIAL ledger only -> visible, fee set, but NOT paid.
+    m2 = data[str(s['stu2'].id)]
+    assert m2['isSet'] is True
+    assert m2['isPaid'] is False
+    assert m2['totalFee'] == 65000.0
+
+
+@pytest.mark.django_db
+def test_fee_status_map_scoping(api_client, finance_setup):
+    """Students fold only their OWN rows; anonymous users get an empty map."""
+    from rest_framework.test import APIClient as _AC
+    api_client.force_authenticate(user=finance_setup['user_stu1'])
+    response = api_client.get('/api/v1/finance/ledger/fee-status-map/')
+    assert response.status_code == status.HTTP_200_OK
+    assert list(response.data['data'].keys()) == [str(finance_setup['stu1'].id)]
+    assert response.data['count'] == 1
+
+    anon = _AC()
+    assert anon.get('/api/v1/finance/ledger/fee-status-map/').status_code \
+        == status.HTTP_401_UNAUTHORIZED

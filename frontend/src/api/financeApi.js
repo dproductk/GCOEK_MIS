@@ -16,6 +16,11 @@ export const financeApi = {
   // Payment Ledger & Desk
   getPaymentLedgers: (params) => client.get('/finance/ledger/', { params }),
   recordPayment: (data) => client.post('/finance/ledger/', data),
+  // One compact per-student fee verdict folded server-side from the
+  // COMPLETE assessment+ledger history (see PaymentLedgerViewSet
+  // .fee_status_map). Lets the fee desk skip page-walking ledgers as
+  // history grows.
+  getFeeStatusMap: (params) => client.get('/finance/ledger/fee-status-map/', { params }),
   getPaymentDetail: (id) => client.get(`/finance/ledger/${id}/`),
   getReceiptPdf: (id) => client.get(`/finance/ledger/${id}/receipt-pdf/`, { responseType: 'blob' }),
   getMyPayments: () => client.get('/finance/ledger/my-payments/'),

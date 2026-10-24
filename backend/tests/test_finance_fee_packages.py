@@ -109,7 +109,14 @@ def package_setup(db):
         out = []
         for h in picks:
             amounts = h.allowed_amounts or [0]
-            out.append({'head': str(h.id), 'amount': amounts[-1] if last else amounts[0]})
+            # `last=False` picks the head's "low" preset; prefer a non-zero one
+            # so packages remain saveable (₹0-only package totals now fail).
+            if last:
+                amount = amounts[-1]
+            else:
+                non_zero = [a for a in amounts if float(a) > 0]
+                amount = non_zero[0] if non_zero else amounts[0]
+            out.append({'head': str(h.id), 'amount': amount})
         return out
 
     return {
@@ -436,3 +443,34 @@ def test_broken_package_marked_not_valid_when_head_removed(package_setup):
     assert resolved[0]['is_valid'] is False
     assert resolved[0]['head_name'] == 'Other fee'  # snapshot fallback, never blank
     assert resolved[0]['amount'] == 3500.0
+
+
+@pytest.mark.django_db
+def test_all_zero_package_rejected(package_setup):
+    """Money-integrity guard: a package whose every item is ₹0 would let
+    Mark-Fee collect nothing while auto-setting the student. ₹0 items are
+    legal in mixed packages (waiver heads), but the total must be > 0."""
+    s = package_setup
+    reservation_head = s['heads']['Tuition fee']  # presets include 0 (waiver)
+    s['as_admin']()
+    res = s['client'].post(s['URL'], {
+        'name': 'Free Pkg', 'academic_year': str(s['year'].id),
+        'items': [{'head': str(reservation_head.id), 'amount': 0}],
+    }, format='json')
+    assert res.status_code == status.HTTP_400_BAD_REQUEST
+    assert 'greater than ₹0' in str(res.data)
+
+
+@pytest.mark.django_db
+def test_negative_head_preset_rejected(package_setup):
+    """Fee head config guard: negative presets/amounts must be refused so
+    waiver-style ₹0 presets stay possible but bad data cannot enter."""
+    s = package_setup
+    s['as_admin']()
+    res = s['client'].post('/api/v1/finance/fee-heads/', {
+        'name': 'Bad Preset Head', 'code': 'BAD-PRESET',
+        'academic_year': str(s['year'].id),
+        'allowed_amounts': [-500, 1000],
+    }, format='json')
+    assert res.status_code == status.HTTP_400_BAD_REQUEST
+    assert 'negative' in str(res.data)

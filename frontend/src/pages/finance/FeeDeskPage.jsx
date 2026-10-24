@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { 
   Search, RefreshCw, FileText, Printer,
@@ -11,8 +11,9 @@ import academicApi from '../../api/academicApi';
 import PageHeader from '../../components/common/PageHeader';
 import Modal from '../../components/common/Modal';
 import FormField from '../../components/common/FormField';
-import { LoadingState, EmptyState } from '../../components/common/StateDisplays';
+import { LoadingState, EmptyState, ErrorState } from '../../components/common/StateDisplays';
 import FeeReceiptPdfModal from '../../components/finance/FeeReceiptPdfModal';
+import { fetchAllListPages } from '../../utils/listPages';
 
 export default function FeeDeskPage() {
   const navigate = useNavigate();
@@ -56,6 +57,19 @@ export default function FeeDeskPage() {
   // Local fees map { [studentId]: { totalFee, isSet, breakdown } }
   const [feesMap, setFeesMap] = useState({});
 
+  // Set when any list page failed mid-fetch. The desk renders what it did
+  // load, but must warn that paid/unpaid status could be incomplete — a
+  // missing page must never print as "unpaid" at the counter.
+  const [listDataWarning, setListDataWarning] = useState('');
+  // A page-level load failure (403/500/network) is NOT the same as "no
+  // candidates": silently empty made a broken desk indistinguishable from
+  // an empty queue. loadError replaces the roster with a Retry screen.
+  const [loadError, setLoadError] = useState('');
+
+  // Only the newest fetchData run may apply state: fast successive searches
+  // would otherwise let an older multi-page run overwrite fresher results.
+  const fetchSeqRef = useRef(0);
+
   // Reset to first page when any filter criteria changes
   useEffect(() => {
     setCurrentPage(1);
@@ -77,6 +91,10 @@ export default function FeeDeskPage() {
   const [receiptStudent, setReceiptStudent] = useState(null);
   const [receiptRecord, setReceiptRecord] = useState(null);
   const [loadingReceipt, setLoadingReceipt] = useState(false);
+  // Receipt-lookup failure is NOT the same as "no receipt yet": if the ledger
+  // API call errors, say so, so the accounts desk never tells a parent
+  // "not found" because of a server hiccup.
+  const [receiptLookupError, setReceiptLookupError] = useState('');
 
   // Student whose fee was just set (from Set Fee page) pins at the top of
   // the desk so Mark Fee is one click away. Cleared via Clear Filters.
@@ -103,90 +121,181 @@ export default function FeeDeskPage() {
     if (isManual) setRefreshing(true);
     else setLoading(true);
     setError(null);
+    setLoadError('');
+    const seq = ++fetchSeqRef.current;
 
     try {
       // Fee status comes from the backend ledger only: assessments say a
       // fee was set, payment rows say it was paid. No browser storage.
-      // Pagination note: backend list APIs are paginated. We request one
-      // large page (students max 500, finance max 1000) so the whole college
-      // roster fits. The desk UI then pages 20 rows per screen client-side
-      // (PAGE_SIZE below) — i.e. backend gives "all 500 at once", UI shows
-      // "20 on screen page 1, next 20 on screen page 2", not "100 then next 100".
-      const [stuRes, deptsRes, yearsRes, ledgerRes, assessRes] = await Promise.allSettled([
+      //
+      // Data completeness: backend list APIs are page-capped (students 500,
+      // finance 1000). The roster still walks every server page via
+      // fetchAllListPages. The fee verdicts come from the compact
+      // /ledger/fee-status-map/ endpoint, which folds the COMPLETE
+      // assessment+ledger history server-side into one response — one
+      // finance request no matter how long history grows, and no client
+      // truncation mistakes ever again. If that endpoint is unavailable
+      // (older backend / transient failure), we fall back to walking every
+      // ledger+assessment page — complete, just heavier.
+      const [mapRes, stuRes, deptsRes, yearsRes] = await Promise.allSettled([
+        financeApi.getFeeStatusMap(),
         // Eligible-only is mandatory here: HOD + class-teacher verified
         // candidates (final_eligible) plus seated freshers with a teacher.
-        studentApi.getStudents({
+        fetchAllListPages(studentApi.getStudents, {
           search: search.trim() || undefined,
           page_size: 500,
           eligible_only: 'true',
         }),
-        academicApi.getDepartments(),
-        academicApi.getAcademicYears(),
-        financeApi.getPaymentLedgers({ page_size: 1000 }),
-        financeApi.getAssessments({ page_size: 1000 })
+        fetchAllListPages(academicApi.getDepartments, {}),
+        fetchAllListPages(academicApi.getAcademicYears, {}),
       ]);
 
-      if (stuRes.status === 'fulfilled') {
-        const rawStu = stuRes.value.data?.results || stuRes.value.data || [];
-        setStudents(rawStu);
-        setTotalCandidates(
-          stuRes.value.data?.count ?? (Array.isArray(rawStu) ? rawStu.length : 0)
+      // A newer search/refresh superseded this run — drop these results so a
+      // slow older fetch can never overwrite fresher data.
+      if (fetchSeqRef.current !== seq) return;
+
+      // Primary path: server-folded verdict map.
+      const mapUsable = mapRes.status === 'fulfilled'
+        && mapRes.value?.data
+        && typeof mapRes.value.data === 'object'
+        && mapRes.value.data.data !== null
+        && typeof mapRes.value.data.data === 'object';
+
+      let builtMap = {};
+      let mapIncomplete = false;
+      let verdictBroken = false;
+
+      if (mapUsable) {
+        builtMap = mapRes.value.data.data;
+      } else {
+        // Fallback (older backend / summary unavailable): walk every
+        // ledger+assessment page. Semantics identical to the server fold:
+        // assessments first (their list order), then ledgers overwrite
+        // (their list order), ₹0-due rows skipped.
+        console.error(
+          'Fee desk: fee-status-map unavailable; falling back to page walks.',
+          mapRes.status === 'rejected' ? mapRes.reason : mapRes.value?.data
         );
+        const [ledgerPages, assessPages] = await Promise.allSettled([
+          fetchAllListPages(financeApi.getPaymentLedgers, { page_size: 1000 }),
+          fetchAllListPages(financeApi.getAssessments, { page_size: 1000 }),
+        ]);
+        if (ledgerPages.status === 'rejected' || assessPages.status === 'rejected') {
+          // Bug-level throw — the walker usually fulfils instead.
+          verdictBroken = true;
+          console.error('Fee desk: fallback page walk rejected.', ledgerPages.reason, assessPages.reason);
+        } else {
+          // A walk is BROKEN when it failed while yielding zero rows
+          // (page-1 failure). Empty-but-clean (fresh college, no fee data
+          // yet) is a legitimate result, not a failure. Partial failures
+          // (some rows loaded, a later page failed) degrade to a warning.
+          const ledgerBroken = ledgerPages.value.incomplete
+            && ledgerPages.value.results.length === 0;
+          const assessBroken = assessPages.value.incomplete
+            && assessPages.value.results.length === 0;
+          mapIncomplete = ledgerPages.value.incomplete || assessPages.value.incomplete;
+          if (ledgerBroken || assessBroken) {
+            verdictBroken = true;
+          }
+          assessPages.value.results.forEach(a => {
+            if (a.student) {
+              builtMap[a.student] = {
+                totalFee: parseFloat(a.total_fee),
+                breakdown: a.fee_breakdown || {},
+                isSet: true,
+                assessmentId: a.id,
+                allowOnlinePayment: Boolean(a.allow_online_payment),
+                academicYearId: a.academic_year || null,
+                academicYearCode: a.academic_year_code || '',
+              };
+            }
+          });
+          ledgerPages.value.results.forEach(l => {
+            if (l.student && l.total_fee_due > 0) {
+              builtMap[l.student] = {
+                ...(builtMap[l.student] || {}),
+                totalFee: parseFloat(l.total_fee_due),
+                isSet: true,
+                isPaid: l.status === 'PAID',
+                amountPaid: parseFloat(l.amount_paid),
+                academicYearId: l.academic_year || builtMap[l.student]?.academicYearId || null,
+                academicYearCode: l.academic_year_code || builtMap[l.student]?.academicYearCode || '',
+              };
+            }
+          });
+        }
+      }
+
+      // Critical-load failure gate. Promise.allSettled never rejects, so the
+      // catch below was unreachable — every load failure (403/429/500/network)
+      // used to render as an empty roster: "No Eligible Candidates Found",
+      // indistinguishable from a college with zero candidates. The desk
+      // decides money on students + assessments + ledgers, so if ANY of those
+      // calls fails, stop and say so instead of showing a lying roster
+      // (a missing-fee overlay would mislabel paid students as unpaid).
+      // With the walkers never rejecting, "failed" means: fulfilled but with
+      // zero rows while flagged incomplete — a page-1 failure surfaces there.
+      const studentRosterBroken = stuRes.status === 'rejected' || (
+        stuRes.status === 'fulfilled'
+        && stuRes.value.incomplete
+        && stuRes.value.results.length === 0
+      );
+      const criticalFailed = studentRosterBroken
+        // A broken verdict read (fallback mode only) is just as unreliable
+        // as a missing ledger — the desk decides money on it.
+        || verdictBroken;
+      if (criticalFailed) {
+        // Don't apply partial data — a students-only load would show every
+        // candidate unpaid. Clear to a known-empty state behind a Retry screen.
+        setStudents([]);
+        setFeesMap({});
+        setTotalCandidates(0);
+        setListDataWarning('');
+        setLoadError(
+          'Could not load fee desk data — a server request failed ' +
+          '(session may have expired or the service is down). ' +
+          'The list below is not reliable right now; press Retry. ' +
+          'Do not record payments until the desk loads.'
+        );
+        return;
+      }
+      setLoadError('');
+
+      if (stuRes.status === 'fulfilled') {
+        setStudents(stuRes.value.results);
+        setTotalCandidates(stuRes.value.count ?? stuRes.value.results.length);
       }
 
       if (deptsRes.status === 'fulfilled') {
-        const rawDepts = deptsRes.value.data?.results || deptsRes.value.data || [];
-        setDepartments(rawDepts);
+        setDepartments(deptsRes.value.results);
       }
 
       if (yearsRes.status === 'fulfilled') {
-        const rawYears = yearsRes.value.data?.results || yearsRes.value.data || [];
-        setAcademicYears(rawYears);
+        setAcademicYears(yearsRes.value.results);
       }
 
-      // Build the desk map from backend truth: assessments (fee set)
-      // overlaid with payment rows (fee paid). academicYearId is stored so
-      // the Academic Year dropdown can actually filter (it was ignored before).
-      const builtMap = {};
-      if (assessRes.status === 'fulfilled') {
-        const assessments = assessRes.value.data?.results || assessRes.value.data || [];
-        assessments.forEach(a => {
-          if (a.student) {
-            builtMap[a.student] = {
-              totalFee: parseFloat(a.total_fee),
-              breakdown: a.fee_breakdown || {},
-              isSet: true,
-              assessmentId: a.id,
-              allowOnlinePayment: Boolean(a.allow_online_payment),
-              academicYearId: a.academic_year || null,
-              academicYearCode: a.academic_year_code || '',
-            };
-          }
-        });
-      }
-
-      // Check payment ledgers to mark paid candidates
-      if (ledgerRes.status === 'fulfilled') {
-        const ledgers = ledgerRes.value.data?.results || ledgerRes.value.data || [];
-        ledgers.forEach(l => {
-          if (l.student && l.total_fee_due > 0) {
-            builtMap[l.student] = {
-              ...(builtMap[l.student] || {}),
-              totalFee: parseFloat(l.total_fee_due),
-              isSet: true,
-              isPaid: l.status === 'PAID',
-              amountPaid: parseFloat(l.amount_paid),
-              academicYearId: l.academic_year || builtMap[l.student]?.academicYearId || null,
-              academicYearCode: l.academic_year_code || builtMap[l.student]?.academicYearCode || '',
-            };
-          }
-        });
-      }
       setFeesMap(builtMap);
+
+      // Page-level failures: warn instead of silently rendering a truncated
+      // view — a truncated view mislabels paid students as unpaid. Includes
+      // partially-failed fallback walks (fee-status-map succeeded ⇒ map is
+      // complete server-side, then mapIncomplete stays false).
+      const anyIncomplete = mapIncomplete || [stuRes, deptsRes, yearsRes]
+        .some(res => res.status === 'fulfilled' && res.value.incomplete);
+      // Filter dropdowns (departments/years) may fail independently of the
+      // critical data — degrade with a warning instead of hiding it.
+      const filterDataFailed = deptsRes.status === 'rejected' || yearsRes.status === 'rejected';
+      setListDataWarning(anyIncomplete || filterDataFailed
+        ? 'Some list or filter data failed to load. Paid/unpaid status may look incomplete — press Refresh to retry.'
+        : '');
 
     } catch (err) {
       console.error('Error loading candidate fee desk:', err);
-      setError('Failed to fetch eligible students for fee desk.');
+      // Unreachable through allSettled rejection, but a thrown bug (e.g. in
+      // state processing) must also fail visibly, never as an empty roster.
+      setLoadError('Failed to fetch fee desk data. Press Retry — the list is not reliable right now.');
+      setStudents([]);
+      setFeesMap({});
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -357,19 +466,30 @@ export default function FeeDeskPage() {
     setSubmittingPayment(true);
     setError(null);
 
-    const activeYear = academicYears.find(y => y.is_current) || academicYears[0];
+    // The ledger must attach to the SAME year the fee was assessed in — read
+    // from the fee data itself, not guessed as "the current year". In the
+    // normal same-day flow (Set Fee → pay immediately) both are identical, so
+    // behavior is unchanged; at a year transition this stops the 400
+    // "Set the admission fee first" mismatch for a prior-year assessment.
+    const feeYearId =
+      feesMap[markingStudent.id]?.academicYearId
+      || academicYears.find(y => y.is_current)?.id
+      || academicYears[0]?.id
+      || null;
     const amountVal = parseFloat(markForm.amountPaid) || 0;
 
     try {
       // No client receipt: the server sequences <ROMAN><YY><YY>-<nnnn> (e.g. IV2627-0001).
       const payload = {
         student: markingStudent.id,
-        academic_year: activeYear?.id,
+        academic_year: feeYearId,
         total_fee_due: amountVal,
         amount_paid: amountVal,
         payment_mode: markForm.paymentMode,
         transaction_ref: markForm.transactionRef || `OFFLINE-${Date.now()}`,
-        payment_date: new Date().toISOString().split('T')[0],
+        // IST local date for the official receipt. toISOString() is UTC and
+        // stamps collections made 00:00–05:30 IST with the previous day.
+        payment_date: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date()),
         remarks: markForm.remarks,
       };
 
@@ -414,6 +534,7 @@ export default function FeeDeskPage() {
     setShowReceiptModal(true);
     setLoadingReceipt(true);
     setReceiptRecord(null);
+    setReceiptLookupError('');
     try {
       const res = await financeApi.getPaymentLedgers({ search: student.enrollment_no || student.display_name });
       const records = res.data?.results || res.data || [];
@@ -423,6 +544,8 @@ export default function FeeDeskPage() {
       setReceiptRecord(studentRecords[0] || null);
     } catch (err) {
       console.error('Error fetching receipt:', err);
+      // A failed lookup must never read as "No Paid Receipt Found".
+      setReceiptLookupError('receipt lookup failed');
     } finally {
       setLoadingReceipt(false);
     }
@@ -475,6 +598,24 @@ export default function FeeDeskPage() {
           }}>
             <AlertCircle size={18} style={{ flexShrink: 0, color: '#dc2626' }} />
             <div style={{ fontWeight: 600 }}>{error}</div>
+          </div>
+        )}
+
+        {listDataWarning && !error && (
+          <div style={{
+            marginBottom: '1.25rem',
+            padding: '1rem 1.25rem',
+            background: '#fffbeb',
+            border: '1px solid #fde68a',
+            borderRadius: '10px',
+            color: '#92400e',
+            fontSize: '0.875rem',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.75rem',
+          }}>
+            <AlertCircle size={18} style={{ flexShrink: 0, color: '#d97706' }} />
+            <div style={{ fontWeight: 600 }}>{listDataWarning}</div>
           </div>
         )}
 
@@ -828,6 +969,17 @@ export default function FeeDeskPage() {
               {loading ? (
                 <div style={{ padding: '4rem 2rem' }}>
                   <LoadingState message="Loading eligible student candidates..." />
+                </div>
+              ) : loadError ? (
+                // A failed load must own the table region with an explicit
+                // error + retry; the empty state below means "loaded fine,
+                // genuinely zero matches" — never "the server was down".
+                <div style={{ padding: '3.5rem 1rem' }}>
+                  <ErrorState
+                    title="Failed to Load Fee Desk"
+                    message={loadError}
+                    onRetry={() => fetchData()}
+                  />
                 </div>
               ) : filteredStudents.length === 0 ? (
                 <div style={{ padding: '3.5rem 1rem' }}>
@@ -1901,6 +2053,7 @@ export default function FeeDeskPage() {
         record={receiptRecord}
         loadingRecord={loadingReceipt}
         studentName={receiptStudent?.display_name || ''}
+        lookupError={receiptLookupError}
       />
 
     </>

@@ -18,9 +18,22 @@ export default function FeeReceiptPdfModal({
   record,
   loadingRecord = false,
   studentName = '',
+  lookupError = '',
 }) {
   const [pdf, setPdf] = useState(null);
   const [error, setError] = useState('');
+
+  // Reset receipt-specific state every time the dialog is (re)opened or a
+  // different receipt is requested. Without this, a failed preview for one
+  // student would stick to the next student's dialog (error renders before
+  // the PDF, hiding a successfully loaded receipt).
+  useEffect(() => {
+    setPdf((previous) => {
+      if (previous?.url) URL.revokeObjectURL(previous.url);
+      return null;
+    });
+    setError('');
+  }, [isOpen, record?.id]);
 
   useEffect(() => {
     if (!isOpen || loadingRecord || !record?.id) {
@@ -65,6 +78,16 @@ export default function FeeReceiptPdfModal({
       <div style={{ minHeight: 260 }}>
         {loadingRecord || loading ? (
           <LoadingState message="Preparing official receipt..." />
+        ) : lookupError ? (
+          <div style={{ padding: '2.5rem 1rem', textAlign: 'center', color: '#b45309' }}>
+            <AlertCircle size={36} style={{ margin: '0 auto 0.75rem auto', color: '#d97706' }} />
+            <div style={{ fontSize: '1rem', fontWeight: 600, color: '#92400e' }}>
+              Couldn&apos;t check receipts right now — please retry.
+            </div>
+            <div style={{ fontSize: '0.85rem', marginTop: '0.25rem' }}>
+              This is a temporary server problem, not an answer that the receipt doesn&apos;t exist.
+            </div>
+          </div>
         ) : !record ? (
           <div style={{ padding: '2.5rem 1rem', textAlign: 'center', color: '#64748b' }}>
             <Printer size={36} style={{ margin: '0 auto 0.75rem auto', color: '#94a3b8' }} />

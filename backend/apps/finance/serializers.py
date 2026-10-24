@@ -37,6 +37,28 @@ class FeeHeadSerializer(serializers.ModelSerializer):
             'is_active',
         ]
 
+    def validate_amount(self, value):
+        if value is not None and value < 0:
+            raise serializers.ValidationError({'amount': 'Amount cannot be negative.'})
+        return value
+
+    def validate_allowed_amounts(self, value):
+        if value in (None, '', []):
+            return value
+        if not isinstance(value, list):
+            raise serializers.ValidationError(
+                {'allowed_amounts': 'Allowed amounts must be a list of numbers.'})
+        for item in value:
+            try:
+                num = Decimal(str(item))
+            except Exception:
+                raise serializers.ValidationError(
+                    {'allowed_amounts': f"'{item}' is not a valid amount."})
+            if num < 0:
+                raise serializers.ValidationError(
+                    {'allowed_amounts': 'Amounts cannot be negative.'})
+        return value
+
     def create(self, validated_data):
         if not validated_data.get('tag'):
             # Auto fallback tag from code or initials
@@ -202,6 +224,13 @@ class FeePackageSerializer(serializers.ModelSerializer):
 
         attrs['items'] = cleaned_items
         attrs['total'] = total.quantize(Decimal('0.01'))
+        # An all-₹0 package would produce "paid without collection" ledgers
+        # downstream. Individual ₹0 items stay legal (waiver heads such as
+        # SC/ST tuition), but the package total must contribute money.
+        if attrs['total'] <= Decimal('0'):
+            raise serializers.ValidationError(
+                {'items': 'Package total must be greater than ₹0 — at least one '
+                          'item needs a non-zero amount.'})
         return attrs
 
 
