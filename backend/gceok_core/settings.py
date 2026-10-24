@@ -308,6 +308,10 @@ if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_SSL_REDIRECT = True
+    # Behind nginx (HTTPS) -> gunicorn (HTTP) proxy: trust nginx's
+    # X-Forwarded-Proto header so is_secure() is True and the
+    # SECURE_SSL_REDIRECT above doesn't cause an infinite redirect loop.
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     # HSTS — 1 year, include subdomains.
     SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
