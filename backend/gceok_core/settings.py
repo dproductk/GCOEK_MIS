@@ -242,6 +242,15 @@ REST_FRAMEWORK = {
         'payment_status': '60/minute',
         'payment_callback': '60/minute',
     },
+    # Number of trusted proxies between the internet and Django (nginx → gunicorn).
+    # DRF throttling (rest_framework.throttling.BaseThrottle.get_ident) reads
+    # api_settings.NUM_PROXIES — which comes ONLY from this REST_FRAMEWORK dict —
+    # and then reads only the LAST 'NUM_PROXIES' entries of X-Forwarded-For, i.e.
+    # the address THIS server's nginx appended. Clients therefore cannot spoof
+    # earlier chain entries to evade IP-keyed rate limits.
+    # Set to 0 if running without a reverse proxy; increase by 1 per additional
+    # trusted proxy layer. Reference: backend/docs/AUTH_RATE_LIMITS.md
+    'NUM_PROXIES': 1,
     'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
 }
 
