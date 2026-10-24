@@ -14,7 +14,10 @@ from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle
+from apps.authentication.throttling import (
+    LoginIPRateThrottle,
+    LoginUserRateThrottle,
+)
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
@@ -55,12 +58,14 @@ class LoginView(APIView):
     Authenticate user with credentials, check lockout, and issue JWT tokens.
 
     POST /api/v1/auth/login/
-    Rate-limited to 5/min per SECURITY.md Sec 10 (plus account lockout).
+    Rate-limited (backend/docs/AUTH_RATE_LIMITS.md): 5/min per
+    (client IP, username) so students sharing a campus/lab IP don't throttle
+    each other, plus a 30/min per-IP backstop against password spraying —
+    in addition to the account lockout after 5 consecutive failures.
     """
 
     permission_classes = [permissions.AllowAny]
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'login'
+    throttle_classes = [LoginUserRateThrottle, LoginIPRateThrottle]
 
     def post(self, request):
         serializer = LoginSerializer(data=request.data, context={'request': request})
@@ -113,12 +118,14 @@ class TokenRefreshView(APIView):
     Refresh expired access token using the HttpOnly refresh cookie.
 
     POST /api/v1/auth/refresh/
-    Rate-limited to 5/min to prevent token refresh abuse (F-S4-002).
+    Rate-limited to 30/min per client IP to prevent token refresh abuse
+    (backend/docs/AUTH_RATE_LIMITS.md). Refresh is high-frequency and has
+    no username in the body, so it shares the per-IP backstop rather than
+    a per-account bucket.
     """
 
     permission_classes = [permissions.AllowAny]
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'login'
+    throttle_classes = [LoginIPRateThrottle]
 
     def post(self, request):
         refresh_token = request.COOKIES.get('refresh_token') or request.data.get('refresh')
@@ -201,12 +208,13 @@ class ChangePasswordView(APIView):
     Change user password with minimum length and history validation.
 
     POST /api/v1/auth/change-password/
-    Rate-limited to prevent brute-force against own account (F-S4-001).
+    Rate-limited to 5/min per authenticated account (per IP+user) to prevent
+    brute-force against the current-password field
+    (backend/docs/AUTH_RATE_LIMITS.md).
     """
 
     permission_classes = [permissions.IsAuthenticated]
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'login'
+    throttle_classes = [LoginUserRateThrottle]
 
     def post(self, request):
         serializer = ChangePasswordSerializer(

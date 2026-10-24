@@ -230,12 +230,12 @@ REST_FRAMEWORK = {
         'rest_framework.throttling.UserRateThrottle',
         'rest_framework.throttling.ScopedRateThrottle',
     ],
-    # SECURITY.md Sec 10 targets: login 5/min (scoped), import 10/hr
-    # (scoped), general authenticated use 1000/hr.
+    # Auth rate limits — canonical reference: backend/docs/AUTH_RATE_LIMITS.md
     'DEFAULT_THROTTLE_RATES': {
         'anon': '100/minute',
         'user': '1000/hour',
-        'login': '5/minute',
+        'login_user': '5/minute',
+        'login_ip': '30/minute',
         'import_upload': '10/hour',
         'payment_initiate': '10/minute',
         'payment_verify': '20/minute',
