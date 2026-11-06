@@ -54,6 +54,9 @@ backend/create_ee_test_accounts.py
 backend/create_entc_test_accounts.py
 backend/create_years_schemes.py
 backend/backfill_ee_promotion_merge.py
+backend/move_student_sem6_ee.py
+backend/set_sem2_div_a.py
+backend/report_last24h.py
 PROMPT_*.md
 
 # Node / Frontend
