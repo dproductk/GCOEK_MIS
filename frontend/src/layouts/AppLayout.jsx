@@ -23,6 +23,7 @@ import {
   Mail,
   Award,
   Lock,
+  IdCard,
 } from 'lucide-react';
 
 /**
@@ -129,6 +130,7 @@ const NAV_CONFIG = {
           { to: '/dashboard', label: 'Department Dashboard', icon: LayoutDashboard },
           { to: '/department/students', label: 'Student Directory', icon: Users },
           { to: '/department/students-admin', label: 'Student Account Admin', icon: UserCog },
+          { to: '/department/id-card-export', label: 'ID Card Export', icon: IdCard },
           { to: '/department/classes', label: 'Classes & Divisions', icon: GraduationCap },
           { to: '/mark-eligible', label: 'Mark Student Eligibility', icon: ClipboardList },
           { to: '/eligibility', label: 'Result Verification (Paused)', icon: ClipboardList },

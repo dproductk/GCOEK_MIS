@@ -7,6 +7,7 @@ Enforces:
 - Sensitive data reveal action protected by 'student.sensitive_reveal' permission with audit logging.
 - Student self-profile endpoint /api/v1/students/me/.
 """
+import re
 import uuid
 from django.db import models
 from django.utils import timezone
@@ -42,6 +43,191 @@ class StudentDirectoryPagination(PageNumberPagination):
     page_size = 50
     page_size_query_param = 'page_size'
     max_page_size = 500
+
+
+# Canonical self-service blood groups. The student_personal_details column
+# already exists (NOT NULL, default ''); students now complete it from their
+# own profile page, so every self-service write must stay canonical so the
+# stored value is report-ready ('A+', 'B-' ...) rather than free-form noise.
+BLOOD_GROUP_CANONICAL = ('A+', 'A-', 'B+', 'B-', 'O+', 'O-', 'AB+', 'AB-')
+
+
+def _canonical_blood_group(value):
+    """
+    Normalize free-form blood group spellings to the canonical ABO string.
+
+    Accepts admission-import and historical variants such as 'A+', 'A POS',
+    'A_POS', 'AB NEGATIVE', 'AB+VE', 'O NEG'. Blank input stays blank
+    (meaning "not filled yet"). Returns the canonical code (e.g. 'O+'), or
+    None when the text maps to no known group — the caller rejects the write
+    instead of persisting junk. Bare group letters without a rhesus marker
+    ('A', 'AB') are also rejected: every stored value must be unambiguous.
+    """
+    raw = str(value or '').strip().upper()
+    if not raw:
+        return ''
+    compact = re.sub(r'[\s_]', '', raw)
+    abo = None
+    for candidate in ('AB', 'A', 'B', 'O'):
+        if compact.startswith(candidate):
+            abo = candidate
+            break
+    if not abo:
+        return None
+    tail = compact[len(abo):]
+    if tail.startswith('+') or 'POS' in tail or 'PLUS' in tail:
+        rhesus = '+'
+    elif tail.startswith('-') or 'NEG' in tail or 'MINUS' in tail:
+        rhesus = '-'
+    else:
+        return None
+    return f'{abo}{rhesus}'
+
+
+def _profile_lock_missing(student):
+    """
+    One-time lock completeness audit.
+
+    A student may lock their profile only when every field they are
+    responsible for is filled and every required document is uploaded.
+    Mirrors the editable fields of the student profile UI: identity /
+    admission data locked server-side (gender, caste, religion, nationality,
+    mother_tongue, domicile_state) is never the student's responsibility and
+    is intentionally excluded.
+
+    Returns human-readable labels of everything still missing; an empty
+    list means the profile is complete and may be locked.
+    """
+
+    def _blank(value):
+        return not str(value or '').strip()
+
+    missing = []
+
+    # Personal details (create-on-first-edit row must exist with values).
+    personal = getattr(student, 'personal_details', None)
+    if personal is None:
+        missing.append('Personal details (all fields)')
+    else:
+        for field_name, label in (
+            ('date_of_birth', 'Date of Birth'),
+            ('place_of_birth', 'Place of Birth'),
+            ('student_email', 'Student Email'),
+            ('student_mobile', 'Mobile No. Linked to Aadhaar'),
+            ('blood_group', 'Blood Group'),
+            ('abc_id', 'ABC ID'),
+            ('marital_status', 'Marital Status'),
+        ):
+            if _blank(getattr(personal, field_name, None)):
+                missing.append(label)
+
+    # Guardians: father (name + parent mobile + annual income), mother name.
+    father = student.guardians.filter(relationship='FATHER').first()
+    if father is None or _blank(father.name):
+        missing.append("Father's Name")
+    if father is None or _blank(father.mobile):
+        missing.append('Parent Mobile No.')
+    if father is None or father.annual_income is None:
+        missing.append("Parent's Annual Income")
+    mother = student.guardians.filter(relationship='MOTHER').first()
+    if mother is None or _blank(mother.name):
+        missing.append("Mother's Name")
+
+    # Address: permanent row preferred, any saved address row accepted.
+    address = (
+        student.addresses.filter(address_type='PERMANENT').first()
+        or student.addresses.first()
+    )
+    if address is None:
+        missing.extend(['Address', 'District', 'State', 'Pincode'])
+    else:
+        for field_name, label in (
+            ('address_line_1', 'Address'),
+            ('district', 'District'),
+            ('state', 'State'),
+            ('pincode', 'Pincode'),
+        ):
+            if _blank(getattr(address, field_name, None)):
+                missing.append(label)
+
+    # Aadhaar: encrypted (or at minimum masked) number + name.
+    aadhaar = StudentAadhaarDetail.objects.filter(student=student).first()
+    if aadhaar is None:
+        missing.extend(['Aadhaar Number', 'Name As per Aadhaar'])
+    else:
+        if _blank(aadhaar.aadhaar_number_encrypted) and _blank(aadhaar.aadhaar_number_masked):
+            missing.append('Aadhaar Number')
+        if _blank(aadhaar.name_as_per_aadhaar):
+            missing.append('Name As per Aadhaar')
+
+    # Bank details: every field of the (single) primary account.
+    bank = student.bank_accounts.first()
+    if bank is None:
+        missing.append('Bank Account (holder name, bank, branch, IFSC, account no.)')
+    else:
+        for field_name, label in (
+            ('account_holder_name', 'Bank Account Holder Name'),
+            ('bank_name', 'Bank Name'),
+            ('branch_name', 'Branch Name'),
+            ('ifsc_code', 'IFSC Code'),
+            ('account_number_encrypted', 'Account No'),
+        ):
+            if _blank(getattr(bank, field_name, None)):
+                missing.append(label)
+
+    # Board records: SSC block plus exactly one senior block (HSC or Diploma).
+    ssc = student.board_records.filter(level='SSC').first()
+    if ssc is None:
+        missing.extend([
+            'SSC Board Name', 'SSC School Name', 'SSC Passing Year',
+            'SSC Seat / Roll Number', 'SSC Total Marks', 'SSC Percentage / CGPA',
+        ])
+    else:
+        for field_name, label in (
+            ('board', 'SSC Board Name'),
+            ('school_college', 'SSC School Name'),
+            ('passing_year', 'SSC Passing Year'),
+            ('seat_no', 'SSC Seat / Roll Number'),
+            ('marks_obtained', 'SSC Total Marks'),
+            ('percentage', 'SSC Percentage / CGPA'),
+        ):
+            if _blank(getattr(ssc, field_name, None)):
+                missing.append(label)
+    hsc = student.board_records.filter(level__in=('HSC', 'DIPLOMA')).first()
+    if hsc is None:
+        missing.extend([
+            'HSC / Diploma Stream', 'HSC / Diploma Board', 'HSC / Diploma College',
+            'HSC / Diploma Passing Year', 'HSC / Diploma Seat No.',
+            'HSC / Diploma Marks', 'HSC / Diploma Percentage',
+        ])
+    else:
+        for field_name, label in (
+            ('stream', 'HSC / Diploma Stream'),
+            ('board', 'HSC / Diploma Board'),
+            ('school_college', 'HSC / Diploma College'),
+            ('passing_year', 'HSC / Diploma Passing Year'),
+            ('seat_no', 'HSC / Diploma Seat No.'),
+            ('marks_obtained', 'HSC / Diploma Marks'),
+            ('percentage', 'HSC / Diploma Percentage'),
+        ):
+            if _blank(getattr(hsc, field_name, None)):
+                missing.append(label)
+
+    # Documents: every required upload must have at least one version on file.
+    uploaded = set(student.documents.values_list('document_type', flat=True))
+    for doc_type, label in (
+        ('PHOTO', 'Photo (document)'),
+        ('SIGNATURE', 'Signature (document)'),
+        ('AADHAAR', 'Aadhaar Card (document)'),
+        ('ALLOTMENT_LETTER', 'Institute Allotment Letter (document)'),
+        ('SSC_MARKSHEET', 'SSC Marksheet (document)'),
+    ):
+        if doc_type not in uploaded:
+            missing.append(label)
+    if 'HSC_MARKSHEET' not in uploaded and 'DIPLOMA_MARKSHEET' not in uploaded:
+        missing.append('HSC / Diploma Marksheet (document)')
+
+    return missing
 
 
 class StudentViewSet(viewsets.ReadOnlyModelViewSet):
@@ -405,6 +591,17 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
                         except DjangoValidationError:
                             raise ValidationError({'personal.student_email': 'Enter a valid email address.'})
                         value = str(value).strip()
+                    elif field_name == 'blood_group':
+                        # Canonicalize import/historical variants ('B_POS',
+                        # 'A NEGATIVE', 'O+ve') to the stored code ('B+',
+                        # 'A-', 'O+'); reject anything unmappable so garbage
+                        # never lands in a NOT NULL reportable column.
+                        canonical = _canonical_blood_group(value)
+                        if canonical is None:
+                            raise ValidationError(
+                                {'personal.blood_group': 'Invalid blood group. Use A+, A-, B+, B-, O+, O- or AB+, AB-.'}
+                            )
+                        value = canonical
                     elif isinstance(value, str):
                         value = value.strip()
                     if getattr(personal, field_name) != value:
@@ -683,6 +880,15 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
         """
         One-time permanent self-lock.
 
+        Blocked unless the profile is COMPLETE: every field the student is
+        responsible for is filled (personal details incl. blood group,
+        guardians, address, Aadhaar, bank, SSC + HSC/Diploma records) and
+        every required document is uploaded (photo, signature, Aadhaar card,
+        allotment letter, SSC marksheet, HSC/Diploma marksheet). Server-side
+        gate — the frontend check alone is advisory and is mirrored here so
+        an API caller cannot shortcut it. Identity/admission fields locked
+        server-side are excluded: never the student's responsibility.
+
         The student confirms they are done editing. After this call the
         profile can never be edited or self-uploaded again by the student
         (update_me + own document upload/delete return 403). Staff unlock
@@ -705,6 +911,18 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
         if student.profile_locked:
             return Response(
                 {'detail': 'Profile is already locked permanently.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        missing = _profile_lock_missing(student)
+        if missing:
+            return Response(
+                {
+                    'detail': (
+                        'Profile is incomplete. Fill every field and upload every '
+                        'document before locking.'
+                    ),
+                    'missing': missing,
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
         with transaction.atomic():
@@ -1512,4 +1730,97 @@ class StudentViewSet(viewsets.ReadOnlyModelViewSet):
             description=f"Deleted {display}.",
         )
         return Response({'detail': 'Document deleted.'}, status=status.HTTP_200_OK)
+
+    # ─── ID-card export pack (HOD portal) ─────────────────────────────────
+    # Read-only endpoints: summary page data + ZIP download described in
+    # apps.students.id_card. Gating is enforced INSIDE the actions (list
+    # routes never hit has_object_permission): HODs are pinned to their
+    # role-assigned department; ADMIN_HEAD/SYSADMIN are college-wide.
+    # Class teachers / faculty / accountants / students are denied.
+
+    def _id_card_department_ids(self):
+        """(dept_ids, deny). Both None => allowed; deny is an HTTP exception."""
+        from rest_framework.exceptions import PermissionDenied
+
+        scopes = get_user_scopes(self.request.user)
+        if scopes['is_system_wide'] or 'ADMIN_HEAD' in scopes['roles']:
+            return None, None  # college-wide caller; no department pinning
+        if 'HOD' not in scopes['roles']:
+            return None, PermissionDenied(
+                'Only HOD, Admin Head or Sysadmin may export ID card data.')
+        dept_ids = [d for d in scopes['department_ids'] if d]
+        if not dept_ids:
+            return None, PermissionDenied(
+                'Your HOD role assignment has no department attached. '
+                'Contact the system administrator.')
+        return dept_ids, None
+
+    @action(detail=False, methods=['get'], url_path='id-card-summary')
+    def id_card_summary(self, request):
+        """First-year student lock/photo/signature status board for the HOD."""
+        from apps.students.id_card import build_summary, id_card_students
+
+        dept_ids, deny = self._id_card_department_ids()
+        if deny is not None:
+            raise deny
+
+        students = id_card_students(dept_ids)
+        # Stamp the current enrollment once (same pattern as self.list()).
+        student_ids = [s.id for s in students]
+        enrollments = {
+            e.student_id: e
+            for e in StudentEnrollment.objects.filter(
+                student_id__in=student_ids, is_current=True
+            ).select_related('department', 'semester', 'division')
+        }
+        for s in students:
+            s._current_enrollment = enrollments.get(s.id)
+
+        payload = build_summary(students)
+        from apps.students.id_card import page_summary
+
+        payload = page_summary(
+            payload,
+            page=request.query_params.get('page', 1),
+            page_size=request.query_params.get('page_size', 500),
+        )
+        wanted = str(request.query_params.get('export_status') or '').strip().upper()
+        if wanted in ('READY', 'PENDING', 'LOCKED_INCOMPLETE'):
+            payload['students'] = [
+                row for row in payload['students'] if row['export_status'] == wanted]
+            payload['filtered'] = wanted
+        return Response(payload, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='id-card-export')
+    def id_card_export(self, request):
+        """Download the ID-card data pack ZIP (locked + image-complete only)."""
+        from django.http import HttpResponse
+
+        from apps.common.http import no_store as _no_store
+        from apps.students.id_card import build_export_zip, id_card_students
+
+        dept_ids, deny = self._id_card_department_ids()
+        if deny is not None:
+            raise deny
+
+        students = id_card_students(dept_ids)
+        zip_name, zip_bytes, report = build_export_zip(students)
+        audit_log(
+            request=request, actor=request.user, action=AuditLog.Action.SENSITIVE_REVEAL,
+            target_type='Student', target_id='ID_CARD_EXPORT',
+            target_display=f"ID Card Export ({report['department_code']})",
+            reason='ID card data pack download',
+            description=(
+                f"Exported {report['included']} first-year student image packs "
+                f"({report['skipped']} skipped: locked-without-images or pending) as {zip_name}."
+            ),
+        )
+        response = HttpResponse(zip_bytes, content_type='application/zip')
+        response['Content-Disposition'] = f'attachment; filename="{zip_name}"'
+        # CORS: the browser only surfaces listed headers to the SPA origin.
+        response['Access-Control-Expose-Headers'] = (
+            'Content-Disposition, X-Id-Card-Included, X-Id-Card-Skipped')
+        response['X-Id-Card-Included'] = str(report['included'])
+        response['X-Id-Card-Skipped'] = str(report['skipped'])
+        return _no_store(response)
 

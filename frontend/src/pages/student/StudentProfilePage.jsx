@@ -73,6 +73,24 @@ const normalizeScholarshipLabel = (v) => {
   return map[key] || 'NONE';
 };
 
+// Blood group options mirror the backend canonical set
+// (views.py BLOOD_GROUP_CANONICAL). Stored values are 'A+', 'B-', ...
+const BLOOD_GROUP_OPTIONS = ['A+', 'A-', 'B+', 'B-', 'O+', 'O-', 'AB+', 'AB-'];
+// Convert legacy/admission-import spellings ('B_POS', 'A NEGATIVE', 'O+ve')
+// into the canonical dropdown value. Unrecognized text displays as-is so a
+// previously stored odd value is never silently replaced while editing.
+const normalizeBloodGroup = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const compact = raw.toUpperCase().replace(/[\s_]/g, '');
+  const abo = ['AB', 'A', 'B', 'O'].find((candidate) => compact.startsWith(candidate));
+  if (!abo) return raw;
+  const tail = compact.slice(abo.length);
+  if (tail.startsWith('+') || tail.includes('POS') || tail.includes('PLUS')) return `${abo}+`;
+  if (tail.startsWith('-') || tail.includes('NEG') || tail.includes('MINUS')) return `${abo}-`;
+  return raw;
+};
+
 export default function StudentProfilePage() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -104,6 +122,7 @@ export default function StudentProfilePage() {
     gender: '',
     caste: '',
     maritalStatus: '',
+    bloodGroup: '',
     abcId: '',
     admittedYear: '',
     admissionType: '',
@@ -163,6 +182,7 @@ export default function StudentProfilePage() {
   // One-time lock modal (renamed Save -> Lock).
   const [showLockModal, setShowLockModal] = useState(false);
   const [lockEmptyFields, setLockEmptyFields] = useState([]);
+  const [lockMissingDocs, setLockMissingDocs] = useState([]);
   const [isLocking, setIsLocking] = useState(false);
   const [lockError, setLockError] = useState('');
   const [isSavingDraft, setIsSavingDraft] = useState(false);
@@ -180,6 +200,7 @@ export default function StudentProfilePage() {
     setSnapshot(null);
     setShowLockModal(false);
     setLockEmptyFields([]);
+    setLockMissingDocs([]);
     setLockError('');
   }, [id]);
 
@@ -256,6 +277,7 @@ export default function StudentProfilePage() {
           gender: p.gender === 'FEMALE' ? 'Female' : p.gender === 'OTHER' ? 'Other' : p.gender === 'MALE' ? 'Male' : '',
           caste: p.caste || '',
           maritalStatus: p.marital_status || '',
+          bloodGroup: normalizeBloodGroup(p.blood_group),
           abcId: p.abc_id || '',
           admittedYear: adm.admission_year || enr.academic_year_code || '',
           admissionType: adm.admission_type || (isDSY ? 'DIRECT_SECOND_YEAR' : ''),
@@ -435,6 +457,7 @@ export default function StudentProfilePage() {
     if (blank(formData.placeOfBirth)) empty.push('Place of Birth');
     if (!formData.dobDay || !formData.dobMonth || !formData.dobYear) empty.push('Date of Birth');
     if (blank(formData.maritalStatus)) empty.push('Marital Status');
+    if (blank(formData.bloodGroup)) empty.push('Blood Group');
     if (blank(formData.abcId)) empty.push('ABC ID');
     if (blank(formData.annualIncome)) empty.push("Parent's Annual Income");
     if (formData.scholarshipApplied === 'Yes' && !SCHOLARSHIP_CODE_VALUES.has(formData.scholarshipType)) empty.push('Scholarship Type');
@@ -464,6 +487,28 @@ export default function StudentProfilePage() {
     if (blank(formData.hscMarksObtained)) empty.push('HSC / Diploma Marks');
     if (blank(formData.hscPercentage)) empty.push('HSC / Diploma Percentage');
     return empty;
+  };
+
+  // Required documents for the one-time lock (all tabs). Returns the labels
+  // of every missing upload — a missing file hard-blocks the lock exactly
+  // like an empty field. Kept in sync with the server-side audit
+  // (_profile_lock_missing in apps/students/views.py).
+  const getMissingLockDocuments = () => {
+    const missing = [];
+    for (const [docType, label] of [
+      ['PHOTO', 'Photo (document)'],
+      ['SIGNATURE', 'Signature (document)'],
+      ['AADHAAR', 'Aadhaar Card (document)'],
+      ['ALLOTMENT_LETTER', 'Institute Allotment Letter (document)'],
+      ['SSC_MARKSHEET', 'SSC Marksheet (document)'],
+    ]) {
+      if (!latestDocOf(docType)) missing.push(label);
+    }
+    const hscDocType = isDSYStudent ? 'DIPLOMA_MARKSHEET' : 'HSC_MARKSHEET';
+    if (!latestDocOf(hscDocType)) {
+      missing.push(isDSYStudent ? 'Diploma Marksheet (document)' : 'HSC Marksheet (document)');
+    }
+    return missing;
   };
 
   // Shared frontend validation + payload build. Returns { payload } or { error }.
@@ -542,6 +587,7 @@ export default function StudentProfilePage() {
         student_mobile: formData.aadhaarMobile,
         student_email: studentEmailRaw,
         ...(formData.maritalStatus ? { marital_status: formData.maritalStatus } : {}),
+        blood_group: formData.bloodGroup,
         abc_id: formData.abcId,
       },
       scholarship_applied: scholarshipYes,
@@ -584,8 +630,10 @@ export default function StudentProfilePage() {
     return { payload };
   };
 
-  // Step 1: student clicks "Lock Profile" — validate, list empty fields,
-  // then show the warning modal. Nothing is saved yet (no accidental lock).
+  // Step 1: student clicks "Lock Profile" — validate, list everything still
+  // missing (fields + documents), then show the review modal. Nothing is
+  // saved yet (no accidental lock). The lock itself is hard-blocked until
+  // every item is complete — the modal treats missing items as blockers.
   const openLockModal = () => {
     if (!canEdit || isLocking) return;
     if (!isEditing) {
@@ -598,6 +646,7 @@ export default function StudentProfilePage() {
       return;
     }
     setLockEmptyFields(getEmptyEditableFields());
+    setLockMissingDocs(getMissingLockDocuments());
     setLockError('');
     setShowLockModal(true);
   };
@@ -647,6 +696,17 @@ export default function StudentProfilePage() {
   // nothing is locked on failure (no accidental / partial lock).
   const handleConfirmLock = async () => {
     if (!canEdit || isLocking) return;
+    // Hard completeness guard (frontend mirror of the server gate): every
+    // field filled and every document uploaded before the lock attempt.
+    const pendingFields = getEmptyEditableFields();
+    const pendingDocs = getMissingLockDocuments();
+    if (pendingFields.length || pendingDocs.length) {
+      setLockError(
+        `Lock blocked — ${pendingFields.length + pendingDocs.length} item(s) still missing. ` +
+        `Fill every field and upload every document first.`
+      );
+      return;
+    }
     setIsLocking(true);
     setLockError('');
     try {
@@ -679,7 +739,12 @@ export default function StudentProfilePage() {
         showFeedback('Profile locked permanently. No further edits are allowed.');
       } catch (err) {
         const data = err.response?.data;
-        setLockError(data?.detail || 'Saved, but lock failed. Your edits are saved — try Lock again. Nothing was locked accidentally.');
+        const missingFromServer = Array.isArray(data?.missing) && data.missing.length
+          ? ` Missing: ${data.missing.join(', ')}.`
+          : '';
+        setLockError(
+          (data?.detail || 'Saved, but lock failed. Your edits are saved — try Lock again. Nothing was locked accidentally.') + missingFromServer
+        );
       }
     } finally {
       setIsLocking(false);
@@ -1153,6 +1218,31 @@ export default function StudentProfilePage() {
                       value={formData.caste}
                       onChange={(e) => handleInputChange('caste', e.target.value)}
                     />
+                  </div>
+
+                  <div>
+                    <label
+                      style={{
+                        display: 'block',
+                        fontSize: '0.8125rem',
+                        fontWeight: 600,
+                        color: '#334155',
+                        marginBottom: '0.375rem',
+                      }}
+                    >
+                      Blood Group
+                    </label>
+                    <select
+                      className="edvana-select"
+                      disabled={fieldsLocked}
+                      value={formData.bloodGroup}
+                      onChange={(e) => handleInputChange('bloodGroup', e.target.value)}
+                    >
+                      <option value="">Select blood group</option>
+                      {BLOOD_GROUP_OPTIONS.map((bg) => (
+                        <option key={bg} value={bg}>{bg}</option>
+                      ))}
+                    </select>
                   </div>
 
                   <div>
@@ -2771,22 +2861,27 @@ export default function StudentProfilePage() {
         <p style={{ fontSize: '0.875rem', color: '#334155', lineHeight: 1.6, margin: '0 0 0.75rem' }}>
           Once you lock, <strong>all changes become permanent and you can never edit again</strong>.
           The Edit option will disappear. Only Admin Head can fix mistakes after that.
+          <strong> Hard rule:</strong> every field and every document (photo, signature, Aadhaar
+          card, allotment letter, both marksheets) must be complete before Lock is allowed.
         </p>
 
-        {lockEmptyFields.length > 0 ? (
-          <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem' }}>
-            <div style={{ fontSize: '0.8125rem', fontWeight: 700, color: '#92400e', marginBottom: '0.4rem' }}>
-              {lockEmptyFields.length} field{lockEmptyFields.length === 1 ? '' : 's'} left empty — they will stay empty forever:
+        {lockEmptyFields.length > 0 || lockMissingDocs.length > 0 ? (
+          <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem' }}>
+            <div style={{ fontSize: '0.8125rem', fontWeight: 700, color: '#991b1b', marginBottom: '0.4rem' }}>
+              Lock blocked — {lockEmptyFields.length + lockMissingDocs.length} item{(lockEmptyFields.length + lockMissingDocs.length) === 1 ? ' is' : 's are'} still missing. Every field and every document must be complete:
             </div>
-            <ul style={{ margin: 0, paddingLeft: '1.2rem', fontSize: '0.8125rem', color: '#78350f', lineHeight: 1.6, maxHeight: '180px', overflowY: 'auto' }}>
+            <ul style={{ margin: 0, paddingLeft: '1.2rem', fontSize: '0.8125rem', color: '#7f1d1d', lineHeight: 1.6, maxHeight: '220px', overflowY: 'auto' }}>
               {lockEmptyFields.map((label) => (
-                <li key={label}>{label}</li>
+                <li key={`field-${label}`}>{label} (field)</li>
+              ))}
+              {lockMissingDocs.map((label) => (
+                <li key={`doc-${label}`}>{label} (upload)</li>
               ))}
             </ul>
           </div>
         ) : (
           <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.8125rem', color: '#166534', fontWeight: 600 }}>
-            All editable fields are filled. You can still lock now — it will be permanent.
+            All fields are filled and all documents uploaded. You can lock now — it will be permanent.
           </div>
         )}
 
@@ -2807,8 +2902,9 @@ export default function StudentProfilePage() {
           <button
             type="button"
             onClick={handleConfirmLock}
-            disabled={isLocking || isSavingDraft}
+            disabled={isLocking || isSavingDraft || lockEmptyFields.length > 0 || lockMissingDocs.length > 0}
             className="edvana-btn edvana-btn-primary"
+            title={lockEmptyFields.length || lockMissingDocs.length ? 'Complete every missing field and document first' : 'Lock your profile permanently'}
             style={{ backgroundColor: '#dc2626', borderColor: '#dc2626', color: '#ffffff', fontWeight: 700 }}
           >
             {isLocking ? 'Locking…' : 'Lock Permanently'}

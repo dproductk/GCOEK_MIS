@@ -112,6 +112,21 @@ export const studentApi = {
    */
   deleteMyDocument: (docId) => client.delete(`/students/me/documents/${docId}/`),
   deleteStudentDocument: (id, docId) => client.delete(`/students/${id}/documents/${docId}/`),
+
+  // ─── HOD ID-card export pack (photo + signature + info sheet) ───
+  /**
+   * First-year status board: stats (total / locked / not locked / ready /
+   * needs-attention) + per-student lock & image-file status.
+   * Optional param: export_status ('READY' | 'PENDING' | 'LOCKED_INCOMPLETE').
+   */
+  getIDCardSummary: (params = {}) => client.get('/students/id-card-summary/', { params }),
+
+  /**
+   * Download the ID-card data pack ZIP (blob; only locked students with
+   * both photo+signature files are packaged).
+   */
+  downloadIDCardExport: () =>
+    client.get('/students/id-card-export/', { responseType: 'blob' }),
 };
 
 export default studentApi;

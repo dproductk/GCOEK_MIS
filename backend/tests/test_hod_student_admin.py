@@ -13,6 +13,10 @@ Covers:
    nothing mutated.
 7. SYSADMIN scope unchanged (regression).
 8. After an unlock, the student can self-lock again (re-lock loop works).
+9. One-time self-lock completeness gate: lock is blocked while any field
+   or required document is missing; a complete profile locks and loops.
+10. Blood group self-service writes are canonicalized ('B_POS' → 'B+')
+    and invalid values are rejected without partial writes.
 """
 import datetime
 
@@ -24,7 +28,17 @@ from rest_framework.test import APIClient
 from apps.academic_structure.models import AcademicYear, Department, Division, Program, Semester
 from apps.audit.models import AuditLog
 from apps.authentication.models import PasswordHistory, Role, RoleAssignment
-from apps.students.models import Student, StudentEnrollment
+from apps.students.models import (
+    Student,
+    StudentAddress,
+    StudentAadhaarDetail,
+    StudentBankAccount,
+    StudentBoardRecord,
+    StudentDocument,
+    StudentEnrollment,
+    StudentGuardian,
+    StudentPersonalDetail,
+)
 
 User = get_user_model()
 
@@ -107,6 +121,73 @@ def _unlocked_to_locked(student):
     return student
 
 
+def _complete_profile_for_lock(student):
+    """Fill every field + upload every document the self-lock gate requires.
+
+    Mirrors the one-time lock completeness rule in apps/students/views.py:
+    personal details (incl. blood group), guardians, address, Aadhaar,
+    bank, SSC + HSC board records and all mandatory documents.
+    """
+    StudentPersonalDetail.objects.create(
+        student=student,
+        date_of_birth=datetime.date(2006, 1, 15),
+        gender='MALE',
+        place_of_birth='Kolhapur',
+        student_email=f'{student.enrollment_no.lower()}@example.com',
+        student_mobile='9876543210',
+        blood_group='O+',
+        abc_id='1234-5678-9012',
+        marital_status='Unmarried',
+    )
+    StudentGuardian.objects.create(
+        student=student, relationship='FATHER', name='Father Name',
+        mobile='9876543211', annual_income=500000,
+    )
+    StudentGuardian.objects.create(
+        student=student, relationship='MOTHER', name='Mother Name', mobile='9876543212',
+    )
+    StudentAddress.objects.create(
+        student=student, address_type='PERMANENT',
+        address_line_1='Shivaji Nagar', district='Kolhapur',
+        state='Maharashtra', pincode='416001',
+    )
+    StudentAadhaarDetail.objects.create(
+        student=student,
+        aadhaar_number_encrypted='encrypted_aadhaar_1234',
+        aadhaar_number_masked='XXXX-XXXX-1234',
+        enrolment_id='ENR-1234',
+        name_as_per_aadhaar=student.display_name,
+    )
+    StudentBankAccount.objects.create(
+        student=student,
+        account_holder_name=student.display_name,
+        bank_name='State Bank of India',
+        branch_name='Kolhapur Main',
+        ifsc_code='SBIN0001234',
+        account_number_encrypted='encrypted_acc_9876',
+        account_number_masked='XXXXXXXX9876',
+        is_primary=True,
+    )
+    StudentBoardRecord.objects.create(
+        student=student, level='SSC', board='MSBSHSE',
+        school_college='Example High School', passing_year='2023',
+        seat_no='S123456', marks_obtained='500', percentage='89.56',
+    )
+    StudentBoardRecord.objects.create(
+        student=student, level='HSC', stream='Science',
+        board='MSBSHSE', school_college='Example College', passing_year='2025',
+        seat_no='H123456', marks_obtained='450', percentage='75.00',
+    )
+    for doc_type in (
+        'PHOTO', 'SIGNATURE', 'AADHAAR', 'ALLOTMENT_LETTER',
+        'SSC_MARKSHEET', 'HSC_MARKSHEET',
+    ):
+        StudentDocument.objects.create(
+            student=student, document_type=doc_type,
+            title=doc_type, file_path=f'students/{doc_type}.pdf',
+        )
+
+
 @pytest.mark.django_db
 class TestHodUnlock:
     def test_hod_unlocks_own_department_student(self, api_client, hod_setup):
@@ -171,12 +252,97 @@ class TestHodUnlock:
         assert res.status_code == status.HTTP_200_OK, res.data
         student.refresh_from_db()
         assert student.profile_locked is False
-        # Student re-locks themselves after the extra edit.
-        api_client.force_authenticate(user=hod_setup['student_a'].user)
+        # Student re-locks themselves after the extra edit — only allowed
+        # once the profile is fully complete (fields + documents).
+        _complete_profile_for_lock(student)
+        api_client.force_authenticate(user=student.user)
         lock_res = api_client.post('/api/v1/students/me/lock/', {}, format='json')
         assert lock_res.status_code == status.HTTP_200_OK, lock_res.data
         student.refresh_from_db()
         assert student.profile_locked is True
+
+
+@pytest.mark.django_db
+class TestOneTimeLockCompleteness:
+    """Self-lock only succeeds when every field + document is complete."""
+
+    def test_lock_blocked_when_profile_incomplete(self, api_client, hod_setup):
+        student = hod_setup['student_a']
+        assert student.profile_locked is False
+        api_client.force_authenticate(user=student.user)
+        res = api_client.post('/api/v1/students/me/lock/', {}, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST, res.data
+        student.refresh_from_db()
+        assert student.profile_locked is False
+        missing = res.data.get('missing')
+        assert isinstance(missing, list) and missing
+        # Personal details row absent → single consolidated label; the
+        # address and every document still get their own entries.
+        assert 'Personal details (all fields)' in missing
+        assert any('Address' in item for item in missing)
+        assert any('Photo' in item for item in missing)
+
+    def test_lock_allowed_when_complete_and_blood_group_stored(self, api_client, hod_setup):
+        student = hod_setup['student_a']
+        _complete_profile_for_lock(student)
+        api_client.force_authenticate(user=student.user)
+        res = api_client.post('/api/v1/students/me/lock/', {}, format='json')
+        assert res.status_code == status.HTTP_200_OK, res.data
+        student.refresh_from_db()
+        assert student.profile_locked is True
+        assert student.profile_locked_at is not None
+        assert student.personal_details.blood_group == 'O+'
+
+    def test_missing_marksheet_blocks_lock(self, api_client, hod_setup):
+        student = hod_setup['student_a']
+        _complete_profile_for_lock(student)
+        # Delete the HSC marksheet to prove the document gate alone blocks.
+        StudentDocument.objects.filter(student=student, document_type='HSC_MARKSHEET').delete()
+        api_client.force_authenticate(user=student.user)
+        res = api_client.post('/api/v1/students/me/lock/', {}, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST, res.data
+        student.refresh_from_db()
+        assert student.profile_locked is False
+        assert any('HSC' in item and 'document' in item for item in res.data['missing'])
+
+
+@pytest.mark.django_db
+class TestBloodGroupSelfService:
+    """Blood group self-service writes are canonical and validated."""
+
+    def test_variant_write_is_canonicalized(self, api_client, hod_setup):
+        student = hod_setup['student_a']
+        StudentPersonalDetail.objects.create(student=student, gender='MALE', student_mobile='9999999999')
+        api_client.force_authenticate(user=student.user)
+        res = api_client.patch('/api/v1/students/me/update/',
+                               {'personal': {'blood_group': 'B_POS'}}, format='json')
+        assert res.status_code == status.HTTP_200_OK, res.data
+        student.personal_details.refresh_from_db()
+        assert student.personal_details.blood_group == 'B+'
+
+    def test_spelled_out_variant_is_canonicalized(self, api_client, hod_setup):
+        student = hod_setup['student_a']
+        StudentPersonalDetail.objects.create(student=student, gender='MALE', student_mobile='9999999999')
+        api_client.force_authenticate(user=student.user)
+        res = api_client.patch('/api/v1/students/me/update/',
+                               {'personal': {'blood_group': 'ab negative'}}, format='json')
+        assert res.status_code == status.HTTP_200_OK, res.data
+        student.personal_details.refresh_from_db()
+        assert student.personal_details.blood_group == 'AB-'
+
+    def test_invalid_blood_group_rejected_no_partial_write(self, api_client, hod_setup):
+        student = hod_setup['student_a']
+        StudentPersonalDetail.objects.create(student=student, gender='MALE', student_mobile='9999999999')
+        api_client.force_authenticate(user=student.user)
+        res = api_client.patch('/api/v1/students/me/update/',
+                               {'personal': {'blood_group': 'BANANA'}}, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST, res.data
+        student.personal_details.refresh_from_db()
+        assert student.personal_details.blood_group == ''
+        # Bare group letter without rhesus is ambiguous — rejected too.
+        res = api_client.patch('/api/v1/students/me/update/',
+                               {'personal': {'blood_group': 'A'}}, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST, res.data
 
 
 @pytest.mark.django_db
